@@ -215,13 +215,20 @@ class NCS_Env(gym.Env):
         """Execute one timestep of the environment."""
         self.timestep += 1
 
-        # PROPER KALMAN FILTER: Step 1 - ALWAYS predict first (time update)
-        # This propagates all estimates forward using dynamics and control
+        # State index is the time index of the current plant state
+        # After reset: timestep=0, state is x[0]
+        # After first step: timestep=1, state is still x[0] before plant update
+        # We use state_index to clearly refer to which x[k] we're measuring
+        state_index = self.timestep - 1
+
+        # Store prior for each controller at current state index
+        # This enables delayed measurement handling in network mode
         if self.use_kalman_filter:
             for i in range(self.n_agents):
-                self.controllers[i].predict()
+                self.controllers[i].store_prior(state_index)
 
-        # PROPER KALMAN FILTER: Step 2 - Conditionally update with measurements
+        # Kalman filter measurement update (conditionally, based on packet delivery)
+        # Note: predict() is called AFTER plant update to maintain correct timing
         delivered_controller_ids = set()
 
         if self.perfect_communication:
@@ -234,7 +241,9 @@ class NCS_Env(gym.Env):
                         self.controllers[i].update(measurement)
                     self.last_measurements[i] = measurement
                     self._record_decision(i, status=1)
-                    self._log_successful_comm(i, self.timestep, self.timestep)
+                    # Use state_index for consistency (though _log_successful_comm
+                    # returns early for perfect_communication anyway)
+                    self._log_successful_comm(i, state_index, state_index)
                     delivered_controller_ids.add(i)
                 else:
                     self._record_decision(i, status=0)
@@ -244,7 +253,9 @@ class NCS_Env(gym.Env):
                 if action == 1:
                     state = self.plants[i].get_state()
                     measurement = state + self._sample_measurement_noise()
-                    measurement_timestamp = self.timestep
+                    # Use state_index as the measurement timestamp
+                    # This clearly indicates measurement is of x[state_index]
+                    measurement_timestamp = state_index
                     self.network.queue_data_packet(i, measurement, measurement_timestamp)
                     entry = self._record_decision(i, status=2)
                     entry["send_timestamp"] = measurement_timestamp
@@ -260,7 +271,9 @@ class NCS_Env(gym.Env):
                 measurement_timestamp = packet.payload["timestamp"]
 
                 if self.use_kalman_filter:
-                    self.controllers[controller_id].update(measurement)
+                    # Use delayed_update to properly handle network delays
+                    # This retrodicts to measurement time, updates, then predicts forward
+                    self.controllers[controller_id].delayed_update(measurement, measurement_timestamp)
                 self.last_measurements[controller_id] = measurement
                 ack_data = {
                     "ack_timestamp": self.timestep,
@@ -291,6 +304,13 @@ class NCS_Env(gym.Env):
             else:
                 u = -self.K @ self.last_measurements[i]
             self.plants[i].step(u)
+
+        # Kalman filter time update (predict) - done AFTER plant update
+        # This propagates estimates forward using dynamics and the control just applied
+        # Prepares x_hat[k|k-1] for the next timestep's measurement update
+        if self.use_kalman_filter:
+            for i in range(self.n_agents):
+                self.controllers[i].predict()
 
         rewards = {}
         for i in range(self.n_agents):
@@ -327,6 +347,8 @@ class NCS_Env(gym.Env):
             f"agent_{i}": self.timestep >= self.episode_length for i in range(self.n_agents)
         }
 
+        # Get observations AFTER plant update (Gym step contract)
+        # step() returns the resulting state s[k+1] after action a[k] is applied
         observations = self._get_observations()
         infos = self._get_info()
         return observations, rewards, terminated, truncated, infos

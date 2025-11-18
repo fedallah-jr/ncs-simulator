@@ -16,3 +16,5 @@ vis/
 *.png
 *.zip
 
+# Test files (development only)
+test_*.py
