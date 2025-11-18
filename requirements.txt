@@ -1,0 +1,8 @@
+numpy
+scipy
+filterpy
+gymnasium
+stable-baselines3
+torch
+pettingzoo
+matplotlib
