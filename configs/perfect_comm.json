@@ -1,0 +1,39 @@
+{
+  "system": {
+    "A": [[1.0, 0.01], [0.0, 1.0]],
+    "B": [[0.000025], [0.005]],
+    "process_noise_cov": [[0.01, 0.0], [0.0, 0.01]],
+    "measurement_noise_cov": [[0.0, 0.0], [0.0, 0.0]],
+    "initial_estimate_cov": [[1.0, 0.0], [0.0, 1.0]],
+    "initial_state_scale": 0.0
+  },
+  "lqr": {
+    "Q": [[5.0, 0.0], [0.0, 5.0]],
+    "R": [[0.1]]
+  },
+  "reward": {
+    "state_cost_matrix": [[1.0, 0.0], [0.0, 1.0]],
+    "state_error_reward": "difference",
+    "comm_recent_window": 10,
+    "comm_throughput_window": 200,
+    "comm_penalty_alpha": 0.0,
+    "comm_throughput_floor": 0.001
+  },
+  "observation": {
+    "history_window": 10,
+    "state_history_window": 10,
+    "throughput_window": 50,
+    "quantization_step": 0.05
+  },
+  "network": {
+    "data_rate_kbps": 250.0,
+    "data_packet_size": 50,
+    "ack_packet_size": 10,
+    "backoff_range": [0, 15],
+    "max_queue_size": 1,
+    "perfect_communication": true
+  },
+  "controller": {
+    "use_kalman_filter": true
+  }
+}

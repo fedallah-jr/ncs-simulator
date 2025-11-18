@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.log
+
+# Local tooling
+.venv/
+.env
+.idea/
+.vscode/
+.claude/
+
+# Generated artifacts and visuals
+outputs/
+vis/
+*.mp4
+*.png
+*.zip
+
