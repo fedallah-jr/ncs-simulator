@@ -45,23 +45,11 @@ Adjusting these parameters lets you explore different plant dynamics, estimator 
 
 ## Algorithms
 
-Learning-based baselines live under `algorithms/`. To try the tabular independent Q-learning trainer:
-
-```bash
-source ~/.venv/bin/activate
-python -m algorithms.independent_q_learning \
-    --config default_config.json \
-    --episodes 100 \
-    --episode-length 500
-```
-
-Neural baselines:
+Learning-based baselines live under `algorithms/`:
 
 - PPO (single agent, SB3): `python -m algorithms.ppo_single --config configs/perfect_comm.json --total-timesteps 200000`
 - DQN (single agent, SB3): `python -m algorithms.deep_q_learning --config configs/perfect_comm.json --total-timesteps 200000`
 
-CLI flags let you change discretization granularity, exploration schedule, and environment parameters. Pass `--stats-output path/to/file.csv` to persist the learning curve (per-episode totals) and `--trajectory-output path/to/file.csv` to store every per-step `(episode, step, agent_id, action, reward)` entry the trainer observes. The trainer spins up `ncs_env.env.NCS_Env`, discretizes each agent observation (`history`, throughput estimate, quantized state), and updates a per-agent Q-table with epsilon-greedy exploration. Use this as a sanity-check baseline or starting point for more advanced algorithms.
-
-Discretization logic and other reusable helpers live under `utils/`. For example, `utils.discretization.ObservationDiscretizer` is shared between algorithms so new learners can import it without duplicating binning code.
+CLI flags let you change environment parameters and logging paths. Pass `--stats-output path/to/file.csv` to persist the learning curve (per-episode totals) and `--trajectory-output path/to/file.csv` to store every per-step `(episode, step, agent_id, action, reward)` entry the trainer observes.
 
 Configuration presets live under `configs/`. `configs/perfect_comm.json` mirrors the default plant/network settings but forces `network.perfect_communication` to `true`, which is useful for debugging algorithms without channel contention.

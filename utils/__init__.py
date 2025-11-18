@@ -2,7 +2,6 @@
 Utility helpers shared across algorithms.
 """
 
-from .discretization import ObservationDiscretizer
 from .reward_normalization import (
     RewardNormalizer,
     ZScoreRewardNormalizer,
@@ -12,7 +11,6 @@ from .reward_normalization import (
 from .wrapper import SingleAgentWrapper
 
 __all__ = [
-    "ObservationDiscretizer",
     "RewardNormalizer",
     "ZScoreRewardNormalizer",
     "compute_reward_normalizer",
