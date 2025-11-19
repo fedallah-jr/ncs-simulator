@@ -5,7 +5,7 @@
     "process_noise_cov": [[0.01, 0.0], [0.0, 0.01]],
     "measurement_noise_cov": [[0.0, 0.0], [0.0, 0.0]],
     "initial_estimate_cov": [[1.0, 0.0], [0.0, 1.0]],
-    "initial_state_scale": 0.0
+    "initial_state_scale": [0.0, 0.0]
   },
   "lqr": {
     "Q": [[5.0, 0.0], [0.0, 5.0]],

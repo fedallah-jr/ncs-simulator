@@ -48,7 +48,7 @@
         1.0
       ]
     ],
-    "initial_state_scale": 2.0
+    "initial_state_scale": [2.0, 2.0]
   },
   "lqr": {
     "Q": [

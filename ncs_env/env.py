@@ -91,6 +91,7 @@ class NCS_Env(gym.Env):
         initial_estimate_cov = np.array(
             self.system_cfg.get("initial_estimate_cov", np.eye(self.state_dim))
         )
+        self.initial_state_scale_cfg = self.system_cfg.get("initial_state_scale", 2.0)
 
         lqr_cfg = self.config.get("lqr", {})
         lqr_Q = np.array(lqr_cfg.get("Q", np.eye(self.state_dim)))
@@ -115,9 +116,8 @@ class NCS_Env(gym.Env):
         self.comm_throughput_floor = float(reward_cfg.get("comm_throughput_floor", 1e-3))
 
         self.plants: List[Plant] = []
-        initial_scale = self.system_cfg.get("initial_state_scale", 2.0)
         for _ in range(self.n_agents):
-            x0 = np.random.randn(self.state_dim) * initial_scale
+            x0 = self._sample_initial_state()
             self.plants.append(Plant(A, B, W, x0))
 
         self.controllers: List[Controller] = []
@@ -192,9 +192,8 @@ class NCS_Env(gym.Env):
 
         self.timestep = 0
 
-        initial_scale = self.system_cfg.get("initial_state_scale", 2.0)
         for plant in self.plants:
-            x0 = np.random.randn(self.state_dim) * initial_scale
+            x0 = self._sample_initial_state()
             plant.reset(x0)
 
         for controller in self.controllers:
@@ -358,6 +357,26 @@ class NCS_Env(gym.Env):
         entry = {"timestamp": self.timestep, "status": status}
         self.decision_history[agent_idx].append(entry)
         return entry
+
+    def _sample_initial_state(self) -> np.ndarray:
+        """
+        Sample an initial plant state from a uniform distribution whose half-width
+        can be specified per state dimension.
+        """
+        scale_cfg = self.initial_state_scale_cfg
+        scale_arr = np.asarray(scale_cfg, dtype=float)
+        if scale_arr.ndim == 0:
+            high = np.full(self.state_dim, float(scale_arr))
+        else:
+            flat = scale_arr.flatten()
+            if flat.size != self.state_dim:
+                raise ValueError(
+                    "initial_state_scale must be scalar or contain one entry per state dimension"
+                )
+            high = flat
+        high = np.abs(high)
+        low = -high
+        return np.random.uniform(low=low, high=high)
 
     def _quantize_state(self, state: np.ndarray) -> np.ndarray:
         """Quantize the measured plant state."""

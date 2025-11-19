@@ -11,7 +11,7 @@ The configuration file is divided into sections; each key controls a specific as
 - `process_noise_cov`: Covariance of Gaussian process noise injected into each plant.
 - `measurement_noise_cov`: Covariance of sensor noise added before packets are queued; the Kalman filter uses the same value.
 - `initial_estimate_cov`: Initial covariance for each controller’s state estimate.
-- `initial_state_scale`: Standard-deviation multiplier for sampling each plant’s initial state.
+- `initial_state_scale`: Half-width of the uniform distribution used when sampling each plant’s initial state. Provide a scalar to use the same bound for all states, or a list/matrix whose flattened length equals the state dimension to set per-state ranges (`x_i ~ U(-a_i, a_i)`).
 
 ### `lqr`
 - `Q`, `R`: Cost matrices used to solve the discrete algebraic Riccati equation. They define how much the optimal controller cares about state deviation versus control effort.
