@@ -31,13 +31,18 @@ class SingleAgentWrapper(gym.Env):
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
         if self.env is None:
             self.env = self._make_env()
-        obs_dict, info = self.env.reset(seed=seed)
+        obs_dict, info = self.env.reset(seed=seed, options=options)
         return obs_dict["agent_0"], info
 
     def step(self, action):
         obs_dict, rewards, terminated, truncated, info = self.env.step({"agent_0": int(action)})
-        done = terminated["agent_0"] or truncated["agent_0"]
-        return obs_dict["agent_0"], float(rewards["agent_0"]), done, truncated["agent_0"], info
+        return (
+            obs_dict["agent_0"],
+            float(rewards["agent_0"]),
+            bool(terminated["agent_0"]),
+            bool(truncated["agent_0"]),
+            info,
+        )
 
     def close(self):
         if self.env is not None:
