@@ -8,10 +8,9 @@ import argparse
 import csv
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Callable, Optional
 
 import gymnasium as gym
-import numpy as np
 from stable_baselines3 import DQN
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
@@ -21,16 +20,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from algorithms.run_utils import prepare_run_directory, write_details_file
 from ncs_env.env import NCS_Env
 from utils import SingleAgentWrapper
-
-
-def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def make_env_fn(config_path: Optional[str], episode_length: int, seed: Optional[int]) -> Callable[[], gym.Env]:
@@ -46,40 +38,18 @@ def make_env_fn(config_path: Optional[str], episode_length: int, seed: Optional[
     return factory
 
 
-def run_evaluation(
-    model: DQN,
-    env: gym.Env,
-    episodes: int,
-    max_steps: int,
-    trajectory_path: Optional[Path],
-) -> None:
-    records: list[dict[str, Any]] = []
-    for ep in range(1, episodes + 1):
-        reset_out = env.reset()
-        obs = reset_out[0] if isinstance(reset_out, tuple) and len(reset_out) >= 1 else reset_out
-        for step in range(1, max_steps + 1):
-            action, _ = model.predict(obs, deterministic=True)
-            step_out = env.step(action)
-            if len(step_out) == 5:
-                obs, reward, done, truncated, _ = step_out
-            else:
-                obs, reward, done, info = step_out
-                truncated = False
-            if trajectory_path:
-                records.append(
-                    {
-                        "episode": ep,
-                        "step": step,
-                        "action": int(np.mean(action)),
-                        "reward": float(np.mean(reward)),
-                        "done": bool(np.any(done)),
-                        "truncated": bool(truncated),
-                    }
-                )
-            if bool(np.any(done)) or bool(truncated):
-                break
-    if trajectory_path:
-        _write_csv(trajectory_path, records, ["episode", "step", "action", "reward", "done", "truncated"])
+def save_training_rewards(vec_env: gym.Env, output_path: Path) -> None:
+    monitor_env = vec_env.venv if isinstance(vec_env, VecNormalize) else vec_env
+    rewards = []
+    if hasattr(monitor_env, "envs") and monitor_env.envs:
+        env = monitor_env.envs[0]
+        if hasattr(env, "get_episode_rewards"):
+            rewards = env.get_episode_rewards()
+    with output_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["episode", "reward"])
+        for idx, rew in enumerate(rewards, start=1):
+            writer.writerow([idx, rew])
 
 
 def parse_args() -> argparse.Namespace:
@@ -96,15 +66,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-update-interval", type=int, default=10_000, help="Target network update interval.")
     parser.add_argument("--eval-episodes", type=int, default=5, help="Eval episodes for best model.")
     parser.add_argument("--eval-freq", type=int, default=10_000, help="Eval frequency in env steps.")
-    parser.add_argument("--best-model-path", type=Path, default=Path("outputs/dqn_best_model"), help="Path to save best model.")
-    parser.add_argument("--eval-trajectory-output", type=Path, default=None, help="CSV path to save eval trajectories.")
-    parser.add_argument("--load-model", type=Path, default=None, help="Path to load a model for evaluation only.")
     parser.add_argument("--normalize-reward", action="store_true", help="Use VecNormalize for reward normalization.")
     parser.add_argument(
-        "--train-log-output",
+        "--output-root",
         type=Path,
-        default=None,
-        help="CSV path to save per-episode training rewards (from Monitor).",
+        default=Path("outputs"),
+        help="Base directory where run artifacts will be stored.",
     )
     return parser.parse_args()
 
@@ -112,6 +79,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config_path_str = str(args.config) if args.config is not None else None
+    run_dir, metadata = prepare_run_directory("dqn", args.config, args.output_root)
 
     def env_builder():
         env = NCS_Env(
@@ -129,54 +97,55 @@ def main() -> None:
         eval_env = VecNormalize(eval_env, norm_obs=False, norm_reward=True)
         eval_env.training = False
 
-    if args.load_model is not None:
-        model = DQN.load(args.load_model, env=train_env)
-    else:
-        eval_callback = EvalCallback(
-            eval_env,
-            best_model_save_path=str(args.best_model_path.parent),
-            log_path=str(args.best_model_path.parent / "eval_logs"),
-            eval_freq=args.eval_freq,
-            n_eval_episodes=args.eval_episodes,
-            deterministic=True,
-        )
-        model = DQN(
-            "MlpPolicy",
-            train_env,
-            learning_rate=args.learning_rate,
-            gamma=args.gamma,
-            batch_size=args.batch_size,
-            buffer_size=args.buffer_size,
-            train_freq=args.train_freq,
-            target_update_interval=args.target_update_interval,
-            seed=args.seed,
-            verbose=1,
-        )
-        model.learn(total_timesteps=args.total_timesteps, callback=eval_callback)
-        model.save(str(args.best_model_path))
-        print(f"Saved best model to {args.best_model_path}")
-        if args.train_log_output:
-            monitor_env = train_env.venv if isinstance(train_env, VecNormalize) else train_env
-            if hasattr(monitor_env, "envs") and monitor_env.envs:
-                rewards = monitor_env.envs[0].get_episode_rewards()
-                args.train_log_output.parent.mkdir(parents=True, exist_ok=True)
-                with args.train_log_output.open("w", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(["episode", "reward"])
-                    for idx, rew in enumerate(rewards, start=1):
-                        writer.writerow([idx, rew])
-                print(f"Saved training rewards to {args.train_log_output}")
+    eval_callback = EvalCallback(
+        eval_env,
+        best_model_save_path=str(run_dir),
+        log_path=str(run_dir),
+        eval_freq=args.eval_freq,
+        n_eval_episodes=args.eval_episodes,
+        deterministic=True,
+    )
+    model = DQN(
+        "MlpPolicy",
+        train_env,
+        learning_rate=args.learning_rate,
+        gamma=args.gamma,
+        batch_size=args.batch_size,
+        buffer_size=args.buffer_size,
+        train_freq=args.train_freq,
+        target_update_interval=args.target_update_interval,
+        seed=args.seed,
+        verbose=1,
+    )
+    model.learn(total_timesteps=args.total_timesteps, callback=eval_callback)
+    latest_model_path = run_dir / "latest_model"
+    model.save(str(latest_model_path))
 
-    if args.eval_episodes > 0:
-        run_evaluation(
-            model,
-            eval_env,
-            episodes=args.eval_episodes,
-            max_steps=args.episode_length,
-            trajectory_path=args.eval_trajectory_output,
-        )
-        if args.eval_trajectory_output:
-            print(f"Saved evaluation trajectories to {args.eval_trajectory_output}")
+    training_rewards_path = run_dir / "training_rewards.csv"
+    save_training_rewards(train_env, training_rewards_path)
+
+    hyperparams = {
+        "total_timesteps": args.total_timesteps,
+        "episode_length": args.episode_length,
+        "learning_rate": args.learning_rate,
+        "gamma": args.gamma,
+        "batch_size": args.batch_size,
+        "buffer_size": args.buffer_size,
+        "train_freq": args.train_freq,
+        "target_update_interval": args.target_update_interval,
+        "eval_freq": args.eval_freq,
+        "eval_episodes": args.eval_episodes,
+        "normalize_reward": args.normalize_reward,
+        "seed": args.seed,
+    }
+    write_details_file(run_dir, metadata, hyperparams)
+
+    print(f"Run artifacts stored in {run_dir}")
+    print("Files created:")
+    print(f"  - Best model and evaluation logs (EvalCallback outputs) in {run_dir}")
+    print(f"  - Latest model: {latest_model_path}.zip")
+    print(f"  - Training rewards: {training_rewards_path}")
+    print(f"  - Details: {run_dir / 'details.txt'}")
 
     train_env.close()
     eval_env.close()
