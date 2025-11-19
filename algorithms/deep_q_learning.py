@@ -20,9 +20,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from algorithms.run_utils import prepare_run_directory, write_details_file
 from ncs_env.env import NCS_Env
 from utils import SingleAgentWrapper
+from utils.run_utils import prepare_run_directory, write_details_file
 
 
 def make_env_fn(config_path: Optional[str], episode_length: int, seed: Optional[int]) -> Callable[[], gym.Env]:
