@@ -2,13 +2,13 @@
   "system": {
     "A": [[1.0, 0.01], [0.0, 1.0]],
     "B": [[0.000025], [0.005]],
-    "process_noise_cov": [[0.01, 0.0], [0.0, 0.01]],
+    "process_noise_cov": [[0.1, 0.0], [0.0, 0.1]],
     "measurement_noise_cov": [[0.0, 0.0], [0.0, 0.0]],
     "initial_estimate_cov": [[1.0, 0.0], [0.0, 1.0]],
-    "initial_state_scale": [0.0, 0.0]
+    "initial_state_scale": [1.0, 1.0]
   },
   "lqr": {
-    "Q": [[5.0, 0.0], [0.0, 5.0]],
+    "Q": [[1.0, 0.0], [0.0, 1.0]],
     "R": [[0.1]]
   },
   "reward": {
@@ -23,7 +23,7 @@
     "history_window": 10,
     "state_history_window": 10,
     "throughput_window": 50,
-    "quantization_step": 0.05
+    "quantization_step": 0
   },
   "network": {
     "data_rate_kbps": 250.0,

@@ -65,6 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor.")
     parser.add_argument("--batch-size", type=int, default=64, help="PPO batch size.")
     parser.add_argument("--n-steps", type=int, default=2048, help="PPO rollout length.")
+    parser.add_argument("--ent-coef", type=float, default=0.0, help="PPO entropy coefficient.")
     parser.add_argument("--eval-episodes", type=int, default=5, help="Eval episodes for best model.")
     parser.add_argument("--eval-freq", type=int, default=10_000, help="Eval frequency in env steps.")
     parser.add_argument("--normalize-reward", action="store_true", help="Use VecNormalize for reward normalization.")
@@ -109,6 +110,7 @@ def main() -> None:
         gamma=args.gamma,
         n_steps=args.n_steps,
         batch_size=args.batch_size,
+        ent_coef=args.ent_coef,
         seed=args.seed,
         verbose=1,
     )
@@ -126,6 +128,7 @@ def main() -> None:
         "gamma": args.gamma,
         "batch_size": args.batch_size,
         "n_steps": args.n_steps,
+        "ent_coef": args.ent_coef,
         "eval_freq": args.eval_freq,
         "eval_episodes": args.eval_episodes,
         "normalize_reward": args.normalize_reward,
