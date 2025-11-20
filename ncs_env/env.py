@@ -52,8 +52,8 @@ class NCS_Env(gym.Env):
         self.throughput_window = max(1, observation_cfg.get("throughput_window", 50))
         self.quantization_step = observation_cfg.get("quantization_step", 0.05)
 
-        if seed is not None:
-            np.random.seed(seed)
+        # Create a local RNG instance for this environment
+        self.np_random, _ = gym.utils.seeding.np_random(seed)
 
         self.action_space = spaces.Dict(
             {f"agent_{i}": spaces.Discrete(2) for i in range(n_agents)}
@@ -118,7 +118,8 @@ class NCS_Env(gym.Env):
         self.plants: List[Plant] = []
         for _ in range(self.n_agents):
             x0 = self._sample_initial_state()
-            self.plants.append(Plant(A, B, W, x0))
+            # Pass self.np_random to Plant for isolated RNG
+            self.plants.append(Plant(A, B, W, x0, rng=self.np_random))
 
         self.controllers: List[Controller] = []
         for _ in range(self.n_agents):
@@ -144,6 +145,7 @@ class NCS_Env(gym.Env):
             ack_packet_size=network_cfg.get("ack_packet_size", 10),
             backoff_range=tuple(network_cfg.get("backoff_range", (0, 15))),
             max_queue_size=network_cfg.get("max_queue_size", 1),
+            rng=self.np_random,
         )
 
     def _initialize_tracking_structures(self):
@@ -187,18 +189,22 @@ class NCS_Env(gym.Env):
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None):
         """Reset environment to initial state."""
-        if seed is not None:
-            np.random.seed(seed)
+        # This call updates self.np_random with a new seed if provided
+        super().reset(seed=seed)
 
         self.timestep = 0
 
+        # Update RNG references in subsystems after super().reset()
+        # This ensures all subsystems use the same isolated RNG stream
         for plant in self.plants:
+            plant.rng = self.np_random
             x0 = self._sample_initial_state()
             plant.reset(x0)
 
         for controller in self.controllers:
             controller.reset(np.zeros(self.state_dim))
 
+        self.network.rng = self.np_random
         self.network.reset()
         self._initialize_tracking_structures()
         for idx in range(self.n_agents):
@@ -395,7 +401,7 @@ class NCS_Env(gym.Env):
             high = flat
         high = np.abs(high)
         low = -high
-        return np.random.uniform(low=low, high=high)
+        return self.np_random.uniform(low=low, high=high)
 
     def _quantize_state(self, state: np.ndarray) -> np.ndarray:
         """Quantize the measured plant state."""
@@ -423,7 +429,7 @@ class NCS_Env(gym.Env):
         """Return measurement noise vector (zero when disabled)."""
         if not self._has_measurement_noise:
             return np.zeros(self.state_dim)
-        return np.random.multivariate_normal(np.zeros(self.state_dim), self.measurement_noise_cov)
+        return self.np_random.multivariate_normal(np.zeros(self.state_dim), self.measurement_noise_cov)
 
     def _log_successful_comm(self, agent_idx: int, send_timestamp: int, ack_timestamp: int) -> None:
         """Record ACKed packet for throughput-based penalties."""

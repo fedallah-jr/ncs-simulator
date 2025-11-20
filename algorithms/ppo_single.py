@@ -91,8 +91,8 @@ def main() -> None:
     train_env: gym.Env = DummyVecEnv([env_fn])
     eval_env: gym.Env = DummyVecEnv([env_fn])
     if args.normalize_reward:
-        train_env = VecNormalize(train_env, norm_obs=False, norm_reward=True)
-        eval_env = VecNormalize(eval_env, norm_obs=False, norm_reward=True)
+        train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True)
+        eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True)
         eval_env.training = False
 
     eval_callback = EvalCallback(

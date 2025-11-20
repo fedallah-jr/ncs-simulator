@@ -46,6 +46,7 @@ class NetworkModel:
         backoff_range: Tuple[int, int] = (0, 15),
         max_queue_size: int = 1,
         timestep_duration: float = 0.01,
+        rng: np.random.Generator = None,
     ):
         self.n_agents = n_agents
         self.data_rate_kbps = data_rate_kbps
@@ -54,6 +55,8 @@ class NetworkModel:
         self.backoff_range = backoff_range
         self.max_queue_size = max_queue_size
         self.timestep_duration = timestep_duration
+        # Use provided RNG or create a new isolated one
+        self.rng = rng if rng is not None else np.random.default_rng()
 
         self.data_tx_duration = self._compute_tx_duration(self.data_packet_size)
         self.ack_tx_duration = self._compute_tx_duration(self.ack_packet_size)
@@ -218,7 +221,7 @@ class NetworkModel:
         """Compute a random backoff duration using exponential backoff."""
         min_backoff, max_backoff = self.backoff_range
         expanded_max = min(max_backoff * (2 ** collision_count), max_backoff * 16)
-        return int(np.random.randint(min_backoff, expanded_max + 1))
+        return int(self.rng.integers(min_backoff, expanded_max + 1))
 
     def _compute_tx_duration(self, packet_size_bytes: int) -> int:
         """Compute number of timesteps needed to send a packet of given size."""
