@@ -26,7 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # Local imports
 from ncs_env.env import NCS_Env
 from utils import SingleAgentWrapper
-from utils.run_utils import prepare_run_directory, write_details_file
+from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
 
 def make_ncs_single_env(config_path: Optional[str], episode_length: int, seed: Optional[int]) -> SingleAgentWrapper:
@@ -131,14 +131,14 @@ def main() -> None:
         "normalize_reward": args.normalize_reward,
         "seed": args.seed,
     }
-    write_details_file(run_dir, metadata, hyperparams)
+    save_config_with_hyperparameters(run_dir, args.config, "ppo", hyperparams)
 
     print(f"Run artifacts stored in {run_dir}")
     print("Files created:")
     print(f"  - Best model and evaluation logs (EvalCallback outputs) in {run_dir}")
     print(f"  - Latest model: {latest_model_path}.zip")
     print(f"  - Training rewards: {training_rewards_path}")
-    print(f"  - Details: {run_dir / 'details.txt'}")
+    print(f"  - Config with hyperparameters: {run_dir / 'config.json'}")
 
     train_env.close()
     eval_env.close()

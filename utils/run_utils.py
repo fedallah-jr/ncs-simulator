@@ -119,27 +119,41 @@ def prepare_run_directory(
     return run_dir, metadata
 
 
-def write_details_file(
-    run_dir: Path, metadata: ConfigMetadata, hyperparams: Mapping[str, Any]
+def save_config_with_hyperparameters(
+    run_dir: Path,
+    config_path: Optional[Path],
+    algorithm: str,
+    hyperparams: Mapping[str, Any]
 ) -> None:
-    init_values = ", ".join(_format_float(float(x)) for x in metadata.initial_state_scale)
-    lines = [
-        f"timestamp: {datetime.utcnow().isoformat()}Z",
-        f"algorithm: {metadata.algorithm}",
-        f"config_path: {metadata.config_path}",
-        "",
-        "[Config Summary]",
-        f"process_noise_cov_00: {metadata.process_noise_first}",
-        f"measurement_noise_cov_00: {metadata.measurement_noise_first}",
-        f"initial_state_scale: {init_values}",
-        f"Q_00: {metadata.q_first}",
-        f"R_00: {metadata.r_first}",
-        f"reward_mode: {metadata.reward_type}",
-        "",
-        "[Algorithm Hyperparameters]",
-    ]
-    for key, value in sorted(hyperparams.items()):
-        lines.append(f"{key}: {value}")
-    details_path = run_dir / "details.txt"
-    with details_path.open("w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+    """
+    Save the full configuration JSON with an added 'training_run' section.
+
+    This preserves the complete config in structured format and appends
+    hyperparameters and metadata for this specific training run.
+
+    Args:
+        run_dir: Directory where the config will be saved
+        config_path: Path to the original config file (or None for default)
+        algorithm: Algorithm name (e.g., 'dqn', 'ppo')
+        hyperparams: Dictionary of hyperparameters for this run
+    """
+    from ncs_env.config import load_config, DEFAULT_CONFIG_PATH
+    import json
+
+    # Load the original config
+    resolved_config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
+    config = load_config(str(resolved_config_path))
+
+    # Add training_run section with hyperparameters and metadata
+    config["training_run"] = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "algorithm": algorithm,
+        "source_config_path": str(resolved_config_path),
+        "hyperparameters": dict(hyperparams)
+    }
+
+    # Save to run directory
+    output_path = run_dir / "config.json"
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")  # Add trailing newline

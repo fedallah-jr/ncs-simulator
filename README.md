@@ -55,6 +55,40 @@ CLI flags let you change environment parameters. Use `--output-root` (defaults t
 - SB3 `EvalCallback` files (`best_model.zip`, `evaluations.npz` and friends) so the strongest checkpoint and evaluation history are co-located.
 - `latest_model.zip` with the final policy snapshot after training completes.
 - `training_rewards.csv`, a simple `[episode, reward]` table pulled from the `Monitor` wrapper to visualize learning curves later.
-- `details.txt`, which logs a timestamped summary of the config plus every CLI hyperparameter so the run can be reproduced when new algorithms are added.
+- **`config.json`**, which combines the full environment configuration with a `training_run` section containing the algorithm name, timestamp, source config path, and all hyperparameters from the run. This structured format makes it easy to reload configurations or use them directly with visualization tools.
 
 Configuration presets live under `configs/`. `configs/perfect_comm.json` mirrors the default plant/network settings but forces `network.perfect_communication` to `true`, which is useful for debugging algorithms without channel contention.
+
+### Saved Configuration Format
+
+The `config.json` file saved in each run directory preserves the complete environment configuration and adds a `training_run` section with metadata:
+
+```json
+{
+  "system": { ... },
+  "lqr": { ... },
+  "reward": { ... },
+  "observation": { ... },
+  "network": { ... },
+  "controller": { ... },
+  "training_run": {
+    "timestamp": "2025-11-20T12:34:56Z",
+    "algorithm": "dqn",
+    "source_config_path": "/path/to/original/config.json",
+    "hyperparameters": {
+      "total_timesteps": 200000,
+      "episode_length": 1000,
+      "learning_rate": 0.001,
+      "gamma": 0.99,
+      "batch_size": 64,
+      ...
+    }
+  }
+}
+```
+
+This format allows you to:
+- Reproduce the exact run by loading `config.json`
+- Pass it directly to visualization or analysis tools
+- Track which config file was used as the base
+- Compare hyperparameters across different runs programmatically

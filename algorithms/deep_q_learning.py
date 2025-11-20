@@ -22,18 +22,19 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from ncs_env.env import NCS_Env
 from utils import SingleAgentWrapper
-from utils.run_utils import prepare_run_directory, write_details_file
+from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
 
 def make_env_fn(config_path: Optional[str], episode_length: int, seed: Optional[int]) -> Callable[[], gym.Env]:
     def factory():
-        env = NCS_Env(
-            n_agents=1,
-            episode_length=episode_length,
-            config_path=config_path,
-            seed=seed,
-        )
-        return SingleAgentWrapper(lambda: env)
+        def env_factory():
+            return NCS_Env(
+                n_agents=1,
+                episode_length=episode_length,
+                config_path=config_path,
+                seed=seed,
+            )
+        return SingleAgentWrapper(env_factory)
 
     return factory
 
@@ -82,13 +83,14 @@ def main() -> None:
     run_dir, metadata = prepare_run_directory("dqn", args.config, args.output_root)
 
     def env_builder():
-        env = NCS_Env(
-            n_agents=1,
-            episode_length=args.episode_length,
-            config_path=config_path_str,
-            seed=args.seed,
-        )
-        return SingleAgentWrapper(lambda: env)
+        def factory():
+            return NCS_Env(
+                n_agents=1,
+                episode_length=args.episode_length,
+                config_path=config_path_str,
+                seed=args.seed,
+            )
+        return SingleAgentWrapper(factory)
 
     train_env: gym.Env = DummyVecEnv([lambda: Monitor(env_builder())])
     eval_env: gym.Env = DummyVecEnv([lambda: Monitor(env_builder())])
@@ -138,14 +140,14 @@ def main() -> None:
         "normalize_reward": args.normalize_reward,
         "seed": args.seed,
     }
-    write_details_file(run_dir, metadata, hyperparams)
+    save_config_with_hyperparameters(run_dir, args.config, "dqn", hyperparams)
 
     print(f"Run artifacts stored in {run_dir}")
     print("Files created:")
     print(f"  - Best model and evaluation logs (EvalCallback outputs) in {run_dir}")
     print(f"  - Latest model: {latest_model_path}.zip")
     print(f"  - Training rewards: {training_rewards_path}")
-    print(f"  - Details: {run_dir / 'details.txt'}")
+    print(f"  - Config with hyperparameters: {run_dir / 'config.json'}")
 
     train_env.close()
     eval_env.close()
