@@ -72,12 +72,18 @@ class NetworkModel:
 
     def queue_data_packet(
         self, sensor_id: int, state_measurement: np.ndarray, measurement_timestamp: int
-    ):
-        """Queue a data packet from a sensor."""
+    ) -> Optional[Packet]:
+        """Queue a data packet from a sensor.
+
+        Returns:
+            The overwritten packet if one was dropped, None otherwise.
+        """
         entity_idx = sensor_id
         entity = self.entities[entity_idx]
 
+        overwritten_packet = None
         if entity.pending_packet is not None and self.max_queue_size == 1:
+            overwritten_packet = entity.pending_packet
             entity.pending_packet = None
 
         packet = Packet(
@@ -94,12 +100,20 @@ class NetworkModel:
             entity.state = EntityState.BACKING_OFF
             entity.backoff_counter = self._compute_backoff(entity.collision_count)
 
-    def queue_ack_packet(self, controller_id: int, ack_data: Dict):
-        """Queue an ACK packet from a controller."""
+        return overwritten_packet
+
+    def queue_ack_packet(self, controller_id: int, ack_data: Dict) -> Optional[Packet]:
+        """Queue an ACK packet from a controller.
+
+        Returns:
+            The overwritten packet if one was dropped, None otherwise.
+        """
         entity_idx = self.n_agents + controller_id
         entity = self.entities[entity_idx]
 
+        overwritten_packet = None
         if entity.pending_packet is not None and self.max_queue_size == 1:
+            overwritten_packet = entity.pending_packet
             entity.pending_packet = None
 
         packet = Packet(
@@ -116,16 +130,19 @@ class NetworkModel:
             entity.state = EntityState.BACKING_OFF
             entity.backoff_counter = self._compute_backoff(entity.collision_count)
 
+        return overwritten_packet
+
     def step(self) -> Dict[str, List[Packet]]:
         """
         Advance network simulation by one timestep (10 ms).
 
         Returns:
-            Dict with delivered data and ACK packets.
+            Dict with delivered data packets, delivered ACK packets, and dropped packets.
         """
         self.current_timestep += 1
         delivered_data: List[Packet] = []
         delivered_acks: List[Packet] = []
+        dropped_packets: List[Packet] = []
 
         for entity in self.entities:
             if entity.state == EntityState.BACKING_OFF and entity.backoff_counter > 0:
@@ -179,15 +196,23 @@ class NetworkModel:
                     )
                     self.transmission_end_timestep = self.current_timestep + duration
                 else:
+                    # Collision: multiple entities tried to transmit simultaneously
                     for idx in ready_entities:
                         entity = self.entities[idx]
+                        # Track the dropped packet before clearing it
+                        if entity.pending_packet is not None:
+                            dropped_packets.append(entity.pending_packet)
                         entity.pending_packet = None
                         entity.collision_count += 1
                         entity.state = EntityState.BACKING_OFF
                         entity.backoff_counter = self._compute_backoff(entity.collision_count)
                     self.total_collided_packets += len(ready_entities)
 
-        return {"delivered_data": delivered_data, "delivered_acks": delivered_acks}
+        return {
+            "delivered_data": delivered_data,
+            "delivered_acks": delivered_acks,
+            "dropped_packets": dropped_packets,
+        }
 
     def _compute_backoff(self, collision_count: int) -> int:
         """Compute a random backoff duration using exponential backoff."""
