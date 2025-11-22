@@ -179,9 +179,7 @@ class Controller:
                 break
 
         if prior_entry is None:
-            # Prior not found (too old or not stored)
-            # Fall back to regular update (suboptimal but better than nothing)
-            self.kf.update(measurement.reshape(-1, 1))
+            # Prior not found (too old or not stored); treat as stale and skip update
             return False
 
         # Restore the prior state
