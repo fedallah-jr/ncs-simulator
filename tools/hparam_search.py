@@ -36,6 +36,10 @@ from utils import SingleAgentWrapper
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
 
+def _to_py_scalar(x):
+    return x.item() if hasattr(x, "item") else x
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Random-search hyperparameters for PPO or DQN on NCS.")
     parser.add_argument("--algorithm", choices=["ppo", "dqn"], required=True, help="SB3 algorithm to train.")
@@ -141,9 +145,6 @@ def train_once(algo: str, config_path: Path, hparams: Dict[str, float], args: ar
     model.save(str(run_dir / "latest_model"))
 
     # Persist config + hyperparams
-    def _to_py_scalar(x):
-        return x.item() if hasattr(x, "item") else x
-
     hp_record = {k: _to_py_scalar(v) for k, v in hparams.items()}
     hp_record.update(
         {
@@ -196,9 +197,9 @@ def main() -> None:
         summary = {
             "run_dir": str(run_dir),
             "algorithm": args.algorithm,
-            "hyperparameters": hparams,
-            "best_eval_mean": best_mean,
-            "final_eval_mean": final_mean,
+            "hyperparameters": {k: _to_py_scalar(v) for k, v in hparams.items()},
+            "best_eval_mean": _to_py_scalar(best_mean),
+            "final_eval_mean": _to_py_scalar(final_mean),
         }
         global_summaries.append(summary)
         print(f"Completed run -> {run_dir} | best_eval_mean={best_mean:.2f} | final_eval_mean={final_mean:.2f}")
