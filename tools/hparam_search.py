@@ -141,7 +141,10 @@ def train_once(algo: str, config_path: Path, hparams: Dict[str, float], args: ar
     model.save(str(run_dir / "latest_model"))
 
     # Persist config + hyperparams
-    hp_record = dict(hparams)
+    def _to_py_scalar(x):
+        return x.item() if hasattr(x, "item") else x
+
+    hp_record = {k: _to_py_scalar(v) for k, v in hparams.items()}
     hp_record.update(
         {
             "total_timesteps": args.total_timesteps,
