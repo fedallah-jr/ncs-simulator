@@ -56,17 +56,17 @@ def save_training_rewards(vec_env: gym.Env, output_path: Path) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train DQN on single-agent NCS env.")
     parser.add_argument("--config", type=Path, default=None, help="Config JSON path.")
-    parser.add_argument("--total-timesteps", type=int, default=200_000, help="Total training timesteps.")
+    parser.add_argument("--total-timesteps", type=int, default=100_000, help="Total training timesteps.")
     parser.add_argument("--episode-length", type=int, default=1000, help="Episode length.")
     parser.add_argument("--seed", type=int, default=None, help="Random seed.")
-    parser.add_argument("--learning-rate", type=float, default=1e-3, help="DQN learning rate.")
-    parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor.")
-    parser.add_argument("--batch-size", type=int, default=64, help="DQN batch size.")
-    parser.add_argument("--buffer-size", type=int, default=100_000, help="Replay buffer size.")
+    parser.add_argument("--learning-rate", type=float, default=5e-4, help="DQN learning rate.")
+    parser.add_argument("--gamma", type=float, default=0.95, help="Discount factor.")
+    parser.add_argument("--batch-size", type=int, default=128, help="DQN batch size.")
+    parser.add_argument("--buffer-size", type=int, default=200_000, help="Replay buffer size.")
     parser.add_argument("--train-freq", type=int, default=4, help="Training frequency in steps.")
     parser.add_argument("--target-update-interval", type=int, default=10_000, help="Target network update interval.")
     parser.add_argument("--eval-episodes", type=int, default=5, help="Eval episodes for best model.")
-    parser.add_argument("--eval-freq", type=int, default=10_000, help="Eval frequency in env steps.")
+    parser.add_argument("--eval-freq", type=int, default=2_500, help="Eval frequency in env steps.")
     parser.add_argument("--normalize-reward", action="store_true", help="Use VecNormalize for reward normalization.")
     parser.add_argument(
         "--output-root",
