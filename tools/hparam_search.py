@@ -174,11 +174,38 @@ def main() -> None:
     config_path = args.config.resolve()
 
     print(f"Running random search for {args.algorithm} | samples={args.samples} | config={config_path}")
+    global_summaries = []
     for idx in range(args.samples):
         hparams = sample_hparams(args.algorithm, rng)
         print(f"\n[{idx + 1}/{args.samples}] Hyperparameters: {hparams}")
         run_dir = train_once(args.algorithm, config_path, hparams, args)
-        print(f"Completed run -> {run_dir}")
+        # Load eval summary (best last eval mean)
+        eval_path = Path(run_dir) / "evaluations.npz"
+        try:
+            npz = np.load(eval_path)
+            mean_rewards = npz["results"].mean(axis=1)
+            best_mean = float(np.max(mean_rewards))
+            final_mean = float(mean_rewards[-1])
+        except Exception:
+            best_mean = float("nan")
+            final_mean = float("nan")
+
+        summary = {
+            "run_dir": str(run_dir),
+            "algorithm": args.algorithm,
+            "hyperparameters": hparams,
+            "best_eval_mean": best_mean,
+            "final_eval_mean": final_mean,
+        }
+        global_summaries.append(summary)
+        print(f"Completed run -> {run_dir} | best_eval_mean={best_mean:.2f} | final_eval_mean={final_mean:.2f}")
+
+    # Save global comparison table
+    search_table_path = args.output_root / f"search_results_{args.algorithm}.json"
+    with search_table_path.open("w", encoding="utf-8") as f:
+        json.dump(global_summaries, f, indent=2)
+        f.write("\n")
+    print(f"\nSaved search comparison to {search_table_path}")
 
 
 if __name__ == "__main__":
