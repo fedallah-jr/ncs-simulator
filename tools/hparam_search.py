@@ -160,7 +160,7 @@ def train_once(algo: str, config_path: Path, hparams: Dict[str, float], args: ar
     summary = {
         "run_dir": str(run_dir),
         "algorithm": algo,
-        "hyperparameters": hparams,
+        "hyperparameters": {k: _to_py_scalar(v) for k, v in hparams.items()},
     }
     with (run_dir / "search_summary.json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
