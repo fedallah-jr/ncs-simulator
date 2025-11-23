@@ -20,7 +20,8 @@ class ConfigMetadata:
     config_path: Path
     process_noise_first: float
     measurement_noise_first: float
-    initial_state_scale: Iterable[float]
+    initial_state_scale_min: Iterable[float]
+    initial_state_scale_max: Iterable[float]
     q_first: float
     r_first: float
     reward_type: str
@@ -40,24 +41,48 @@ def _ensure_array(value: Any, default: np.ndarray) -> np.ndarray:
     return arr
 
 
-def _resolve_initial_scale(scale_cfg: Any, state_dim: int) -> np.ndarray:
-    if isinstance(scale_cfg, (float, int)):
-        return np.full(state_dim, float(scale_cfg))
-    arr = np.array(scale_cfg, dtype=float).flatten()
-    if arr.size == 1:
-        return np.full(state_dim, float(arr.item()))
-    if arr.size != state_dim:
-        raise ValueError("initial_state_scale must be scalar or match the state dimension")
-    return arr
+def _resolve_initial_scale_range(system_cfg: Mapping[str, Any], state_dim: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Resolve initial state scale range from config with backward compatibility.
+
+    Prefers new `initial_state_scale_min`/`initial_state_scale_max` fields; falls back
+    to legacy `initial_state_scale` as a symmetric bound. Defaults to [0.9, 1.0].
+    """
+
+    def _to_array(cfg_value: Any, default: float) -> np.ndarray:
+        arr = np.array(cfg_value if cfg_value is not None else default, dtype=float).flatten()
+        if arr.size == 0:
+            arr = np.array(default, dtype=float).flatten()
+        if arr.size == 1:
+            return np.full(state_dim, float(arr.item()))
+        if arr.size != state_dim:
+            raise ValueError("initial_state_scale entries must be scalar or match the state dimension")
+        return arr
+
+    legacy = system_cfg.get("initial_state_scale", None)
+    min_cfg = system_cfg.get("initial_state_scale_min", None)
+    max_cfg = system_cfg.get("initial_state_scale_max", None)
+
+    if legacy is not None:
+        legacy_arr = np.abs(_to_array(legacy, 1.0))
+        return legacy_arr, legacy_arr
+
+    default_min, default_max = 0.9, 1.0
+    scale_min = np.abs(_to_array(min_cfg, default_min))
+    scale_max = np.abs(_to_array(max_cfg, default_max))
+    if np.any(scale_max < scale_min):
+        raise ValueError("initial_state_scale_max must be >= initial_state_scale_min for all dimensions")
+    return scale_min, scale_max
 
 
 def _build_run_name(metadata: ConfigMetadata) -> str:
-    init_str = "-".join(_format_float(float(x)) for x in metadata.initial_state_scale)
+    init_min = "-".join(_format_float(float(x)) for x in metadata.initial_state_scale_min)
+    init_max = "-".join(_format_float(float(x)) for x in metadata.initial_state_scale_max)
     return (
         f"{metadata.algorithm}"
         f"_process{_format_float(metadata.process_noise_first)}"
         f"_measurement{_format_float(metadata.measurement_noise_first)}"
-        f"_initial{init_str}"
+        f"_initial{init_min}to{init_max}"
         f"_Q{_format_float(metadata.q_first)}"
         f"-R{_format_float(metadata.r_first)}"
         f"-{metadata.reward_type}"
@@ -93,7 +118,7 @@ def gather_config_metadata(algorithm: str, config_path: Optional[Path]) -> Confi
     measurement_cov = _ensure_array(
         system_cfg.get("measurement_noise_cov"), 0.01 * np.eye(state_dim)
     )
-    initial_scale = _resolve_initial_scale(system_cfg.get("initial_state_scale", 2.0), state_dim)
+    initial_scale_min, initial_scale_max = _resolve_initial_scale_range(system_cfg, state_dim)
     q_matrix = _ensure_array(lqr_cfg.get("Q"), np.eye(state_dim))
     r_matrix = _ensure_array(lqr_cfg.get("R"), np.eye(control_dim))
     reward_type = str(reward_cfg.get("state_error_reward", "difference"))
@@ -103,7 +128,8 @@ def gather_config_metadata(algorithm: str, config_path: Optional[Path]) -> Confi
         config_path=resolved_config_path,
         process_noise_first=float(process_cov.flat[0]),
         measurement_noise_first=float(measurement_cov.flat[0]),
-        initial_state_scale=tuple(float(x) for x in initial_scale),
+        initial_state_scale_min=tuple(float(x) for x in initial_scale_min),
+        initial_state_scale_max=tuple(float(x) for x in initial_scale_max),
         q_first=float(q_matrix.flat[0]),
         r_first=float(r_matrix.flat[0]),
         reward_type=reward_type,

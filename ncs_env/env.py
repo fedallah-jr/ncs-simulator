@@ -45,6 +45,9 @@ class NCS_Env(gym.Env):
         self.B = np.array(self.system_cfg.get("B"))
         self.state_dim = self.A.shape[0]
         self.control_dim = self.B.shape[1]
+        self.initial_state_scale_min, self.initial_state_scale_max = self._resolve_initial_state_scale_range(
+            self.system_cfg, self.state_dim
+        )
 
         observation_cfg = self.config.get("observation", {})
         self.history_window = observation_cfg.get("history_window", 10)
@@ -91,7 +94,6 @@ class NCS_Env(gym.Env):
         initial_estimate_cov = np.array(
             self.system_cfg.get("initial_estimate_cov", np.eye(self.state_dim))
         )
-        self.initial_state_scale_cfg = self.system_cfg.get("initial_state_scale", 2.0)
 
         lqr_cfg = self.config.get("lqr", {})
         lqr_Q = np.array(lqr_cfg.get("Q", np.eye(self.state_dim)))
@@ -385,23 +387,53 @@ class NCS_Env(gym.Env):
 
     def _sample_initial_state(self) -> np.ndarray:
         """
-        Sample an initial plant state from a uniform distribution whose half-width
-        can be specified per state dimension.
+        Sample an initial plant state with magnitude constrained to [scale_min, scale_max]
+        per dimension. Sign is chosen uniformly.
         """
-        scale_cfg = self.initial_state_scale_cfg
-        scale_arr = np.asarray(scale_cfg, dtype=float)
-        if scale_arr.ndim == 0:
-            high = np.full(self.state_dim, float(scale_arr))
-        else:
-            flat = scale_arr.flatten()
-            if flat.size != self.state_dim:
+        scale_min = self.initial_state_scale_min
+        scale_max = self.initial_state_scale_max
+        magnitudes = self.np_random.uniform(low=scale_min, high=scale_max)
+        signs = self.np_random.choice([-1.0, 1.0], size=self.state_dim)
+        return signs * magnitudes
+
+    @staticmethod
+    def _resolve_initial_state_scale_range(system_cfg: Dict[str, Any], state_dim: int):
+        """
+        Resolve initial state scale range from config.
+
+        Supports legacy `initial_state_scale` (scalar/list) as a symmetric bound and
+        new `initial_state_scale_min`/`initial_state_scale_max` fields. Defaults to
+        magnitudes in [0.9, 1.0] per dimension when unspecified.
+        """
+
+        def _to_array(cfg_value: Any, default: float) -> np.ndarray:
+            arr = np.asarray(cfg_value if cfg_value is not None else default, dtype=float).flatten()
+            if arr.size == 0:
+                arr = np.asarray(default, dtype=float).flatten()
+            if arr.size == 1:
+                return np.full(state_dim, float(arr.item()))
+            if arr.size != state_dim:
                 raise ValueError(
-                    "initial_state_scale must be scalar or contain one entry per state dimension"
+                    "initial_state_scale entries must be scalar or match the state dimension"
                 )
-            high = flat
-        high = np.abs(high)
-        low = -high
-        return self.np_random.uniform(low=low, high=high)
+            return arr
+
+        legacy_scale = system_cfg.get("initial_state_scale", None)
+        min_cfg = system_cfg.get("initial_state_scale_min", None)
+        max_cfg = system_cfg.get("initial_state_scale_max", None)
+
+        if legacy_scale is not None:
+            # Backward compatibility: symmetric range [-scale, scale]
+            legacy = np.abs(_to_array(legacy_scale, 1.0))
+            return legacy, legacy
+
+        default_min = 0.9
+        default_max = 1.0
+        scale_min = np.abs(_to_array(min_cfg, default_min))
+        scale_max = np.abs(_to_array(max_cfg, default_max))
+        if np.any(scale_max < scale_min):
+            raise ValueError("initial_state_scale_max must be >= initial_state_scale_min for all dimensions")
+        return scale_min, scale_max
 
     def _quantize_state(self, state: np.ndarray) -> np.ndarray:
         """Quantize the measured plant state."""
