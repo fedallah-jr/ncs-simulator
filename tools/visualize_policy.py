@@ -165,9 +165,12 @@ def run_episode(env: Any, policy: Any, episode_length: int, deterministic: bool 
         ) else 0.0
         state_errors[t + 1] = np.linalg.norm(states[t + 1])
 
-        # Break if episode ended (shouldn't happen normally)
+        # Break if episode ended early (shouldn't happen normally)
         if terminated or truncated:
-            print(f"Warning: Episode ended early at timestep {t}")
+            # Episode ended before completing all timesteps
+            # t is 0-indexed, so if t < episode_length-1, it ended early
+            if t < episode_length - 1:
+                print(f"Warning: Episode ended early at timestep {t} (expected {episode_length})")
             # Trim arrays
             states = states[:t + 2]
             estimates = estimates[:t + 2]
@@ -732,6 +735,10 @@ def main():
         print(f"[{i+1}/{len(policies_to_load)}] {label}")
         print(f"  Type: {policy_type}")
         print(f"  Path/Name: {policy_path}")
+
+        # Reset environment to ensure same initial conditions and process noise for fair comparison
+        # This ensures all policies are evaluated on identical random seeds
+        obs, info = env.reset(seed=args.seed)
 
         # Load policy
         try:
