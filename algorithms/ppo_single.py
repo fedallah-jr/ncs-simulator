@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ent-coef", type=float, default=0.1, help="PPO entropy coefficient.")
     parser.add_argument("--eval-episodes", type=int, default=5, help="Eval episodes for best model.")
     parser.add_argument("--eval-freq", type=int, default=2500, help="Eval frequency in env steps.")
-    parser.add_argument("--not-normalize-reward", action="store_false", default = True, help="Use VecNormalize for reward normalization.")
+    parser.add_argument("--normalize-reward", action="store_true", help="Use VecNormalize for reward normalization.")
     parser.add_argument(
         "--output-root",
         type=Path,
