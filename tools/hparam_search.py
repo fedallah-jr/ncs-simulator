@@ -75,6 +75,9 @@ def summarize_training_rewards(rewards: List[float]) -> Dict[str, float]:
         "min_reward": float("nan"),
         "max_reward": float("nan"),
         "final_reward": float("nan"),
+        "trend_slope": float("nan"),  # linear fit slope over episodes
+        "start_end_lift": float("nan"),  # reward_last - reward_first
+        "frac_positive_steps": float("nan"),  # share of episodes that improved vs previous
         "num_episodes": 0,
     }
     if not rewards:
@@ -88,6 +91,9 @@ def summarize_training_rewards(rewards: List[float]) -> Dict[str, float]:
             "min_reward": float(np.min(arr)),
             "max_reward": float(np.max(arr)),
             "final_reward": float(arr[-1]),
+            "trend_slope": float(np.polyfit(np.arange(arr.shape[0]), arr, 1)[0]) if arr.shape[0] > 1 else float("nan"),
+            "start_end_lift": float(arr[-1] - arr[0]) if arr.shape[0] > 0 else float("nan"),
+            "frac_positive_steps": float(np.mean(arr[1:] > arr[:-1])) if arr.shape[0] > 1 else float("nan"),
             "num_episodes": int(arr.shape[0]),
         }
     )
@@ -156,6 +162,13 @@ def _aggregate_metric_values(values: List[float]) -> Dict[str, float]:
         "max": float(np.max(arr)),
         "count": int(arr.shape[0]),
     }
+
+
+def _sort_key_with_nan(value: float, higher_is_better: bool) -> Tuple[int, float]:
+    """Helper for multi-metric ranking to push NaNs to the end."""
+    is_nan = isinstance(value, float) and math.isnan(value)
+    direction_value = 0.0 if is_nan else (-value if higher_is_better else value)
+    return (1 if is_nan else 0, direction_value)
 
 
 def build_comparison_table(
@@ -266,6 +279,9 @@ def aggregate_repeat_group(
         "std_reward": collect("training_metrics", "std_reward"),
         "max_reward": collect("training_metrics", "max_reward"),
         "min_reward": collect("training_metrics", "min_reward"),
+        "trend_slope": collect("training_metrics", "trend_slope"),
+        "start_end_lift": collect("training_metrics", "start_end_lift"),
+        "frac_positive_steps": collect("training_metrics", "frac_positive_steps"),
     }
 
     return {
@@ -464,6 +480,23 @@ def main() -> None:
             global_summaries, "training_reward_final", lambda s: s["training_metrics"]["final_reward"]
         )
     )
+    comparison_tables_individual.update(
+        build_comparison_table(
+            global_summaries, "training_trend_slope", lambda s: s["training_metrics"]["trend_slope"]
+        )
+    )
+    comparison_tables_individual.update(
+        build_comparison_table(
+            global_summaries, "training_start_end_lift", lambda s: s["training_metrics"]["start_end_lift"]
+        )
+    )
+    comparison_tables_individual.update(
+        build_comparison_table(
+            global_summaries,
+            "training_frac_positive_steps",
+            lambda s: s["training_metrics"]["frac_positive_steps"],
+        )
+    )
 
     comparison_tables_aggregate = {}
     comparison_tables_aggregate.update(
@@ -530,6 +563,33 @@ def main() -> None:
             label_key="runs",
         )
     )
+    comparison_tables_aggregate.update(
+        build_comparison_table(
+            aggregate_summaries,
+            "training_trend_slope_mean",
+            lambda s: s["aggregate_training"]["trend_slope"]["mean"],
+            label_getter=lambda s: s["runs"],
+            label_key="runs",
+        )
+    )
+    comparison_tables_aggregate.update(
+        build_comparison_table(
+            aggregate_summaries,
+            "training_start_end_lift_mean",
+            lambda s: s["aggregate_training"]["start_end_lift"]["mean"],
+            label_getter=lambda s: s["runs"],
+            label_key="runs",
+        )
+    )
+    comparison_tables_aggregate.update(
+        build_comparison_table(
+            aggregate_summaries,
+            "training_frac_positive_steps_mean",
+            lambda s: s["aggregate_training"]["frac_positive_steps"]["mean"],
+            label_getter=lambda s: s["runs"],
+            label_key="runs",
+        )
+    )
 
     search_payload = {
         "algorithm": args.algorithm,
@@ -550,6 +610,74 @@ def main() -> None:
         json.dump(search_payload, f, indent=2)
         f.write("\n")
     print(f"\nSaved search comparison to {search_table_path}")
+
+    # Build top-3 rankings for performance and stability using aggregate metrics
+    def perf_key(entry: Dict[str, object]) -> Tuple:
+        agg_eval = entry["aggregate_eval"]
+        return (
+            _sort_key_with_nan(agg_eval["best_eval_mean"]["mean"], higher_is_better=True),
+            _sort_key_with_nan(agg_eval["mean_eval_mean"]["mean"], higher_is_better=True),
+            _sort_key_with_nan(agg_eval["worst_eval_mean"]["mean"], higher_is_better=True),
+            _sort_key_with_nan(agg_eval["final_eval_mean"]["mean"], higher_is_better=True),
+        )
+
+    def stability_key(entry: Dict[str, object]) -> Tuple:
+        agg_eval = entry["aggregate_eval"]
+        agg_train = entry["aggregate_training"]
+        return (
+            _sort_key_with_nan(agg_eval["eval_stability"]["mean"], higher_is_better=False),
+            _sort_key_with_nan(agg_train["std_reward"]["mean"], higher_is_better=False),
+            _sort_key_with_nan(agg_train["trend_slope"]["mean"], higher_is_better=True),
+            _sort_key_with_nan(agg_train["start_end_lift"]["mean"], higher_is_better=True),
+            _sort_key_with_nan(agg_train["frac_positive_steps"]["mean"], higher_is_better=True),
+        )
+
+    # Sort with custom keys
+    perf_sorted = sorted(aggregate_summaries, key=lambda e: perf_key(e))[:3]
+    stability_sorted = sorted(aggregate_summaries, key=lambda e: stability_key(e))[:3]
+
+    def build_perf_entry(rank: int, entry: Dict[str, object]) -> Dict[str, object]:
+        agg_eval = entry["aggregate_eval"]
+        return {
+            "rank": rank,
+            "runs": entry["runs"],
+            "hyperparameters": entry["hyperparameters"],
+            "best_eval_mean_mean": _to_py_scalar(agg_eval["best_eval_mean"]["mean"]),
+            "tie_breakers": {
+                "mean_eval_mean_mean": _to_py_scalar(agg_eval["mean_eval_mean"]["mean"]),
+                "worst_eval_mean_mean": _to_py_scalar(agg_eval["worst_eval_mean"]["mean"]),
+                "final_eval_mean_mean": _to_py_scalar(agg_eval["final_eval_mean"]["mean"]),
+            },
+        }
+
+    def build_stability_entry(rank: int, entry: Dict[str, object]) -> Dict[str, object]:
+        agg_eval = entry["aggregate_eval"]
+        agg_train = entry["aggregate_training"]
+        return {
+            "rank": rank,
+            "runs": entry["runs"],
+            "hyperparameters": entry["hyperparameters"],
+            "eval_stability_mean": _to_py_scalar(agg_eval["eval_stability"]["mean"]),
+            "tie_breakers": {
+                "std_reward_mean": _to_py_scalar(agg_train["std_reward"]["mean"]),
+                "trend_slope_mean": _to_py_scalar(agg_train["trend_slope"]["mean"]),
+                "start_end_lift_mean": _to_py_scalar(agg_train["start_end_lift"]["mean"]),
+                "frac_positive_steps_mean": _to_py_scalar(agg_train["frac_positive_steps"]["mean"]),
+            },
+        }
+
+    top3_payload = {
+        "algorithm": args.algorithm,
+        "config_path": str(config_path),
+        "performance_top3": [build_perf_entry(i + 1, e) for i, e in enumerate(perf_sorted)],
+        "stability_top3": [build_stability_entry(i + 1, e) for i, e in enumerate(stability_sorted)],
+    }
+
+    top3_path = args.output_root / f"top3_{args.algorithm}.json"
+    with top3_path.open("w", encoding="utf-8") as f:
+        json.dump(top3_payload, f, indent=2)
+        f.write("\n")
+    print(f"Saved top-3 performance/stability summary to {top3_path}")
 
 
 if __name__ == "__main__":
