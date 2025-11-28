@@ -256,8 +256,9 @@ def train(args):
         rng, rng_seed = jax.random.split(rng)
         # Sample a fresh seed per generation so the population is compared
         # with common random numbers, but avoids overfitting to one stream.
+        # Use int32 bounds to avoid dtype overflow on some backends.
         gen_episode_seed = int(
-            jax.random.randint(rng_seed, (), minval=0, maxval=2**32 - 1, dtype=jnp.uint32)
+            jax.random.randint(rng_seed, (), minval=0, maxval=2**31 - 1, dtype=jnp.int32)
         )
 
         rng, rng_ask = jax.random.split(rng)
