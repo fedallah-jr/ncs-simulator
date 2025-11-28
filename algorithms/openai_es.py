@@ -62,6 +62,7 @@ def _init_worker(
     seed: Optional[int],
     action_dim: int
 ):
+    jax.config.update("jax_platform_name", "cpu")
     """Initialize the environment in the worker process."""
     global _worker_env, _worker_model
     
