@@ -98,7 +98,7 @@ def load_es_policy(model_path: str, env: Any):
         import jax
         import jax.numpy as jnp
         import numpy as np
-        from evosax import ParameterReshaper
+        from jax import flatten_util
         from algorithms.openai_es import PolicyNet
     except ImportError:
         raise ImportError(
@@ -133,8 +133,8 @@ def load_es_policy(model_path: str, env: Any):
     dummy_obs = jnp.zeros((1, obs_dim))
     dummy_params = model.init(rng, dummy_obs)
 
-    reshaper = ParameterReshaper(dummy_params)
-    params = reshaper.reshape_single(flat_params)
+    _, unravel_fn = flatten_util.ravel_pytree(dummy_params)
+    params = unravel_fn(flat_params)
 
     class ESPolicyWrapper:
         def __init__(self, model, params):

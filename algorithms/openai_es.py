@@ -13,14 +13,15 @@ import sys
 import time
 import multiprocessing
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import flax.linen as nn
 import gymnasium as gym
-from evosax import OpenAES, ParameterReshaper
+import optax
+from evosax.algorithms.distribution_based import Open_ES
 
 # Ensure project root is in path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -54,17 +55,15 @@ class PolicyNet(nn.Module):
 # Global variables for worker process
 _worker_env: Optional[gym.Env] = None
 _worker_model: Optional[PolicyNet] = None
-_worker_reshaper: Optional[ParameterReshaper] = None
 
 def _init_worker(
     config_path: Optional[str], 
     episode_length: int, 
     seed: Optional[int],
-    obs_dim: int,
     action_dim: int
 ):
     """Initialize the environment in the worker process."""
-    global _worker_env, _worker_model, _worker_reshaper
+    global _worker_env, _worker_model
     
     def factory():
         return NCS_Env(
@@ -76,19 +75,11 @@ def _init_worker(
     
     _worker_env = SingleAgentWrapper(factory)
     _worker_model = PolicyNet(action_dim=action_dim)
-    
-    # Initialize reshaper structure
-    dummy_obs = jnp.zeros((1, obs_dim))
-    dummy_params = _worker_model.init(jax.random.PRNGKey(0), dummy_obs)
-    _worker_reshaper = ParameterReshaper(dummy_params)
 
 
-def _evaluate_params(flat_params: np.ndarray) -> float:
-    """Run one episode with the given flattened parameters."""
-    global _worker_env, _worker_model, _worker_reshaper
-    
-    # Reconstruct Flax params from flat array
-    params = _worker_reshaper.reshape_single(flat_params)
+def _evaluate_params(params: Any) -> float:
+    """Run one episode with the given structured parameters."""
+    global _worker_env, _worker_model
     
     obs, _ = _worker_env.reset()
     total_reward = 0.0
@@ -97,8 +88,8 @@ def _evaluate_params(flat_params: np.ndarray) -> float:
     
     while not (truncated or terminated):
         # Simple forward pass
-        # We use numpy for the observation to avoid excessive device transfer overhead
-        # for single-step inference in a CPU worker.
+        # Params are already structured (PyTree of numpy arrays or jax arrays)
+        # We pass them directly to apply.
         logits = _worker_model.apply(params, obs)
         action = int(np.argmax(logits))
         
@@ -121,28 +112,44 @@ def train(args):
     
     print(f"Observation Dim: {obs_dim}, Action Dim: {action_dim}")
 
-    # 2. Setup Flax Model & Reshaper
+    # 2. Setup Flax Model & Initial Params
     rng = jax.random.PRNGKey(args.seed if args.seed is not None else 0)
     model = PolicyNet(action_dim=action_dim)
     dummy_obs = jnp.zeros((1, obs_dim))
     params = model.init(rng, dummy_obs)
     
-    param_reshaper = ParameterReshaper(params)
-    print(f"Total Parameters: {param_reshaper.total_params}")
+    # Create flattener for saving/logging purposes
+    flat_params_dummy, unravel_fn = jax.flatten_util.ravel_pytree(params)
+    print(f"Total Parameters: {flat_params_dummy.size}")
 
-    # 3. Setup OpenAES Strategy
-    strategy = OpenAES(
-        popsize=args.popsize,
-        num_dims=param_reshaper.total_params,
-        opt_name="adam",
-        lrate_init=args.learning_rate,
-        lrate_decay=args.lrate_decay,
-        sigma_init=args.sigma_init,
-        sigma_decay=args.sigma_decay,
+    # 3. Setup Open_ES Strategy
+    
+    # Create schedules for learning rate and sigma
+    # Note: transition_steps=1 means decay is applied every step (generation)
+    lrate_schedule = optax.exponential_decay(
+        init_value=args.learning_rate, 
+        transition_steps=1, 
+        decay_rate=args.lrate_decay
+    )
+    
+    std_schedule = optax.exponential_decay(
+        init_value=args.sigma_init, 
+        transition_steps=1, 
+        decay_rate=args.sigma_decay
+    )
+    
+    optimizer = optax.adam(learning_rate=lrate_schedule)
+
+    strategy = Open_ES(
+        population_size=args.popsize,
+        solution=params, # Template params
+        optimizer=optimizer,
+        std_schedule=std_schedule
     )
     
     es_params = strategy.default_params
-    state = strategy.initialize(rng, es_params)
+    es_params = strategy.default_params
+    state = strategy.init(rng, params, es_params)
 
     # JIT the ASK and TELL steps for acceleration
     @jax.jit
@@ -151,16 +158,15 @@ def train(args):
         return x, state
 
     @jax.jit
-    def tell_step(x, fitness, state, params):
-        return strategy.tell(x, fitness, state, params)
+    def tell_step(rng, x, fitness, state, params):
+        return strategy.tell(rng, x, fitness, state, params)
 
     # 4. Setup Parallel Workers
-    # 'spawn' is safer for JAX+Multiprocessing compatibility
     ctx = multiprocessing.get_context("spawn")
     pool = ctx.Pool(
         processes=args.n_workers,
         initializer=_init_worker,
-        initargs=(config_path_str, args.episode_length, args.seed, obs_dim, action_dim)
+        initargs=(config_path_str, args.episode_length, args.seed, action_dim)
     )
 
     # 5. Logging Setup
@@ -175,23 +181,34 @@ def train(args):
     
     best_fitness_all_time = -float("inf")
 
+    # Helper to slice pytree of batches into list of pytrees
+    def slice_population(pop_tree, size):
+        # pop_tree leaves are (size, ...)
+        return [jax.tree_util.tree_map(lambda x: x[i], pop_tree) for i in range(size)]
+
     # 6. Training Loop
     for gen in range(1, args.generations + 1):
         rng, rng_ask = jax.random.split(rng)
         
         # ASK (Accelerator)
+        # x is structured population (PyTree where leaves have leading batch dim)
         x, state = ask_step(rng_ask, state, es_params)
         
         # EVALUATE (CPU Parallel)
-        # Convert JAX array to numpy for pickling to workers
-        population_params = np.array(x) 
-        fitness_values = pool.map(_evaluate_params, list(population_params))
+        # Move to CPU and convert to numpy
+        x_cpu = jax.tree_util.tree_map(lambda arr: np.array(arr), x)
+        
+        # Slice into individual parameters
+        population_params_list = slice_population(x_cpu, args.popsize)
+        
+        fitness_values = pool.map(_evaluate_params, population_params_list)
         
         # Move fitness back to JAX array
         fitness_array = jnp.array(fitness_values)
         
         # TELL (Accelerator)
-        state = tell_step(x, fitness_array, state, es_params)
+        rng, rng_tell = jax.random.split(rng)
+        state, metrics = tell_step(rng_tell, x, fitness_array, state, es_params)
         
         # Logging
         mean_fit = float(jnp.mean(fitness_array))
@@ -209,16 +226,30 @@ def train(args):
         if max_fit > best_fitness_all_time:
             best_fitness_all_time = max_fit
             best_idx = int(jnp.argmax(fitness_array))
-            best_params_flat = population_params[best_idx]
-            np.savez(run_dir / "best_model.npz", flat_params=best_params_flat)
-            np.savez(run_dir / "latest_model.npz", flat_params=best_params_flat)
+            
+            # Get best params (structured)
+            best_params = population_params_list[best_idx]
+            
+            # Flatten for saving (compatibility)
+            flat_best, _ = jax.flatten_util.ravel_pytree(best_params)
+            np.savez(run_dir / "best_model.npz", flat_params=flat_best)
+            np.savez(run_dir / "latest_model.npz", flat_params=flat_best)
 
         # Periodic Checkpoint (Mean Policy)
         if gen % args.eval_freq == 0:
-            mean_params = np.array(state.mean)
-            checkpoint_dir = run_dir / "checkpoints"
-            checkpoint_dir.mkdir(exist_ok=True)
-            np.savez(checkpoint_dir / f"gen_{gen}.npz", flat_params=mean_params)
+            # Mean params from state
+            mean_params = state.mean # Wait, state.mean is FLAT in evosax? 
+            # Let's check State definition in open_es.py
+            # class State(BaseState): mean: jax.Array
+            # Yes, mean is a flat array! 
+            # Because Open_ES manages flat mean internally but ask/tell handle ravel/unravel.
+            
+            # So state.mean is ALREADY flat!
+            # We can save it directly.
+            # But wait, ask returns UNRAVELED population.
+            # So state.mean corresponds to flattened params.
+            
+            np.savez(run_dir / "checkpoints" / f"gen_{gen}.npz", flat_params=np.array(state.mean))
 
     # Cleanup
     pool.close()
