@@ -109,12 +109,14 @@ def _init_worker(
     _worker_params = _worker_model.init(rng, dummy_obs)
 
 
-def _evaluate_params(flat_params: np.ndarray) -> float:
+def _evaluate_params(flat_params: np.ndarray, episode_seed: Optional[int]) -> float:
     """
     Run one episode with the given flattened parameters.
     
     Args:
         flat_params: Flattened numpy array of network parameters
+        episode_seed: Seed to use for this episode (common across population
+                      for CRN fairness within a generation).
         
     Returns:
         Total episode reward
@@ -130,7 +132,9 @@ def _evaluate_params(flat_params: np.ndarray) -> float:
     _, unravel_fn = flatten_util.ravel_pytree(_worker_params)
     params = unravel_fn(flat_params)
     
-    obs, _ = _worker_env.reset()
+    # Common random numbers: reseed each episode so all individuals in a
+    # generation see the same randomness, while seeds can change across gens.
+    obs, _ = _worker_env.reset(seed=episode_seed)
     total_reward = 0.0
     truncated = False
     terminated = False
@@ -249,6 +253,13 @@ def train(args):
 
     # 6. Training Loop
     for gen in range(1, args.generations + 1):
+        rng, rng_seed = jax.random.split(rng)
+        # Sample a fresh seed per generation so the population is compared
+        # with common random numbers, but avoids overfitting to one stream.
+        gen_episode_seed = int(
+            jax.random.randint(rng_seed, (), minval=0, maxval=2**32 - 1, dtype=jnp.uint32)
+        )
+
         rng, rng_ask = jax.random.split(rng)
         
         # ASK (on TPU/GPU) - get population of params as pytree
@@ -266,7 +277,9 @@ def train(args):
             population_flat.append(np.array(flat_individual))
         
         # EVALUATE (on CPU workers in parallel)
-        fitness_values = pool.map(_evaluate_params, population_flat)
+        # Use starmap to pass the shared per-generation seed to every eval
+        eval_payloads = [(flat_params, gen_episode_seed) for flat_params in population_flat]
+        fitness_values = pool.starmap(_evaluate_params, eval_payloads)
         
         # Convert fitness back to JAX array
         fitness_array = jnp.array(fitness_values)
