@@ -80,13 +80,85 @@ def load_sb3_policy(model_path: str, env: Any):
     raise ValueError(f"Could not load model from {model_path} with any SB3 algorithm")
 
 
-def load_policy(policy_path: str, policy_type: str, env: Any, n_agents: int = 1, seed: Optional[int] = None):
+def load_es_policy(model_path: str, env: Any):
     """
-    Load a policy (either SB3 or heuristic).
+    Load an OpenAI-ES policy (JAX/Flax).
 
     Args:
-        policy_path: Path to model file (for SB3) or policy name (for heuristic)
-        policy_type: Either 'sb3' or 'heuristic'
+        model_path: Path to the saved model (.npz file)
+        env: Environment instance
+
+    Returns:
+        Policy object with predict() method
+    """
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+
+    try:
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        from evosax import ParameterReshaper
+        from algorithms.openai_es import PolicyNet
+    except ImportError:
+        raise ImportError(
+            "jax, flax, and evosax are required to load ES policies. "
+            "Install with: pip install jax jaxlib flax evosax"
+        )
+
+    # Load flattened params
+    try:
+        data = np.load(model_path)
+        flat_params = data['flat_params']
+    except Exception as e:
+        raise ValueError(f"Could not load numpy data from {model_path}: {e}")
+
+    # Reconstruct model structure to get reshaper
+    # env is a SingleAgentWrapper, so env.action_space is Discrete(2)
+    if hasattr(env, "action_space") and hasattr(env.action_space, "n"):
+        action_dim = env.action_space.n
+    else:
+        # Fallback for unwrapped envs if necessary
+        action_dim = 2 
+
+    if hasattr(env, "observation_space") and hasattr(env.observation_space, "shape"):
+        obs_dim = env.observation_space.shape[0]
+    else:
+        raise ValueError("Environment must have a valid observation space.")
+
+    model = PolicyNet(action_dim=action_dim)
+
+    # Initialize dummy to get structure
+    rng = jax.random.PRNGKey(0)
+    dummy_obs = jnp.zeros((1, obs_dim))
+    dummy_params = model.init(rng, dummy_obs)
+
+    reshaper = ParameterReshaper(dummy_params)
+    params = reshaper.reshape_single(flat_params)
+
+    class ESPolicyWrapper:
+        def __init__(self, model, params):
+            self.model = model
+            self.params = params
+
+        def predict(self, observation, deterministic=True):
+            # Observation is (obs_dim,) numpy array
+            # Add batch dim and convert to JAX array
+            obs = jnp.array(observation[np.newaxis, :])
+            logits = self.model.apply(self.params, obs)
+            action = jnp.argmax(logits).item()
+            return action, None
+
+    return ESPolicyWrapper(model, params)
+
+
+def load_policy(policy_path: str, policy_type: str, env: Any, n_agents: int = 1, seed: Optional[int] = None):
+    """
+    Load a policy (SB3, ES, or heuristic).
+
+    Args:
+        policy_path: Path to model file or policy name
+        policy_type: 'sb3', 'es', or 'heuristic'
         env: Environment instance
         n_agents: Number of agents (for heuristic policies)
         seed: Random seed
@@ -96,10 +168,12 @@ def load_policy(policy_path: str, policy_type: str, env: Any, n_agents: int = 1,
     """
     if policy_type.lower() == 'sb3':
         return load_sb3_policy(policy_path, env)
+    elif policy_type.lower() == 'es' or policy_type.lower() == 'openai_es':
+        return load_es_policy(policy_path, env)
     elif policy_type.lower() == 'heuristic':
         return get_heuristic_policy(policy_path, n_agents=n_agents, seed=seed)
     else:
-        raise ValueError(f"Unknown policy type: {policy_type}. Use 'sb3' or 'heuristic'")
+        raise ValueError(f"Unknown policy type: {policy_type}. Use 'sb3', 'es', or 'heuristic'")
 
 
 def run_episode(env: Any, policy: Any, episode_length: int, deterministic: bool = True) -> Dict[str, np.ndarray]:
@@ -556,13 +630,13 @@ def main():
     parser.add_argument(
         '--policy',
         type=str,
-        help='Path to policy file (SB3) or policy name (heuristic)'
+        help='Path to policy file (SB3/ES) or policy name (heuristic)'
     )
     parser.add_argument(
         '--policy-type',
         type=str,
-        choices=['sb3', 'heuristic'],
-        help='Type of policy: sb3 or heuristic'
+        choices=['sb3', 'es', 'heuristic'],
+        help='Type of policy: sb3, es, or heuristic'
     )
 
     # Multi-policy comparison mode
@@ -576,7 +650,7 @@ def main():
         '--policy-types',
         type=str,
         nargs='+',
-        choices=['sb3', 'heuristic'],
+        choices=['sb3', 'es', 'heuristic'],
         help='List of policy types corresponding to --policies'
     )
     parser.add_argument(

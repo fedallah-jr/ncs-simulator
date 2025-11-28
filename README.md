@@ -49,12 +49,14 @@ Learning-based baselines live under `algorithms/`:
 
 - PPO (single agent, SB3): `python -m algorithms.ppo_single --config configs/perfect_comm.json --total-timesteps 200000`
 - DQN (single agent, SB3): `python -m algorithms.deep_q_learning --config configs/perfect_comm.json --total-timesteps 200000`
+- OpenAI-ES (single agent, JAX): `python -m algorithms.openai_es --config configs/perfect_comm.json --generations 1000 --popsize 128`
 
 CLI flags let you change environment parameters. Use `--output-root` (defaults to `outputs/`) to control where training artifacts land. Each run calls `utils.run_utils.prepare_run_directory(...)`, which creates a uniquely named folder that encodes the algorithm and key config values (noise level, initial-state scale, reward mode, etc.) plus an incrementing `run#` suffix. That directory always contains:
 
-- SB3 `EvalCallback` files (`best_model.zip`, `evaluations.npz` and friends) so the strongest checkpoint and evaluation history are co-located.
-- `latest_model.zip` with the final policy snapshot after training completes.
-- `training_rewards.csv`, a simple `[episode, reward]` table pulled from the `Monitor` wrapper to visualize learning curves later.
+- **Model Checkpoints:**
+  - For SB3 (PPO/DQN): `best_model.zip`, `latest_model.zip`, and `evaluations.npz` (from `EvalCallback`).
+  - For OpenAI-ES: `best_model.npz` (flattened params of best individual) and `latest_model.npz`.
+- `training_rewards.csv`: A simple CSV table tracking performance. For SB3 this logs `[episode, reward]`; for OpenAI-ES it logs `[generation, mean_reward, max_reward, time]`.
 - **`config.json`**, which combines the full environment configuration with a `training_run` section containing the algorithm name, timestamp, source config path, and all hyperparameters from the run. This structured format makes it easy to reload configurations or use them directly with visualization tools.
 
 Configuration presets live under `configs/`. `configs/perfect_comm.json` mirrors the default plant/network settings but forces `network.perfect_communication` to `true`, which is useful for debugging algorithms without channel contention.

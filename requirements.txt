@@ -6,3 +6,7 @@ stable-baselines3
 torch
 pettingzoo
 matplotlib
+jax
+jaxlib
+flax
+evosax
