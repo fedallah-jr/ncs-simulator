@@ -39,7 +39,7 @@ _worker_model: Any = None  # Will be PolicyNet instance
 _worker_params: Any = None  # Cached params structure for unraveling
 
 
-def _create_policy_net(action_dim: int):
+def create_policy_net(action_dim: int):
     """
     Create a PolicyNet instance. Imports Flax lazily.
     
@@ -101,7 +101,7 @@ def _init_worker(
     _worker_env = SingleAgentWrapper(factory)
     
     # Create model (imports Flax lazily)
-    _worker_model = _create_policy_net(action_dim)
+    _worker_model = create_policy_net(action_dim)
     
     # Initialize dummy params to get the structure for unraveling
     rng = jax.random.PRNGKey(0)
@@ -181,7 +181,7 @@ def train(args):
 
     # 2. Setup Flax Model & Initial Params
     rng = jax.random.PRNGKey(args.seed if args.seed is not None else 0)
-    model = _create_policy_net(action_dim)
+    model = create_policy_net(action_dim)
     dummy_obs = jnp.zeros((1, obs_dim))
     params = model.init(rng, dummy_obs)
     
