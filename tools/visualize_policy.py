@@ -92,12 +92,13 @@ def load_es_policy(model_path: str, env: Any):
         Policy object with predict() method
     """
     if not os.path.exists(model_path):
-        if os.path.exists(model_path + ".npz"):
-            model_path = model_path + ".npz"
+        if os.path.exists(model_path):
+            model_path = model_path
         else:
             raise FileNotFoundError(f"Model file not found: {model_path}")
 
     try:
+        import jax
         import jax.numpy as jnp
         import numpy as np
         from jax import flatten_util
