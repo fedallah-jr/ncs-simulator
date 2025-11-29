@@ -3,6 +3,10 @@ OpenAI-ES training for the NCS environment using evosax and JAX.
 
 Compatible with TPU/GPU acceleration for the evolution strategy updates.
 Evaluates the population in parallel on CPU workers.
+
+Key anti-overfitting feature: Each individual is evaluated on multiple episodes
+with different seeds, and the mean fitness is used. This prevents the policy
+from overfitting to specific random streams.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ import sys
 import time
 import multiprocessing
 from pathlib import Path
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Tuple
 
 import numpy as np
 import gymnasium as gym
@@ -37,6 +41,8 @@ from utils.run_utils import prepare_run_directory, save_config_with_hyperparamet
 _worker_env: Optional[gym.Env] = None
 _worker_model: Any = None  # Will be PolicyNet instance
 _worker_params: Any = None  # Cached params structure for unraveling
+_worker_config_path: Optional[str] = None
+_worker_episode_length: int = 750
 
 
 def create_policy_net(action_dim: int):
@@ -76,7 +82,7 @@ def _init_worker(
     CRITICAL: Must set JAX platform to CPU before importing JAX to avoid
     TPU conflicts when the main process is using the TPU.
     """
-    global _worker_env, _worker_model, _worker_params
+    global _worker_env, _worker_model, _worker_params, _worker_config_path, _worker_episode_length
     
     # Set JAX to use CPU BEFORE importing JAX
     # This must happen before any JAX import to take effect
@@ -88,6 +94,10 @@ def _init_worker(
     
     # Also explicitly set via config (belt and suspenders)
     jax.config.update("jax_platform_name", "cpu")
+    
+    # Store config for creating fresh environments
+    _worker_config_path = config_path
+    _worker_episode_length = episode_length
     
     # Create environment
     def factory():
@@ -109,14 +119,13 @@ def _init_worker(
     _worker_params = _worker_model.init(rng, dummy_obs)
 
 
-def _evaluate_params(flat_params: np.ndarray, episode_seed: Optional[int]) -> float:
+def _run_single_episode(flat_params: np.ndarray, episode_seed: int) -> float:
     """
-    Run one episode with the given flattened parameters.
+    Run one episode with the given flattened parameters and seed.
     
     Args:
         flat_params: Flattened numpy array of network parameters
-        episode_seed: Seed to use for this episode (common across population
-                      for CRN fairness within a generation).
+        episode_seed: Seed to use for this episode
         
     Returns:
         Total episode reward
@@ -132,8 +141,7 @@ def _evaluate_params(flat_params: np.ndarray, episode_seed: Optional[int]) -> fl
     _, unravel_fn = flatten_util.ravel_pytree(_worker_params)
     params = unravel_fn(flat_params)
     
-    # Common random numbers: reseed each episode so all individuals in a
-    # generation see the same randomness, while seeds can change across gens.
+    # Reset with specific seed
     obs, _ = _worker_env.reset(seed=episode_seed)
     total_reward = 0.0
     truncated = False
@@ -149,6 +157,32 @@ def _evaluate_params(flat_params: np.ndarray, episode_seed: Optional[int]) -> fl
         total_reward += reward
         
     return total_reward
+
+
+def _evaluate_params_multi_episode(args_tuple: Tuple[np.ndarray, List[int]]) -> float:
+    """
+    Run multiple episodes with the given flattened parameters and seeds.
+    
+    This is the key anti-overfitting mechanism: by evaluating on multiple
+    episodes with different seeds and averaging, we get a more robust
+    fitness estimate that generalizes better.
+    
+    Args:
+        args_tuple: Tuple of (flat_params, list of episode_seeds)
+        
+    Returns:
+        Mean reward across all episodes
+    """
+    flat_params, episode_seeds = args_tuple
+    
+    rewards = []
+    for seed in episode_seeds:
+        reward = _run_single_episode(flat_params, seed)
+        rewards.append(reward)
+    
+    # Return mean reward for robustness
+    # Alternative: could use median for more robustness to outliers
+    return float(np.mean(rewards))
 
 
 def train(args):
@@ -169,6 +203,7 @@ def train(args):
     dummy_env.close()
     
     print(f"Observation Dim: {obs_dim}, Action Dim: {action_dim}")
+    print(f"Evaluation episodes per individual: {args.eval_episodes}")
     
     # Log hardware acceleration status
     devices = jax.devices()
@@ -244,7 +279,7 @@ def train(args):
     rewards_file = run_dir / "training_rewards.csv"
     with rewards_file.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["generation", "mean_reward", "max_reward", "time_elapsed"])
+        writer.writerow(["generation", "mean_reward", "max_reward", "min_reward", "std_reward", "time_elapsed"])
 
     print(f"Starting training for {args.generations} generations...")
     start_time = time.time()
@@ -253,13 +288,21 @@ def train(args):
 
     # 6. Training Loop
     for gen in range(1, args.generations + 1):
-        rng, rng_seed = jax.random.split(rng)
-        # Sample a fresh seed per generation so the population is compared
-        # with common random numbers, but avoids overfitting to one stream.
-        # Use int32 bounds to avoid dtype overflow on some backends.
-        gen_episode_seed = int(
-            jax.random.randint(rng_seed, (), minval=0, maxval=2**31 - 1, dtype=jnp.int32)
-        )
+        rng, rng_seeds = jax.random.split(rng)
+        
+        # Generate multiple seeds for multi-episode evaluation
+        # Each individual will be evaluated on the same set of seeds within a generation
+        # This maintains fair comparison (CRN) while preventing overfitting
+        gen_episode_seeds = [
+            int(jax.random.randint(
+                jax.random.fold_in(rng_seeds, i), 
+                (), 
+                minval=0, 
+                maxval=2**31 - 1, 
+                dtype=jnp.int32
+            ))
+            for i in range(args.eval_episodes)
+        ]
 
         rng, rng_ask = jax.random.split(rng)
         
@@ -278,9 +321,9 @@ def train(args):
             population_flat.append(np.array(flat_individual))
         
         # EVALUATE (on CPU workers in parallel)
-        # Use starmap to pass the shared per-generation seed to every eval
-        eval_payloads = [(flat_params, gen_episode_seed) for flat_params in population_flat]
-        fitness_values = pool.starmap(_evaluate_params, eval_payloads)
+        # Each individual is evaluated on multiple episodes with different seeds
+        eval_payloads = [(flat_params, gen_episode_seeds) for flat_params in population_flat]
+        fitness_values = pool.map(_evaluate_params_multi_episode, eval_payloads)
         
         # Convert fitness back to JAX array
         fitness_array = jnp.array(fitness_values)
@@ -292,14 +335,16 @@ def train(args):
         # Logging
         mean_fit = float(jnp.mean(fitness_array))
         max_fit = float(jnp.max(fitness_array))
+        min_fit = float(jnp.min(fitness_array))
+        std_fit = float(jnp.std(fitness_array))
         elapsed = time.time() - start_time
         
         if gen % 3 == 0 or gen == 1:
-            print(f"Gen {gen}/{args.generations} | Mean: {mean_fit:.2f} | Max: {max_fit:.2f} | Time: {elapsed:.1f}s")
+            print(f"Gen {gen}/{args.generations} | Mean: {mean_fit:.2f} | Max: {max_fit:.2f} | Std: {std_fit:.2f} | Time: {elapsed:.1f}s")
             
         with rewards_file.open("a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow([gen, mean_fit, max_fit, elapsed])
+            writer.writerow([gen, mean_fit, max_fit, min_fit, std_fit, elapsed])
 
         # Save Best Model
         if max_fit > best_fitness_all_time:
@@ -313,7 +358,7 @@ def train(args):
         np.savez(run_dir / "latest_model.npz", flat_params=np.array(state.mean))
 
         # Periodic Checkpoint
-        if gen % args.eval_freq == 0:
+        if gen % args.checkpoint_freq == 0:
             np.savez(run_dir / "checkpoints" / f"gen_{gen}.npz", flat_params=np.array(state.mean))
 
     # Cleanup
@@ -325,13 +370,14 @@ def train(args):
         "generations": args.generations,
         "popsize": args.popsize,
         "episode_length": args.episode_length,
+        "eval_episodes": args.eval_episodes,
         "learning_rate": args.learning_rate,
         "lrate_decay": args.lrate_decay,
         "sigma_init": args.sigma_init,
         "sigma_decay": args.sigma_decay,
         "seed": args.seed,
         "n_workers": args.n_workers,
-        "eval_freq": args.eval_freq,
+        "checkpoint_freq": args.checkpoint_freq,
     }
     save_config_with_hyperparameters(run_dir, args.config, "openai_es", hyperparams)
     
@@ -345,13 +391,15 @@ def parse_args():
     parser.add_argument("--generations", type=int, default=100, help="Number of generations.")
     parser.add_argument("--popsize", type=int, default=128, help="Population size.")
     parser.add_argument("--episode-length", type=int, default=750, help="Episode length.")
+    parser.add_argument("--eval-episodes", type=int, default=5, 
+                        help="Number of episodes to evaluate each individual on (anti-overfitting). Default: 5")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--learning-rate", type=float, default=0.01, help="Learning rate.")
     parser.add_argument("--lrate-decay", type=float, default=0.999, help="Learning rate decay.")
     parser.add_argument("--sigma-init", type=float, default=0.05, help="Initial sigma.")
     parser.add_argument("--sigma-decay", type=float, default=0.999, help="Sigma decay.")
     parser.add_argument("--n-workers", type=int, default=multiprocessing.cpu_count(), help="Number of parallel workers.")
-    parser.add_argument("--eval-freq", type=int, default=50, help="Checkpoint frequency.")
+    parser.add_argument("--checkpoint-freq", type=int, default=50, help="Checkpoint frequency (generations).")
     parser.add_argument(
         "--output-root",
         type=Path,
