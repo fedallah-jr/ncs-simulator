@@ -324,7 +324,7 @@ def train(args):
         std_fit = float(jnp.std(fitness_array))
         elapsed = time.time() - start_time
         
-        if gen % 3 == 0 or gen == 1:
+        if gen % 1 == 0 or gen == 1:
             print(f"Gen {gen}/{args.generations} | Mean: {mean_fit:.1f} | Max: {max_fit:.1f} | Std: {std_fit:.1f} | Time: {elapsed:.1f}s")
             
         with rewards_file.open("a", newline="", encoding="utf-8") as f:
@@ -389,22 +389,22 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train OpenAI-ES on NCS env.")
     parser.add_argument("--config", type=Path, default=None, help="Config JSON path.")
     parser.add_argument("--generations", type=int, default=100, help="Number of generations.")
-    parser.add_argument("--popsize", type=int, default=128, help="Population size.")
-    parser.add_argument("--episode-length", type=int, default=750, help="Episode length.")
-    parser.add_argument("--eval-episodes", type=int, default=5, 
-                        help="Episodes per individual (anti-overfitting). Default: 5")
-    parser.add_argument("--fitness-shaping", type=str, default="centered_rank",
+    parser.add_argument("--popsize", type=int, default=132, help="Population size.")
+    parser.add_argument("--episode-length", type=int, default=500, help="Episode length.")
+    parser.add_argument("--eval-episodes", type=int, default=3, 
+                        help="Episodes per individual (anti-overfitting). Default: 3")
+    parser.add_argument("--fitness-shaping", type=str, default="weights",
                         choices=["centered_rank", "z_score", "normalize", "none", "weights"],
                         help="Fitness shaping (evosax built-in). Default: centered_rank")
     parser.add_argument("--hidden-size", type=int, default=64, help="Hidden layer size.")
     parser.add_argument("--use-layer-norm", action="store_true", help="Use LayerNorm.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
-    parser.add_argument("--learning-rate", type=float, default=0.01, help="Learning rate.")
-    parser.add_argument("--lrate-decay", type=float, default=0.999, help="LR decay.")
-    parser.add_argument("--sigma-init", type=float, default=0.05, help="Initial sigma.")
+    parser.add_argument("--learning-rate", type=float, default=0.05, help="Learning rate.")
+    parser.add_argument("--lrate-decay", type=float, default=0.99, help="LR decay.")
+    parser.add_argument("--sigma-init", type=float, default=0.25, help="Initial sigma.")
     parser.add_argument("--sigma-decay", type=float, default=0.999, help="Sigma decay.")
     parser.add_argument("--n-workers", type=int, default=multiprocessing.cpu_count(), help="Workers.")
-    parser.add_argument("--checkpoint-freq", type=int, default=50, help="Checkpoint frequency.")
+    parser.add_argument("--checkpoint-freq", type=int, default=5, help="Checkpoint frequency.")
     parser.add_argument("--output-root", type=Path, default=Path("outputs"), help="Output directory.")
     return parser.parse_args()
 
