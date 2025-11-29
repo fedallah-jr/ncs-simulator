@@ -2,11 +2,14 @@
 Policy Visualization Tool for Networked Control Systems
 
 This tool visualizes the state evolution of policies trained or defined in the NCS simulator.
-It supports both learned policies (Stable-Baselines3) and heuristic policies.
+It supports both learned policies (Stable-Baselines3, OpenAI-ES) and heuristic policies.
 
 Usage:
     # Visualize a trained PPO policy
     python -m tools.visualize_policy --config configs/perfect_comm.json --policy path/to/model.zip --policy-type sb3
+
+    # Visualize an ES policy
+    python -m tools.visualize_policy --config configs/perfect_comm.json --policy path/to/model.npz --policy-type es
 
     # Visualize a heuristic policy
     python -m tools.visualize_policy --config configs/perfect_comm.json --policy always_send --policy-type heuristic
@@ -109,10 +112,16 @@ def load_es_policy(model_path: str, env: Any):
             "Install with: pip install jax jaxlib flax evosax"
         )
 
-    # Load flattened params
+    # Load saved data including architecture info
     try:
         data = np.load(model_path)
         flat_params = data['flat_params']
+        
+        # Load architecture parameters with backward compatibility
+        hidden_size = int(data['hidden_size']) if 'hidden_size' in data else 64
+        use_layer_norm = bool(data['use_layer_norm']) if 'use_layer_norm' in data else False
+        
+        print(f"  Architecture: hidden_size={hidden_size}, use_layer_norm={use_layer_norm}")
     except Exception as e:
         raise ValueError(f"Could not load numpy data from {model_path}: {e}")
 
@@ -129,7 +138,8 @@ def load_es_policy(model_path: str, env: Any):
     else:
         raise ValueError("Environment must have a valid observation space.")
 
-    model = create_policy_net(action_dim=action_dim)
+    # Create model with correct architecture
+    model = create_policy_net(action_dim=action_dim, hidden_size=hidden_size, use_layer_norm=use_layer_norm)
 
     # Initialize dummy to get structure
     rng = jax.random.PRNGKey(0)

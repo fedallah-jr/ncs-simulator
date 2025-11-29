@@ -4,11 +4,7 @@ OpenAI-ES training for the NCS environment using evosax and JAX.
 Compatible with TPU/GPU acceleration for the evolution strategy updates.
 Evaluates the population in parallel on CPU workers.
 
-Key features:
-1. Anti-overfitting: Each individual is evaluated on multiple episodes
-   with different seeds, and the mean fitness is used.
-2. Fitness shaping: Raw fitness values are transformed using rank-based
-   shaping for stable gradient estimation (following OpenAI-ES paper).
+
 """
 
 from __future__ import annotations
@@ -47,28 +43,54 @@ _worker_config_path: Optional[str] = None
 _worker_episode_length: int = 750
 
 
-def create_policy_net(action_dim: int):
+def create_policy_net(action_dim: int, hidden_size: int = 64, use_layer_norm: bool = False):
     """
     Create a PolicyNet instance. Imports Flax lazily.
     
     This function should only be called AFTER setting JAX platform to CPU
     in worker processes.
+    
+    Args:
+        action_dim: Number of output actions
+        hidden_size: Number of units in hidden layers
+        use_layer_norm: Whether to use Layer Normalization for more stable training.
+                       Unlike Batch Normalization, LayerNorm is deterministic
+                       (no batch dependency) which is important for ES where
+                       each individual is evaluated independently.
+    
+    Note on Virtual Batch Normalization (VBN):
+        The original OpenAI-ES paper used VBN to make BatchNorm deterministic.
+        We use LayerNorm instead because:
+        1. Simpler - no need to maintain a reference batch
+        2. Same benefit - deterministic evaluation
+        3. Modern best practice for transformers and small MLPs
     """
     import flax.linen as nn
     
     class PolicyNet(nn.Module):
         action_dim: int
+        hidden_size: int = 64
+        use_layer_norm: bool = False
 
         @nn.compact
         def __call__(self, x):
-            x = nn.Dense(64)(x)
+            # First hidden layer
+            x = nn.Dense(self.hidden_size)(x)
+            if self.use_layer_norm:
+                x = nn.LayerNorm()(x)
             x = nn.tanh(x)
-            x = nn.Dense(64)(x)
+            
+            # Second hidden layer
+            x = nn.Dense(self.hidden_size)(x)
+            if self.use_layer_norm:
+                x = nn.LayerNorm()(x)
             x = nn.tanh(x)
+            
+            # Output layer (no activation - raw logits)
             x = nn.Dense(self.action_dim)(x)
             return x
     
-    return PolicyNet(action_dim=action_dim)
+    return PolicyNet(action_dim=action_dim, hidden_size=hidden_size, use_layer_norm=use_layer_norm)
 
 
 def _init_worker(
@@ -76,7 +98,9 @@ def _init_worker(
     episode_length: int, 
     seed: Optional[int],
     action_dim: int,
-    obs_dim: int
+    obs_dim: int,
+    hidden_size: int = 64,
+    use_layer_norm: bool = False
 ):
     """
     Initialize the environment and model in the worker process.
@@ -113,7 +137,7 @@ def _init_worker(
     _worker_env = SingleAgentWrapper(factory)
     
     # Create model (imports Flax lazily)
-    _worker_model = create_policy_net(action_dim)
+    _worker_model = create_policy_net(action_dim, hidden_size=hidden_size, use_layer_norm=use_layer_norm)
     
     # Initialize dummy params to get the structure for unraveling
     rng = jax.random.PRNGKey(0)
@@ -273,6 +297,7 @@ def train(args):
     dummy_env.close()
     
     print(f"Observation Dim: {obs_dim}, Action Dim: {action_dim}")
+    print(f"Hidden Size: {args.hidden_size}, Layer Norm: {args.use_layer_norm}")
     print(f"Evaluation episodes per individual: {args.eval_episodes}")
     print(f"Fitness shaping method: {args.fitness_shaping}")
     
@@ -291,7 +316,7 @@ def train(args):
 
     # 2. Setup Flax Model & Initial Params
     rng = jax.random.PRNGKey(args.seed if args.seed is not None else 0)
-    model = create_policy_net(action_dim)
+    model = create_policy_net(action_dim, hidden_size=args.hidden_size, use_layer_norm=args.use_layer_norm)
     dummy_obs = jnp.zeros((1, obs_dim))
     params = model.init(rng, dummy_obs)
     
@@ -346,7 +371,8 @@ def train(args):
     pool = ctx.Pool(
         processes=args.n_workers,
         initializer=_init_worker,
-        initargs=(config_path_str, args.episode_length, args.seed, action_dim, obs_dim)
+        initargs=(config_path_str, args.episode_length, args.seed, action_dim, obs_dim,
+                  args.hidden_size, args.use_layer_norm)
     )
 
     # 6. Logging Setup
@@ -442,15 +468,30 @@ def train(args):
             best_fitness_all_time = max_fit
             best_idx = int(jnp.argmax(raw_fitness_array))
             best_flat = population_flat[best_idx]
-            np.savez(run_dir / "best_model.npz", flat_params=best_flat)
+            np.savez(
+                run_dir / "best_model.npz",
+                flat_params=best_flat,
+                hidden_size=args.hidden_size,
+                use_layer_norm=args.use_layer_norm
+            )
             
         # Always save latest (mean of distribution)
         # state.mean is the flat mean vector in Open_ES
-        np.savez(run_dir / "latest_model.npz", flat_params=np.array(state.mean))
+        np.savez(
+            run_dir / "latest_model.npz",
+            flat_params=np.array(state.mean),
+            hidden_size=args.hidden_size,
+            use_layer_norm=args.use_layer_norm
+        )
 
         # Periodic Checkpoint
         if gen % args.checkpoint_freq == 0:
-            np.savez(run_dir / "checkpoints" / f"gen_{gen}.npz", flat_params=np.array(state.mean))
+            np.savez(
+                run_dir / "checkpoints" / f"gen_{gen}.npz",
+                flat_params=np.array(state.mean),
+                hidden_size=args.hidden_size,
+                use_layer_norm=args.use_layer_norm
+            )
 
     # Cleanup
     pool.close()
@@ -463,6 +504,8 @@ def train(args):
         "episode_length": args.episode_length,
         "eval_episodes": args.eval_episodes,
         "fitness_shaping": args.fitness_shaping,
+        "hidden_size": args.hidden_size,
+        "use_layer_norm": args.use_layer_norm,
         "learning_rate": args.learning_rate,
         "lrate_decay": args.lrate_decay,
         "sigma_init": args.sigma_init,
@@ -488,6 +531,15 @@ def parse_args():
     parser.add_argument("--fitness-shaping", type=str, default="centered_rank",
                         choices=["centered_rank", "z_score", "none"],
                         help="Fitness shaping method for stable gradients. Default: centered_rank")
+    
+    # Network architecture options
+    parser.add_argument("--hidden-size", type=int, default=64,
+                        help="Number of units in hidden layers. Default: 64")
+    parser.add_argument("--use-layer-norm", action="store_true",
+                        help="Use Layer Normalization in the policy network. "
+                             "Unlike BatchNorm, LayerNorm is deterministic (no batch dependency) "
+                             "which is important for ES. This is the modern alternative to VBN.")
+    
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--learning-rate", type=float, default=0.01, help="Learning rate.")
     parser.add_argument("--lrate-decay", type=float, default=0.999, help="Learning rate decay.")
