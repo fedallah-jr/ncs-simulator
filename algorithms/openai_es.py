@@ -4,9 +4,11 @@ OpenAI-ES training for the NCS environment using evosax and JAX.
 Compatible with TPU/GPU acceleration for the evolution strategy updates.
 Evaluates the population in parallel on CPU workers.
 
-Key anti-overfitting feature: Each individual is evaluated on multiple episodes
-with different seeds, and the mean fitness is used. This prevents the policy
-from overfitting to specific random streams.
+Key features:
+1. Anti-overfitting: Each individual is evaluated on multiple episodes
+   with different seeds, and the mean fitness is used.
+2. Fitness shaping: Raw fitness values are transformed using rank-based
+   shaping for stable gradient estimation (following OpenAI-ES paper).
 """
 
 from __future__ import annotations
@@ -181,8 +183,76 @@ def _evaluate_params_multi_episode(args_tuple: Tuple[np.ndarray, List[int]]) -> 
         rewards.append(reward)
     
     # Return mean reward for robustness
-    # Alternative: could use median for more robustness to outliers
     return float(np.mean(rewards))
+
+
+def create_fitness_shaper(popsize: int, method: str = "centered_rank"):
+    """
+    Create a fitness shaping function.
+    
+    Fitness shaping transforms raw fitness values into utilities that are
+    more suitable for gradient estimation. This makes the optimization:
+    - Invariant to monotonic transformations of fitness
+    - More robust to outliers
+    - Easier to tune learning rates
+    
+    Args:
+        popsize: Population size
+        method: Shaping method - "centered_rank", "z_score", or "none"
+        
+    Returns:
+        Function that transforms fitness array to shaped utilities
+    """
+    import jax.numpy as jnp
+    
+    if method == "none":
+        def no_shaping(fitness: jnp.ndarray) -> jnp.ndarray:
+            return fitness
+        return no_shaping
+    
+    elif method == "z_score":
+        def z_score_shaping(fitness: jnp.ndarray) -> jnp.ndarray:
+            """Z-score normalization: (x - mean) / std"""
+            mean = jnp.mean(fitness)
+            std = jnp.std(fitness)
+            # Add small epsilon to avoid division by zero
+            return (fitness - mean) / (std + 1e-8)
+        return z_score_shaping
+    
+    elif method == "centered_rank":
+        def centered_rank_shaping(fitness: jnp.ndarray) -> jnp.ndarray:
+            """
+            Centered rank-based fitness shaping (from OpenAI-ES paper).
+            
+            This transforms fitness values to utilities based on rank:
+            1. Rank individuals (higher fitness = lower rank = better)
+            2. Apply utility transformation: u_i = max(0, log(n/2 + 1) - log(rank_i))
+            3. Normalize to zero mean
+            
+            This is invariant to monotonic transformations of fitness and
+            emphasizes relative ordering rather than absolute values.
+            """
+            n = fitness.shape[0]
+            
+            # Get ranks (0 = best, n-1 = worst)
+            # argsort twice gives ranks
+            ranks = jnp.argsort(jnp.argsort(-fitness))  # Negative for descending order
+            
+            # Compute utilities using the standard ES utility function
+            # This gives more weight to top performers
+            log_term = jnp.log(n / 2.0 + 1.0)
+            utilities = jnp.maximum(0.0, log_term - jnp.log(ranks + 1.0))
+            
+            # Normalize: zero mean, unit sum of absolute values
+            utilities = utilities / (jnp.sum(utilities) + 1e-8)
+            utilities = utilities - jnp.mean(utilities)
+            
+            return utilities
+        
+        return centered_rank_shaping
+    
+    else:
+        raise ValueError(f"Unknown fitness shaping method: {method}")
 
 
 def train(args):
@@ -204,6 +274,7 @@ def train(args):
     
     print(f"Observation Dim: {obs_dim}, Action Dim: {action_dim}")
     print(f"Evaluation episodes per individual: {args.eval_episodes}")
+    print(f"Fitness shaping method: {args.fitness_shaping}")
     
     # Log hardware acceleration status
     devices = jax.devices()
@@ -254,6 +325,12 @@ def train(args):
     es_params = strategy.default_params
     state = strategy.init(rng, params, es_params)
 
+    # 4. Setup fitness shaper
+    fitness_shaper = create_fitness_shaper(args.popsize, args.fitness_shaping)
+    
+    # JIT compile the fitness shaper for speed
+    fitness_shaper_jit = jax.jit(fitness_shaper)
+
     # JIT the ASK and TELL steps for acceleration
     @jax.jit
     def ask_step(rng, state, params):
@@ -264,7 +341,7 @@ def train(args):
     def tell_step(rng, x, fitness, state, params):
         return strategy.tell(rng, x, fitness, state, params)
 
-    # 4. Setup Parallel Workers (using spawn to ensure clean processes)
+    # 5. Setup Parallel Workers (using spawn to ensure clean processes)
     ctx = multiprocessing.get_context("spawn")
     pool = ctx.Pool(
         processes=args.n_workers,
@@ -272,21 +349,24 @@ def train(args):
         initargs=(config_path_str, args.episode_length, args.seed, action_dim, obs_dim)
     )
 
-    # 5. Logging Setup
+    # 6. Logging Setup
     run_dir, metadata = prepare_run_directory("openai_es", args.config, args.output_root)
     (run_dir / "checkpoints").mkdir(exist_ok=True)
     
     rewards_file = run_dir / "training_rewards.csv"
     with rewards_file.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["generation", "mean_reward", "max_reward", "min_reward", "std_reward", "time_elapsed"])
+        writer.writerow([
+            "generation", "mean_reward", "max_reward", "min_reward", "std_reward",
+            "shaped_mean", "shaped_std", "time_elapsed"
+        ])
 
     print(f"Starting training for {args.generations} generations...")
     start_time = time.time()
     
     best_fitness_all_time = -float("inf")
 
-    # 6. Training Loop
+    # 7. Training Loop
     for gen in range(1, args.generations + 1):
         rng, rng_seeds = jax.random.split(rng)
         
@@ -323,33 +403,44 @@ def train(args):
         # EVALUATE (on CPU workers in parallel)
         # Each individual is evaluated on multiple episodes with different seeds
         eval_payloads = [(flat_params, gen_episode_seeds) for flat_params in population_flat]
-        fitness_values = pool.map(_evaluate_params_multi_episode, eval_payloads)
+        raw_fitness_values = pool.map(_evaluate_params_multi_episode, eval_payloads)
         
-        # Convert fitness back to JAX array
-        fitness_array = jnp.array(fitness_values)
+        # Convert to JAX array
+        raw_fitness_array = jnp.array(raw_fitness_values)
         
-        # TELL (on TPU/GPU) - update strategy
+        # Apply fitness shaping for stable gradient estimation
+        # The raw fitness is used for logging, shaped fitness for optimization
+        shaped_fitness_array = fitness_shaper_jit(raw_fitness_array)
+        
+        # TELL (on TPU/GPU) - update strategy using SHAPED fitness
         rng, rng_tell = jax.random.split(rng)
-        state, metrics = tell_step(rng_tell, x, fitness_array, state, es_params)
+        state, metrics = tell_step(rng_tell, x, shaped_fitness_array, state, es_params)
         
-        # Logging
-        mean_fit = float(jnp.mean(fitness_array))
-        max_fit = float(jnp.max(fitness_array))
-        min_fit = float(jnp.min(fitness_array))
-        std_fit = float(jnp.std(fitness_array))
+        # Logging (use RAW fitness for interpretability)
+        mean_fit = float(jnp.mean(raw_fitness_array))
+        max_fit = float(jnp.max(raw_fitness_array))
+        min_fit = float(jnp.min(raw_fitness_array))
+        std_fit = float(jnp.std(raw_fitness_array))
+        shaped_mean = float(jnp.mean(shaped_fitness_array))
+        shaped_std = float(jnp.std(shaped_fitness_array))
         elapsed = time.time() - start_time
         
         if gen % 3 == 0 or gen == 1:
-            print(f"Gen {gen}/{args.generations} | Mean: {mean_fit:.2f} | Max: {max_fit:.2f} | Std: {std_fit:.2f} | Time: {elapsed:.1f}s")
+            print(
+                f"Gen {gen}/{args.generations} | "
+                f"Raw: {mean_fit:.1f}±{std_fit:.1f} [{min_fit:.1f}, {max_fit:.1f}] | "
+                f"Shaped: {shaped_mean:.4f}±{shaped_std:.4f} | "
+                f"Time: {elapsed:.1f}s"
+            )
             
         with rewards_file.open("a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow([gen, mean_fit, max_fit, min_fit, std_fit, elapsed])
+            writer.writerow([gen, mean_fit, max_fit, min_fit, std_fit, shaped_mean, shaped_std, elapsed])
 
-        # Save Best Model
+        # Save Best Model (based on RAW fitness for meaningful comparison)
         if max_fit > best_fitness_all_time:
             best_fitness_all_time = max_fit
-            best_idx = int(jnp.argmax(fitness_array))
+            best_idx = int(jnp.argmax(raw_fitness_array))
             best_flat = population_flat[best_idx]
             np.savez(run_dir / "best_model.npz", flat_params=best_flat)
             
@@ -371,6 +462,7 @@ def train(args):
         "popsize": args.popsize,
         "episode_length": args.episode_length,
         "eval_episodes": args.eval_episodes,
+        "fitness_shaping": args.fitness_shaping,
         "learning_rate": args.learning_rate,
         "lrate_decay": args.lrate_decay,
         "sigma_init": args.sigma_init,
@@ -393,6 +485,9 @@ def parse_args():
     parser.add_argument("--episode-length", type=int, default=750, help="Episode length.")
     parser.add_argument("--eval-episodes", type=int, default=5, 
                         help="Number of episodes to evaluate each individual on (anti-overfitting). Default: 5")
+    parser.add_argument("--fitness-shaping", type=str, default="centered_rank",
+                        choices=["centered_rank", "z_score", "none"],
+                        help="Fitness shaping method for stable gradients. Default: centered_rank")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--learning-rate", type=float, default=0.01, help="Learning rate.")
     parser.add_argument("--lrate-decay", type=float, default=0.999, help="Learning rate decay.")
