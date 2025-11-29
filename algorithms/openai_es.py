@@ -4,7 +4,10 @@ OpenAI-ES training for the NCS environment using evosax and JAX.
 Compatible with TPU/GPU acceleration for the evolution strategy updates.
 Evaluates the population in parallel on CPU workers.
 
-
+Key features:
+1. Anti-overfitting: Each individual is evaluated on multiple episodes
+   with different seeds, and the mean fitness is used.
+2. Fitness shaping: Uses evosax's built-in fitness shaping (centered_rank by default).
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ import sys
 import time
 import multiprocessing
 from pathlib import Path
-from typing import Optional, List, Any, Dict, Tuple
+from typing import Optional, List, Any, Tuple
 
 import numpy as np
 import gymnasium as gym
@@ -39,31 +42,16 @@ from utils.run_utils import prepare_run_directory, save_config_with_hyperparamet
 _worker_env: Optional[gym.Env] = None
 _worker_model: Any = None  # Will be PolicyNet instance
 _worker_params: Any = None  # Cached params structure for unraveling
-_worker_config_path: Optional[str] = None
-_worker_episode_length: int = 750
 
 
 def create_policy_net(action_dim: int, hidden_size: int = 64, use_layer_norm: bool = False):
     """
     Create a PolicyNet instance. Imports Flax lazily.
     
-    This function should only be called AFTER setting JAX platform to CPU
-    in worker processes.
-    
     Args:
         action_dim: Number of output actions
         hidden_size: Number of units in hidden layers
-        use_layer_norm: Whether to use Layer Normalization for more stable training.
-                       Unlike Batch Normalization, LayerNorm is deterministic
-                       (no batch dependency) which is important for ES where
-                       each individual is evaluated independently.
-    
-    Note on Virtual Batch Normalization (VBN):
-        The original OpenAI-ES paper used VBN to make BatchNorm deterministic.
-        We use LayerNorm instead because:
-        1. Simpler - no need to maintain a reference batch
-        2. Same benefit - deterministic evaluation
-        3. Modern best practice for transformers and small MLPs
+        use_layer_norm: Whether to use Layer Normalization
     """
     import flax.linen as nn
     
@@ -74,19 +62,16 @@ def create_policy_net(action_dim: int, hidden_size: int = 64, use_layer_norm: bo
 
         @nn.compact
         def __call__(self, x):
-            # First hidden layer
             x = nn.Dense(self.hidden_size)(x)
             if self.use_layer_norm:
                 x = nn.LayerNorm()(x)
             x = nn.tanh(x)
             
-            # Second hidden layer
             x = nn.Dense(self.hidden_size)(x)
             if self.use_layer_norm:
                 x = nn.LayerNorm()(x)
             x = nn.tanh(x)
             
-            # Output layer (no activation - raw logits)
             x = nn.Dense(self.action_dim)(x)
             return x
     
@@ -102,30 +87,15 @@ def _init_worker(
     hidden_size: int = 64,
     use_layer_norm: bool = False
 ):
-    """
-    Initialize the environment and model in the worker process.
+    """Initialize the environment and model in the worker process."""
+    global _worker_env, _worker_model, _worker_params
     
-    CRITICAL: Must set JAX platform to CPU before importing JAX to avoid
-    TPU conflicts when the main process is using the TPU.
-    """
-    global _worker_env, _worker_model, _worker_params, _worker_config_path, _worker_episode_length
-    
-    # Set JAX to use CPU BEFORE importing JAX
-    # This must happen before any JAX import to take effect
     os.environ["JAX_PLATFORMS"] = "cpu"
     
-    # Now we can safely import JAX
     import jax
     import jax.numpy as jnp
-    
-    # Also explicitly set via config (belt and suspenders)
     jax.config.update("jax_platform_name", "cpu")
     
-    # Store config for creating fresh environments
-    _worker_config_path = config_path
-    _worker_episode_length = episode_length
-    
-    # Create environment
     def factory():
         return NCS_Env(
             n_agents=1,
@@ -135,46 +105,29 @@ def _init_worker(
         )
     
     _worker_env = SingleAgentWrapper(factory)
-    
-    # Create model (imports Flax lazily)
     _worker_model = create_policy_net(action_dim, hidden_size=hidden_size, use_layer_norm=use_layer_norm)
     
-    # Initialize dummy params to get the structure for unraveling
     rng = jax.random.PRNGKey(0)
     dummy_obs = jnp.zeros((1, obs_dim))
     _worker_params = _worker_model.init(rng, dummy_obs)
 
 
 def _run_single_episode(flat_params: np.ndarray, episode_seed: int) -> float:
-    """
-    Run one episode with the given flattened parameters and seed.
-    
-    Args:
-        flat_params: Flattened numpy array of network parameters
-        episode_seed: Seed to use for this episode
-        
-    Returns:
-        Total episode reward
-    """
+    """Run one episode with the given flattened parameters and seed."""
     global _worker_env, _worker_model, _worker_params
     
-    # Import JAX (already configured for CPU in _init_worker)
-    import jax
     import jax.numpy as jnp
     from jax import flatten_util
     
-    # Unravel flat params to pytree structure
     _, unravel_fn = flatten_util.ravel_pytree(_worker_params)
     params = unravel_fn(flat_params)
     
-    # Reset with specific seed
     obs, _ = _worker_env.reset(seed=episode_seed)
     total_reward = 0.0
     truncated = False
     terminated = False
     
     while not (truncated or terminated):
-        # Forward pass - ensure obs is properly shaped
         obs_jax = jnp.array(obs[np.newaxis, :])
         logits = _worker_model.apply(params, obs_jax)
         action = int(jnp.argmax(logits))
@@ -186,110 +139,58 @@ def _run_single_episode(flat_params: np.ndarray, episode_seed: int) -> float:
 
 
 def _evaluate_params_multi_episode(args_tuple: Tuple[np.ndarray, List[int]]) -> float:
-    """
-    Run multiple episodes with the given flattened parameters and seeds.
-    
-    This is the key anti-overfitting mechanism: by evaluating on multiple
-    episodes with different seeds and averaging, we get a more robust
-    fitness estimate that generalizes better.
-    
-    Args:
-        args_tuple: Tuple of (flat_params, list of episode_seeds)
-        
-    Returns:
-        Mean reward across all episodes
-    """
+    """Run multiple episodes and return mean reward (anti-overfitting)."""
     flat_params, episode_seeds = args_tuple
-    
-    rewards = []
-    for seed in episode_seeds:
-        reward = _run_single_episode(flat_params, seed)
-        rewards.append(reward)
-    
-    # Return mean reward for robustness
+    rewards = [_run_single_episode(flat_params, seed) for seed in episode_seeds]
     return float(np.mean(rewards))
 
 
-def create_fitness_shaper(popsize: int, method: str = "centered_rank"):
+def get_fitness_shaping_fn(method: str):
     """
-    Create a fitness shaping function.
-    
-    Fitness shaping transforms raw fitness values into utilities that are
-    more suitable for gradient estimation. This makes the optimization:
-    - Invariant to monotonic transformations of fitness
-    - More robust to outliers
-    - Easier to tune learning rates
+    Get a fitness shaping function from evosax.
     
     Args:
-        popsize: Population size
-        method: Shaping method - "centered_rank", "z_score", or "none"
+        method: Shaping method. Options:
+            - "centered_rank": Rank-based, maps to [-0.5, 0.5] (default, recommended)
+            - "z_score": Standardize to mean=0, std=1  
+            - "normalize": Normalize to [0, 1] range
+            - "none": No shaping (identity)
+            - "weights": CMA-ES style weighted recombination
         
     Returns:
-        Function that transforms fitness array to shaped utilities
+        Fitness shaping function compatible with evosax strategies
     """
-    import jax.numpy as jnp
+    from evosax.core.fitness_shaping import (
+        centered_rank_fitness_shaping_fn,
+        standardize_fitness_shaping_fn,
+        normalize_fitness_shaping_fn,
+        identity_fitness_shaping_fn,
+        weights_fitness_shaping_fn,
+    )
     
-    if method == "none":
-        def no_shaping(fitness: jnp.ndarray) -> jnp.ndarray:
-            return fitness
-        return no_shaping
+    mapping = {
+        "centered_rank": centered_rank_fitness_shaping_fn,
+        "z_score": standardize_fitness_shaping_fn,
+        "normalize": normalize_fitness_shaping_fn,
+        "none": identity_fitness_shaping_fn,
+        "weights": weights_fitness_shaping_fn,
+    }
     
-    elif method == "z_score":
-        def z_score_shaping(fitness: jnp.ndarray) -> jnp.ndarray:
-            """Z-score normalization: (x - mean) / std"""
-            mean = jnp.mean(fitness)
-            std = jnp.std(fitness)
-            # Add small epsilon to avoid division by zero
-            return (fitness - mean) / (std + 1e-8)
-        return z_score_shaping
+    if method not in mapping:
+        raise ValueError(f"Unknown method: {method}. Options: {list(mapping.keys())}")
     
-    elif method == "centered_rank":
-        def centered_rank_shaping(fitness: jnp.ndarray) -> jnp.ndarray:
-            """
-            Centered rank-based fitness shaping (from OpenAI-ES paper).
-            
-            This transforms fitness values to utilities based on rank:
-            1. Rank individuals (higher fitness = lower rank = better)
-            2. Apply utility transformation: u_i = max(0, log(n/2 + 1) - log(rank_i))
-            3. Normalize to zero mean
-            
-            This is invariant to monotonic transformations of fitness and
-            emphasizes relative ordering rather than absolute values.
-            """
-            n = fitness.shape[0]
-            
-            # Get ranks (0 = best, n-1 = worst)
-            # argsort twice gives ranks
-            ranks = jnp.argsort(jnp.argsort(-fitness))  # Negative for descending order
-            
-            # Compute utilities using the standard ES utility function
-            # This gives more weight to top performers
-            log_term = jnp.log(n / 2.0 + 1.0)
-            utilities = jnp.maximum(0.0, log_term - jnp.log(ranks + 1.0))
-            
-            # Normalize: zero mean, unit sum of absolute values
-            utilities = utilities / (jnp.sum(utilities) + 1e-8)
-            utilities = utilities - jnp.mean(utilities)
-            
-            return utilities
-        
-        return centered_rank_shaping
-    
-    else:
-        raise ValueError(f"Unknown fitness shaping method: {method}")
+    return mapping[method]
 
 
 def train(args):
     """Main training loop."""
-    # Import JAX/Flax for main process (uses TPU/GPU if available)
     import jax
     import jax.numpy as jnp
     from jax import flatten_util
-    import flax.linen as nn
     import optax
     from evosax.algorithms.distribution_based import Open_ES
     
-    # 1. Setup Dummy Environment to get shapes
+    # 1. Setup environment to get shapes
     config_path_str = str(args.config) if args.config is not None else None
     dummy_env = NCS_Env(n_agents=1, config_path=config_path_str)
     obs_dim = dummy_env.observation_space["agent_0"].shape[0]
@@ -299,33 +200,29 @@ def train(args):
     print(f"Observation Dim: {obs_dim}, Action Dim: {action_dim}")
     print(f"Hidden Size: {args.hidden_size}, Layer Norm: {args.use_layer_norm}")
     print(f"Evaluation episodes per individual: {args.eval_episodes}")
-    print(f"Fitness shaping method: {args.fitness_shaping}")
+    print(f"Fitness shaping: {args.fitness_shaping} (evosax built-in)")
     
-    # Log hardware acceleration status
+    # Log hardware
     devices = jax.devices()
-    print(f"JAX devices available: {devices}")
+    print(f"JAX devices: {devices}")
     default_backend = jax.default_backend()
     print(f"Default backend: {default_backend}")
-    if default_backend == "tpu":
-        print("✓ TPU acceleration ENABLED for ES updates (ASK/TELL)")
-    elif default_backend == "gpu":
-        print("✓ GPU acceleration ENABLED for ES updates (ASK/TELL)")
+    if default_backend in ("tpu", "gpu"):
+        print(f"✓ {default_backend.upper()} acceleration ENABLED")
     else:
-        print("⚠ Running on CPU only (no TPU/GPU detected)")
-    print(f"Fitness evaluations will run on {args.n_workers} CPU workers in parallel")
+        print("⚠ Running on CPU only")
+    print(f"Workers: {args.n_workers}")
 
-    # 2. Setup Flax Model & Initial Params
+    # 2. Setup model
     rng = jax.random.PRNGKey(args.seed if args.seed is not None else 0)
     model = create_policy_net(action_dim, hidden_size=args.hidden_size, use_layer_norm=args.use_layer_norm)
     dummy_obs = jnp.zeros((1, obs_dim))
     params = model.init(rng, dummy_obs)
     
-    # Create flattener for parameter handling
     flat_params_template, unravel_fn = flatten_util.ravel_pytree(params)
-    num_params = flat_params_template.size
-    print(f"Total Parameters: {num_params}")
+    print(f"Total Parameters: {flat_params_template.size}")
 
-    # 3. Setup Open_ES Strategy
+    # 3. Setup Open_ES with evosax's built-in fitness shaping
     lrate_schedule = optax.exponential_decay(
         init_value=args.learning_rate, 
         transition_steps=1, 
@@ -339,34 +236,32 @@ def train(args):
     )
     
     optimizer = optax.adam(learning_rate=lrate_schedule)
+    
+    # Get fitness shaping function from evosax
+    fitness_shaping_fn = get_fitness_shaping_fn(args.fitness_shaping)
 
+    # Create strategy with fitness shaping built-in
     strategy = Open_ES(
         population_size=args.popsize,
         solution=params,
         optimizer=optimizer,
-        std_schedule=std_schedule
+        std_schedule=std_schedule,
+        fitness_shaping_fn=fitness_shaping_fn,  # evosax handles this internally
     )
     
     es_params = strategy.default_params
     state = strategy.init(rng, params, es_params)
 
-    # 4. Setup fitness shaper
-    fitness_shaper = create_fitness_shaper(args.popsize, args.fitness_shaping)
-    
-    # JIT compile the fitness shaper for speed
-    fitness_shaper_jit = jax.jit(fitness_shaper)
-
-    # JIT the ASK and TELL steps for acceleration
+    # JIT the ASK and TELL steps
     @jax.jit
     def ask_step(rng, state, params):
-        x, state = strategy.ask(rng, state, params)
-        return x, state
+        return strategy.ask(rng, state, params)
 
     @jax.jit
     def tell_step(rng, x, fitness, state, params):
         return strategy.tell(rng, x, fitness, state, params)
 
-    # 5. Setup Parallel Workers (using spawn to ensure clean processes)
+    # 4. Setup parallel workers
     ctx = multiprocessing.get_context("spawn")
     pool = ctx.Pool(
         processes=args.n_workers,
@@ -375,108 +270,79 @@ def train(args):
                   args.hidden_size, args.use_layer_norm)
     )
 
-    # 6. Logging Setup
+    # 5. Logging setup
     run_dir, metadata = prepare_run_directory("openai_es", args.config, args.output_root)
     (run_dir / "checkpoints").mkdir(exist_ok=True)
     
     rewards_file = run_dir / "training_rewards.csv"
     with rewards_file.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "generation", "mean_reward", "max_reward", "min_reward", "std_reward",
-            "shaped_mean", "shaped_std", "time_elapsed"
-        ])
+        writer.writerow(["generation", "mean_reward", "max_reward", "min_reward", "std_reward", "time_elapsed"])
 
     print(f"Starting training for {args.generations} generations...")
     start_time = time.time()
-    
     best_fitness_all_time = -float("inf")
 
-    # 7. Training Loop
+    # 6. Training loop
     for gen in range(1, args.generations + 1):
         rng, rng_seeds = jax.random.split(rng)
         
-        # Generate multiple seeds for multi-episode evaluation
-        # Each individual will be evaluated on the same set of seeds within a generation
-        # This maintains fair comparison (CRN) while preventing overfitting
+        # Generate seeds for multi-episode evaluation (CRN within generation)
         gen_episode_seeds = [
             int(jax.random.randint(
                 jax.random.fold_in(rng_seeds, i), 
-                (), 
-                minval=0, 
-                maxval=2**31 - 1, 
-                dtype=jnp.int32
+                (), minval=0, maxval=2**31 - 1, dtype=jnp.int32
             ))
             for i in range(args.eval_episodes)
         ]
 
         rng, rng_ask = jax.random.split(rng)
         
-        # ASK (on TPU/GPU) - get population of params as pytree
+        # ASK - get population
         x, state = ask_step(rng_ask, state, es_params)
         
-        # Convert population to list of flat numpy arrays for workers
-        # x is a pytree where each leaf has shape (popsize, ...)
+        # Convert to flat arrays for workers
         population_flat = []
         for i in range(args.popsize):
-            # Extract individual i from the population pytree
             individual = jax.tree_util.tree_map(lambda arr: arr[i], x)
-            # Flatten to 1D array
             flat_individual, _ = flatten_util.ravel_pytree(individual)
-            # Convert to numpy for worker processes
             population_flat.append(np.array(flat_individual))
         
-        # EVALUATE (on CPU workers in parallel)
-        # Each individual is evaluated on multiple episodes with different seeds
-        eval_payloads = [(flat_params, gen_episode_seeds) for flat_params in population_flat]
-        raw_fitness_values = pool.map(_evaluate_params_multi_episode, eval_payloads)
+        # EVALUATE in parallel
+        eval_payloads = [(fp, gen_episode_seeds) for fp in population_flat]
+        fitness_values = pool.map(_evaluate_params_multi_episode, eval_payloads)
+        fitness_array = jnp.array(fitness_values)
         
-        # Convert to JAX array
-        raw_fitness_array = jnp.array(raw_fitness_values)
-        
-        # Apply fitness shaping for stable gradient estimation
-        # The raw fitness is used for logging, shaped fitness for optimization
-        shaped_fitness_array = fitness_shaper_jit(raw_fitness_array)
-        
-        # TELL (on TPU/GPU) - update strategy using SHAPED fitness
+        # TELL - evosax applies fitness shaping internally
         rng, rng_tell = jax.random.split(rng)
-        state, metrics = tell_step(rng_tell, x, shaped_fitness_array, state, es_params)
+        state, metrics = tell_step(rng_tell, x, fitness_array, state, es_params)
         
-        # Logging (use RAW fitness for interpretability)
-        mean_fit = float(jnp.mean(raw_fitness_array))
-        max_fit = float(jnp.max(raw_fitness_array))
-        min_fit = float(jnp.min(raw_fitness_array))
-        std_fit = float(jnp.std(raw_fitness_array))
-        shaped_mean = float(jnp.mean(shaped_fitness_array))
-        shaped_std = float(jnp.std(shaped_fitness_array))
+        # Logging
+        mean_fit = float(jnp.mean(fitness_array))
+        max_fit = float(jnp.max(fitness_array))
+        min_fit = float(jnp.min(fitness_array))
+        std_fit = float(jnp.std(fitness_array))
         elapsed = time.time() - start_time
         
         if gen % 3 == 0 or gen == 1:
-            print(
-                f"Gen {gen}/{args.generations} | "
-                f"Raw: {mean_fit:.1f}±{std_fit:.1f} [{min_fit:.1f}, {max_fit:.1f}] | "
-                f"Shaped: {shaped_mean:.4f}±{shaped_std:.4f} | "
-                f"Time: {elapsed:.1f}s"
-            )
+            print(f"Gen {gen}/{args.generations} | Mean: {mean_fit:.1f} | Max: {max_fit:.1f} | Std: {std_fit:.1f} | Time: {elapsed:.1f}s")
             
         with rewards_file.open("a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow([gen, mean_fit, max_fit, min_fit, std_fit, shaped_mean, shaped_std, elapsed])
+            writer.writerow([gen, mean_fit, max_fit, min_fit, std_fit, elapsed])
 
-        # Save Best Model (based on RAW fitness for meaningful comparison)
+        # Save best model
         if max_fit > best_fitness_all_time:
             best_fitness_all_time = max_fit
-            best_idx = int(jnp.argmax(raw_fitness_array))
-            best_flat = population_flat[best_idx]
+            best_idx = int(jnp.argmax(fitness_array))
             np.savez(
                 run_dir / "best_model.npz",
-                flat_params=best_flat,
+                flat_params=population_flat[best_idx],
                 hidden_size=args.hidden_size,
                 use_layer_norm=args.use_layer_norm
             )
             
-        # Always save latest (mean of distribution)
-        # state.mean is the flat mean vector in Open_ES
+        # Save latest
         np.savez(
             run_dir / "latest_model.npz",
             flat_params=np.array(state.mean),
@@ -484,7 +350,7 @@ def train(args):
             use_layer_norm=args.use_layer_norm
         )
 
-        # Periodic Checkpoint
+        # Checkpoint
         if gen % args.checkpoint_freq == 0:
             np.savez(
                 run_dir / "checkpoints" / f"gen_{gen}.npz",
@@ -493,11 +359,10 @@ def train(args):
                 use_layer_norm=args.use_layer_norm
             )
 
-    # Cleanup
     pool.close()
     pool.join()
     
-    # Save final hyperparameters
+    # Save hyperparameters
     hyperparams = {
         "generations": args.generations,
         "popsize": args.popsize,
@@ -517,7 +382,7 @@ def train(args):
     save_config_with_hyperparameters(run_dir, args.config, "openai_es", hyperparams)
     
     print(f"\nTraining complete. Artifacts saved to {run_dir}")
-    print(f"Best fitness achieved: {best_fitness_all_time:.2f}")
+    print(f"Best fitness: {best_fitness_all_time:.2f}")
 
 
 def parse_args():
@@ -527,35 +392,22 @@ def parse_args():
     parser.add_argument("--popsize", type=int, default=128, help="Population size.")
     parser.add_argument("--episode-length", type=int, default=750, help="Episode length.")
     parser.add_argument("--eval-episodes", type=int, default=5, 
-                        help="Number of episodes to evaluate each individual on (anti-overfitting). Default: 5")
+                        help="Episodes per individual (anti-overfitting). Default: 5")
     parser.add_argument("--fitness-shaping", type=str, default="centered_rank",
-                        choices=["centered_rank", "z_score", "none"],
-                        help="Fitness shaping method for stable gradients. Default: centered_rank")
-    
-    # Network architecture options
-    parser.add_argument("--hidden-size", type=int, default=64,
-                        help="Number of units in hidden layers. Default: 64")
-    parser.add_argument("--use-layer-norm", action="store_true",
-                        help="Use Layer Normalization in the policy network. "
-                             "Unlike BatchNorm, LayerNorm is deterministic (no batch dependency) "
-                             "which is important for ES. This is the modern alternative to VBN.")
-    
+                        choices=["centered_rank", "z_score", "normalize", "none", "weights"],
+                        help="Fitness shaping (evosax built-in). Default: centered_rank")
+    parser.add_argument("--hidden-size", type=int, default=64, help="Hidden layer size.")
+    parser.add_argument("--use-layer-norm", action="store_true", help="Use LayerNorm.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--learning-rate", type=float, default=0.01, help="Learning rate.")
-    parser.add_argument("--lrate-decay", type=float, default=0.999, help="Learning rate decay.")
+    parser.add_argument("--lrate-decay", type=float, default=0.999, help="LR decay.")
     parser.add_argument("--sigma-init", type=float, default=0.05, help="Initial sigma.")
     parser.add_argument("--sigma-decay", type=float, default=0.999, help="Sigma decay.")
-    parser.add_argument("--n-workers", type=int, default=multiprocessing.cpu_count(), help="Number of parallel workers.")
-    parser.add_argument("--checkpoint-freq", type=int, default=50, help="Checkpoint frequency (generations).")
-    parser.add_argument(
-        "--output-root",
-        type=Path,
-        default=Path("outputs"),
-        help="Base directory where run artifacts will be stored.",
-    )
+    parser.add_argument("--n-workers", type=int, default=multiprocessing.cpu_count(), help="Workers.")
+    parser.add_argument("--checkpoint-freq", type=int, default=50, help="Checkpoint frequency.")
+    parser.add_argument("--output-root", type=Path, default=Path("outputs"), help="Output directory.")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    main_args = parse_args()
-    train(main_args)
+    train(parse_args())
