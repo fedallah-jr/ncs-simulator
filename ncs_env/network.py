@@ -73,6 +73,20 @@ class NetworkModel:
         for i in range(n_agents):
             self.entities.append(NetworkEntity(entity_id=i, entity_type="controller"))
 
+    def _start_transmission(self, idx: int) -> None:
+        """Mark the given entity as transmitting and occupy the channel."""
+        entity = self.entities[idx]
+        entity.state = EntityState.TRANSMITTING
+        self.channel_state = ChannelState.BUSY
+        self.current_transmitter = idx
+
+        duration = (
+            self.data_tx_duration
+            if entity.pending_packet and entity.pending_packet.packet_type == "data"
+            else self.ack_tx_duration
+        )
+        self.transmission_end_timestep = self.current_timestep + duration
+
     def queue_data_packet(
         self, sensor_id: int, state_measurement: np.ndarray, measurement_timestamp: int
     ) -> Optional[Packet]:
@@ -99,17 +113,21 @@ class NetworkModel:
         )
         entity.pending_packet = packet
 
-        # Always re-sense channel and set backoff when queuing a new packet
-        # (Even if already backing off - new packet should get fresh carrier sense)
-        if entity.state == EntityState.IDLE or entity.state == EntityState.BACKING_OFF:
+        # Carrier sense / backoff setup
+        if entity.state == EntityState.IDLE:
             entity.state = EntityState.BACKING_OFF
-            # True CSMA/CA: Sense channel before backoff
             if self.channel_state == ChannelState.IDLE:
-                # Channel is free, transmit immediately (0) or after DIFS (1)
                 entity.backoff_counter = 0
             else:
-                # Channel is busy, use random backoff
                 entity.backoff_counter = self._compute_backoff(entity.collision_count)
+        elif entity.state == EntityState.BACKING_OFF:
+            # Preserve existing backoff if still counting down (post-collision).
+            # Only re-sense if ready to go now (counter already 0).
+            if entity.backoff_counter <= 0:
+                if self.channel_state == ChannelState.IDLE:
+                    entity.backoff_counter = 0
+                else:
+                    entity.backoff_counter = self._compute_backoff(entity.collision_count)
 
         return overwritten_packet
 
@@ -137,26 +155,28 @@ class NetworkModel:
         )
         entity.pending_packet = packet
 
-        # Always re-sense channel and set backoff when queuing a new packet
-        # (Even if already backing off - new packet should get fresh carrier sense)
-        if entity.state == EntityState.IDLE or entity.state == EntityState.BACKING_OFF:
+        # Carrier sense / backoff setup
+        if entity.state == EntityState.IDLE:
             entity.state = EntityState.BACKING_OFF
-            # True CSMA/CA: Sense channel before backoff
             if self.channel_state == ChannelState.IDLE:
-                # Channel is free, transmit immediately (0) or after DIFS (1)
                 entity.backoff_counter = 0
             else:
-                # Channel is busy, use random backoff
                 entity.backoff_counter = self._compute_backoff(entity.collision_count)
+        elif entity.state == EntityState.BACKING_OFF:
+            if entity.backoff_counter <= 0:
+                if self.channel_state == ChannelState.IDLE:
+                    entity.backoff_counter = 0
+                else:
+                    entity.backoff_counter = self._compute_backoff(entity.collision_count)
 
         return overwritten_packet
 
-    def step(self) -> Dict[str, List[Packet]]:
+    def advance_time(self) -> Dict[str, List[Packet]]:
         """
-        Advance network simulation by one timestep (10 ms).
+        Advance network simulation clock by one timestep (10 ms).
 
-        Returns:
-            Dict with delivered data packets, delivered ACK packets, and dropped packets.
+        Returns delivered/dropped packets that completed in this tick. Does not
+        schedule new transmissions; call attempt_transmissions() afterwards.
         """
         self.current_timestep += 1
         delivered_data: List[Packet] = []
@@ -185,12 +205,30 @@ class NetworkModel:
                 self.current_transmitter = None
                 self.transmission_end_timestep = None
 
+        return {
+            "delivered_data": delivered_data,
+            "delivered_acks": delivered_acks,
+            "dropped_packets": dropped_packets,
+        }
+
+    def attempt_transmissions(self, allowed_indices: Optional[List[int]] = None) -> List[Packet]:
+        """
+        Try to start transmissions for entities whose backoff expired.
+
+        Args:
+            allowed_indices: Optional list of entity indices to consider. When None,
+                all entities are eligible (default behavior).
+        """
+        dropped_packets: List[Packet] = []
+
+        allowed_set = set(allowed_indices) if allowed_indices is not None else None
         ready_entities = []
         for idx, entity in enumerate(self.entities):
             if (
                 entity.pending_packet is not None
                 and entity.backoff_counter == 0
                 and entity.state != EntityState.TRANSMITTING
+                and (allowed_set is None or idx in allowed_set)
             ):
                 ready_entities.append(idx)
 
@@ -204,16 +242,7 @@ class NetworkModel:
                 if len(ready_entities) == 1:
                     idx = ready_entities[0]
                     entity = self.entities[idx]
-                    entity.state = EntityState.TRANSMITTING
-                    self.channel_state = ChannelState.BUSY
-                    self.current_transmitter = idx
-
-                    duration = (
-                        self.data_tx_duration
-                        if entity.pending_packet and entity.pending_packet.packet_type == "data"
-                        else self.ack_tx_duration
-                    )
-                    self.transmission_end_timestep = self.current_timestep + duration
+                    self._start_transmission(idx)
                 else:
                     # Collision: multiple entities tried to transmit simultaneously
                     for idx in ready_entities:
@@ -227,11 +256,18 @@ class NetworkModel:
                         entity.backoff_counter = self._compute_backoff(entity.collision_count)
                     self.total_collided_packets += len(ready_entities)
 
-        return {
-            "delivered_data": delivered_data,
-            "delivered_acks": delivered_acks,
-            "dropped_packets": dropped_packets,
-        }
+        return dropped_packets
+
+    def step(self) -> Dict[str, List[Packet]]:
+        """
+        Advance network simulation by one timestep (10 ms) and schedule ready packets.
+
+        Returns:
+            Dict with delivered data packets, delivered ACK packets, and dropped packets.
+        """
+        result = self.advance_time()
+        result["dropped_packets"].extend(self.attempt_transmissions())
+        return result
 
     def _compute_backoff(self, collision_count: int) -> int:
         """Compute a random backoff duration using exponential backoff."""

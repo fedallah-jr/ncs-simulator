@@ -255,6 +255,66 @@ class NCS_Env(gym.Env):
                 else:
                     self._record_decision(i, status=0)
         else:
+            # Advance network clock and process any packets that finished in the previous slot
+            network_result = self.network.advance_time()
+            ack_ready_indices: List[int] = []
+
+            for packet in network_result["delivered_data"]:
+                controller_id = packet.dest_id
+                measurement = packet.payload["state"]
+                measurement_timestamp = packet.payload["timestamp"]
+
+                if self.use_kalman_filter:
+                    # Use delayed_update to properly handle network delays
+                    # This retrodicts to measurement time, updates, then predicts forward
+                    self.controllers[controller_id].delayed_update(measurement, measurement_timestamp)
+                self.last_measurements[controller_id] = measurement
+                ack_data = {
+                    "ack_timestamp": self.timestep,
+                    "measurement_timestamp": measurement_timestamp,
+                }
+                overwritten_ack = self.network.queue_ack_packet(controller_id, ack_data)
+                ack_ready_indices.append(self.n_agents + controller_id)
+                # ACK packets being overwritten don't affect sensor status tracking
+                # (they're from controller to sensor, status is tracked on sensor side)
+
+            # Allow ACKs to seize the channel immediately after delivery
+            ack_drops = self.network.attempt_transmissions(allowed_indices=ack_ready_indices)
+
+            for packet in network_result["delivered_acks"]:
+                sensor_id = packet.dest_id
+                measurement_timestamp = packet.payload.get("measurement_timestamp")
+                entry = self.pending_transmissions[sensor_id].pop(measurement_timestamp, None)
+                if entry is not None:
+                    entry["status"] = 1
+                    self.throughput_records.append(
+                        {
+                            "timestamp": self.timestep,
+                            "bits": self.network.data_packet_size * 8,
+                        }
+                    )
+                    self._log_successful_comm(sensor_id, measurement_timestamp, self.timestep)
+
+            # Process dropped packets (from collisions in the prior timestep)
+            for packet in network_result["dropped_packets"]:
+                if packet.packet_type == "data":
+                    # Data packet from sensor was dropped
+                    sensor_id = packet.source_id
+                    measurement_timestamp = packet.payload.get("timestamp")
+                    entry = self.pending_transmissions[sensor_id].pop(measurement_timestamp, None)
+                    if entry is not None:
+                        entry["status"] = 3
+                # ACK packets dropped don't need status tracking (they don't affect sensor decision history)
+
+            # Drops that could occur if multiple ACKs collided (rare)
+            for packet in ack_drops:
+                if packet.packet_type == "data":
+                    sensor_id = packet.source_id
+                    measurement_timestamp = packet.payload.get("timestamp")
+                    entry = self.pending_transmissions[sensor_id].pop(measurement_timestamp, None)
+                    if entry is not None:
+                        entry["status"] = 3
+
             for i in range(self.n_agents):
                 action = actions[f"agent_{i}"]
                 if action == 1:
@@ -276,50 +336,15 @@ class NCS_Env(gym.Env):
                 else:
                     self._record_decision(i, status=0)
 
-            network_result = self.network.step()
-
-            for packet in network_result["delivered_data"]:
-                controller_id = packet.dest_id
-                measurement = packet.payload["state"]
-                measurement_timestamp = packet.payload["timestamp"]
-
-                if self.use_kalman_filter:
-                    # Use delayed_update to properly handle network delays
-                    # This retrodicts to measurement time, updates, then predicts forward
-                    self.controllers[controller_id].delayed_update(measurement, measurement_timestamp)
-                self.last_measurements[controller_id] = measurement
-                ack_data = {
-                    "ack_timestamp": self.timestep,
-                    "measurement_timestamp": measurement_timestamp,
-                }
-                overwritten_ack = self.network.queue_ack_packet(controller_id, ack_data)
-                # ACK packets being overwritten don't affect sensor status tracking
-                # (they're from controller to sensor, status is tracked on sensor side)
-
-            for packet in network_result["delivered_acks"]:
-                sensor_id = packet.dest_id
-                measurement_timestamp = packet.payload.get("measurement_timestamp")
-                entry = self.pending_transmissions[sensor_id].pop(measurement_timestamp, None)
-                if entry is not None:
-                    entry["status"] = 1
-                    self.throughput_records.append(
-                        {
-                            "timestamp": self.timestep,
-                            "bits": self.network.data_packet_size * 8,
-                        }
-                    )
-                    self._log_successful_comm(sensor_id, measurement_timestamp, self.timestep)
-
-            # Process dropped packets (from collisions)
-            for packet in network_result["dropped_packets"]:
+            collision_drops = self.network.attempt_transmissions()
+            for packet in collision_drops:
                 if packet.packet_type == "data":
-                    # Data packet from sensor was dropped
                     sensor_id = packet.source_id
                     measurement_timestamp = packet.payload.get("timestamp")
                     entry = self.pending_transmissions[sensor_id].pop(measurement_timestamp, None)
                     if entry is not None:
                         entry["status"] = 3
-                # ACK packets dropped don't need status tracking (they don't affect sensor decision history)
+                # ACK packets dropped don't need status tracking (they don't affect sensor status tracking)
 
             delivered_controller_ids = {p.dest_id for p in network_result["delivered_data"]}
 
