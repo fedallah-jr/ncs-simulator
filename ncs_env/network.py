@@ -99,9 +99,17 @@ class NetworkModel:
         )
         entity.pending_packet = packet
 
-        if entity.state == EntityState.IDLE:
+        # Always re-sense channel and set backoff when queuing a new packet
+        # (Even if already backing off - new packet should get fresh carrier sense)
+        if entity.state == EntityState.IDLE or entity.state == EntityState.BACKING_OFF:
             entity.state = EntityState.BACKING_OFF
-            entity.backoff_counter = self._compute_backoff(entity.collision_count)
+            # True CSMA/CA: Sense channel before backoff
+            if self.channel_state == ChannelState.IDLE:
+                # Channel is free, transmit immediately (0) or after DIFS (1)
+                entity.backoff_counter = 0
+            else:
+                # Channel is busy, use random backoff
+                entity.backoff_counter = self._compute_backoff(entity.collision_count)
 
         return overwritten_packet
 
@@ -129,9 +137,17 @@ class NetworkModel:
         )
         entity.pending_packet = packet
 
-        if entity.state == EntityState.IDLE:
+        # Always re-sense channel and set backoff when queuing a new packet
+        # (Even if already backing off - new packet should get fresh carrier sense)
+        if entity.state == EntityState.IDLE or entity.state == EntityState.BACKING_OFF:
             entity.state = EntityState.BACKING_OFF
-            entity.backoff_counter = self._compute_backoff(entity.collision_count)
+            # True CSMA/CA: Sense channel before backoff
+            if self.channel_state == ChannelState.IDLE:
+                # Channel is free, transmit immediately (0) or after DIFS (1)
+                entity.backoff_counter = 0
+            else:
+                # Channel is busy, use random backoff
+                entity.backoff_counter = self._compute_backoff(entity.collision_count)
 
         return overwritten_packet
 
