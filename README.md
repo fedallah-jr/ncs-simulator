@@ -50,6 +50,7 @@ Learning-based baselines live under `algorithms/`:
 - PPO (single agent, SB3): `python -m algorithms.ppo_single --config configs/perfect_comm.json --total-timesteps 200000`
 - DQN (single agent, SB3): `python -m algorithms.deep_q_learning --config configs/perfect_comm.json --total-timesteps 200000`
 - OpenAI-ES (single agent, JAX): `python -m algorithms.openai_es --config configs/perfect_comm.json --generations 1000 --popsize 128`
+  - Enable a meta-population search over initializations with `--meta-population-size 4 --truncation-percentage 0.25 --pbt-interval 10`, which periodically copies top-performing strategies into the worst ones.
 
 CLI flags let you change environment parameters. Use `--output-root` (defaults to `outputs/`) to control where training artifacts land. Each run calls `utils.run_utils.prepare_run_directory(...)`, which creates a uniquely named folder that encodes the algorithm and key config values (noise level, initial-state scale, reward mode, etc.) plus an incrementing `run#` suffix. That directory always contains:
 
