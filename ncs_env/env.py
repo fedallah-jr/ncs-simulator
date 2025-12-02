@@ -108,8 +108,8 @@ class NCS_Env(gym.Env):
             reward_cfg.get("state_cost_matrix", np.eye(self.state_dim))
         )
         self.error_reward_mode = reward_cfg.get("state_error_reward", "difference")
-        if self.error_reward_mode not in {"difference", "absolute", "estimation_gain"}:
-            raise ValueError("state_error_reward must be 'difference', 'absolute', or 'estimation_gain'")
+        if self.error_reward_mode not in {"difference", "absolute"}:
+            raise ValueError("state_error_reward must be 'difference' or 'absolute'")
         self.comm_recent_window = int(reward_cfg.get("comm_recent_window", self.history_window))
         self.comm_throughput_window = int(
             reward_cfg.get("comm_throughput_window", max(5 * self.history_window, 50))
@@ -227,7 +227,6 @@ class NCS_Env(gym.Env):
         # After first step: timestep=1, state is still x[0] before plant update
         # We use state_index to clearly refer to which x[k] we're measuring
         state_index = self.timestep - 1
-        info_gains = [0.0 for _ in range(self.n_agents)]
 
         # Store prior for each controller at current state index
         # This enables delayed measurement handling in network mode
@@ -246,18 +245,7 @@ class NCS_Env(gym.Env):
                     state = self.plants[i].get_state()
                     measurement = state + self._sample_measurement_noise()
                     if self.use_kalman_filter:
-                        prior_entry = self._get_prior_entry(self.controllers[i], state_index)
-                        prior_cost = None
-                        if prior_entry is not None:
-                            prior_cost = Controller._compute_state_cost(
-                                self.state_cost_matrix, prior_entry["x"], prior_entry["P"]
-                            )
                         self.controllers[i].update(measurement)
-                        if prior_cost is not None:
-                            posterior_cost = Controller._compute_state_cost(
-                                self.state_cost_matrix, self.controllers[i].x_hat, self.controllers[i].P
-                            )
-                            info_gains[i] = prior_cost - posterior_cost
                     self.last_measurements[i] = measurement
                     self._record_decision(i, status=1)
                     # Use state_index for consistency (though _log_successful_comm
@@ -276,16 +264,10 @@ class NCS_Env(gym.Env):
                 measurement = packet.payload["state"]
                 measurement_timestamp = packet.payload["timestamp"]
 
-                info_gain = None
                 if self.use_kalman_filter:
                     # Use delayed_update to properly handle network delays
                     # This retrodicts to measurement time, updates, then predicts forward
-                    self.controllers[controller_id].delayed_update(
-                        measurement, measurement_timestamp, self.state_cost_matrix
-                    )
-                    info_gain = self.controllers[controller_id].last_information_gain
-                    if info_gain is not None:
-                        info_gains[controller_id] = info_gain
+                    self.controllers[controller_id].delayed_update(measurement, measurement_timestamp)
                 self.last_measurements[controller_id] = measurement
                 ack_data = {
                     "ack_timestamp": self.timestep,
@@ -392,14 +374,12 @@ class NCS_Env(gym.Env):
                 recent_tx = self._recent_transmission_count(i)
                 throughput_estimate = self._compute_agent_throughput(i)
                 comm_penalty = self.comm_penalty_alpha * (recent_tx / throughput_estimate)
-            estimation_gain_value: Optional[float] = None
             if self.error_reward_mode == "difference":
                 error_reward = prev_error - curr_error
             elif self.error_reward_mode == "absolute":
                 error_reward = -curr_error
             else:
-                estimation_gain_value = float(info_gains[i])
-                error_reward = estimation_gain_value
+                error_reward = 0.0
             reward = float(error_reward - comm_penalty)
             agent_key = f"agent_{i}"
             rewards[agent_key] = reward
@@ -408,8 +388,6 @@ class NCS_Env(gym.Env):
                 "curr_error": float(curr_error),
                 "comm_penalty": float(comm_penalty),
             }
-            if estimation_gain_value is not None:
-                reward_components["estimation_gain"] = estimation_gain_value
             self.last_reward_components[agent_key] = reward_components
             stats = self.reward_component_stats[agent_key]
             stats["prev_error_sum"] += float(prev_error)
@@ -434,14 +412,6 @@ class NCS_Env(gym.Env):
         entry = {"timestamp": self.timestep, "status": status}
         self.decision_history[agent_idx].append(entry)
         return entry
-
-    @staticmethod
-    def _get_prior_entry(controller: Controller, state_index: int) -> Optional[Dict[str, Any]]:
-        """Return the stored prior matching the given state index, if any."""
-        for entry in reversed(controller.prior_history):
-            if entry["state_index"] == state_index:
-                return entry
-        return None
 
     def _sample_initial_state(self) -> np.ndarray:
         """

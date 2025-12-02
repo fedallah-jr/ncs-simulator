@@ -17,8 +17,8 @@ The configuration file is divided into sections; each key controls a specific as
 - `Q`, `R`: Cost matrices used to solve the discrete algebraic Riccati equation. They define how much the optimal controller cares about state deviation versus control effort.
 
 ### `reward`
-- `state_cost_matrix`: Matrix (Q) used to compute state-related costs. With `state_error_reward="difference"`, rewards are the improvement in quadratic tracking error between consecutive steps (`r_t = e_{t-1} - e_t`); `"absolute"` uses `r_t = -e_t`; `"estimation_gain"` uses the reduction in expected quadratic cost when a measurement is incorporated (`J_prior - J_post`, where `J = x̂^T Q x̂ + tr(QP)`), zero if no measurement was processed. All modes subtract the communication penalty when applicable.
-- `state_error_reward`: Either `"difference"` (default), `"absolute"`, or `"estimation_gain"` (aligns reward with how much the estimator improves when packets arrive).
+- `state_cost_matrix`: Matrix (Q) used to compute the quadratic tracking error `(x - x_ref)^T Q (x - x_ref)`. Rewards are the improvement in this error between consecutive steps (`r_t = e_{t-1} - e_t`), minus the communication penalty.
+- `state_error_reward`: Either `"difference"` (default, reward improvement) or `"absolute"` (reward equals `-e_t`). Use the second option if you want to revert to the original “distance to origin” objective.
 - `comm_recent_window`: Short window (steps) used to count how many recent transmission attempts (`p>0`) an agent has initiated.
 - `comm_throughput_window`: Long window (steps) used to estimate per-agent throughput from ACKed packets and their delays.
 - `comm_penalty_alpha`: Scalar multiplier (`α`) used in the communication penalty `R_{a,\text{comm}} = -α * N_\text{recent}/T`, applied only when `action=1` and the network is not set to `perfect_communication`.
