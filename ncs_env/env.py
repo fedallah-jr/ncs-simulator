@@ -108,8 +108,8 @@ class NCS_Env(gym.Env):
             reward_cfg.get("state_cost_matrix", np.eye(self.state_dim))
         )
         self.error_reward_mode = reward_cfg.get("state_error_reward", "difference")
-        if self.error_reward_mode not in {"difference", "absolute"}:
-            raise ValueError("state_error_reward must be 'difference' or 'absolute'")
+        if self.error_reward_mode not in {"difference", "absolute", "measurement_delta"}:
+            raise ValueError("state_error_reward must be 'difference', 'absolute', or 'measurement_delta'")
         self.comm_recent_window = int(reward_cfg.get("comm_recent_window", self.history_window))
         self.comm_throughput_window = int(
             reward_cfg.get("comm_throughput_window", max(5 * self.history_window, 50))
@@ -227,6 +227,7 @@ class NCS_Env(gym.Env):
         # After first step: timestep=1, state is still x[0] before plant update
         # We use state_index to clearly refer to which x[k] we're measuring
         state_index = self.timestep - 1
+        prev_measurements = [measurement.copy() for measurement in self.last_measurements]
 
         # Store prior for each controller at current state index
         # This enables delayed measurement handling in network mode
@@ -348,6 +349,10 @@ class NCS_Env(gym.Env):
 
             delivered_controller_ids = {p.dest_id for p in network_result["delivered_data"]}
 
+        measurement_deltas = [
+            self.last_measurements[i] - prev_measurements[i] for i in range(self.n_agents)
+        ]
+
         # Compute control and update plants
         for i in range(self.n_agents):
             if self.use_kalman_filter:
@@ -374,18 +379,26 @@ class NCS_Env(gym.Env):
                 recent_tx = self._recent_transmission_count(i)
                 throughput_estimate = self._compute_agent_throughput(i)
                 comm_penalty = self.comm_penalty_alpha * (recent_tx / throughput_estimate)
+            measurement_delta_value: Optional[float] = None
             if self.error_reward_mode == "difference":
                 error_reward = prev_error - curr_error
-            else:
+            elif self.error_reward_mode == "absolute":
                 error_reward = -curr_error
+            else:
+                delta = measurement_deltas[i]
+                measurement_delta_value = float(delta.T @ self.state_cost_matrix @ delta)
+                error_reward = measurement_delta_value
             reward = float(error_reward - comm_penalty)
             agent_key = f"agent_{i}"
             rewards[agent_key] = reward
-            self.last_reward_components[agent_key] = {
+            reward_components: Dict[str, float] = {
                 "prev_error": float(prev_error),
                 "curr_error": float(curr_error),
                 "comm_penalty": float(comm_penalty),
             }
+            if measurement_delta_value is not None:
+                reward_components["measurement_delta_cost"] = measurement_delta_value
+            self.last_reward_components[agent_key] = reward_components
             stats = self.reward_component_stats[agent_key]
             stats["prev_error_sum"] += float(prev_error)
             stats["curr_error_sum"] += float(curr_error)
