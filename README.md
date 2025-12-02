@@ -17,8 +17,8 @@ The configuration file is divided into sections; each key controls a specific as
 - `Q`, `R`: Cost matrices used to solve the discrete algebraic Riccati equation. They define how much the optimal controller cares about state deviation versus control effort.
 
 ### `reward`
-- `state_cost_matrix`: Matrix (Q) used to compute state-related costs. With `state_error_reward="difference"`, rewards are the improvement in quadratic tracking error between consecutive steps (`r_t = e_{t-1} - e_t`); `"absolute"` uses `r_t = -e_t`; `"measurement_delta"` uses the quadratic norm of the change between the latest delivered measurement and the previous one (`(z_t - z_{t-1})^T Q (z_t - z_{t-1})`). All modes subtract the communication penalty when applicable.
-- `state_error_reward`: Either `"difference"` (default), `"absolute"`, or `"measurement_delta"` (positive only when a new measurement arrives; zero if nothing is delivered that step).
+- `state_cost_matrix`: Matrix (Q) used to compute state-related costs. With `state_error_reward="difference"`, rewards are the improvement in quadratic tracking error between consecutive steps (`r_t = e_{t-1} - e_t`); `"absolute"` uses `r_t = -e_t`; `"estimation_gain"` uses the reduction in expected quadratic cost when a measurement is incorporated (`J_prior - J_post`, where `J = x̂^T Q x̂ + tr(QP)`), zero if no measurement was processed. All modes subtract the communication penalty when applicable.
+- `state_error_reward`: Either `"difference"` (default), `"absolute"`, or `"estimation_gain"` (aligns reward with how much the estimator improves when packets arrive).
 - `comm_recent_window`: Short window (steps) used to count how many recent transmission attempts (`p>0`) an agent has initiated.
 - `comm_throughput_window`: Long window (steps) used to estimate per-agent throughput from ACKed packets and their delays.
 - `comm_penalty_alpha`: Scalar multiplier (`α`) used in the communication penalty `R_{a,\text{comm}} = -α * N_\text{recent}/T`, applied only when `action=1` and the network is not set to `perfect_communication`.

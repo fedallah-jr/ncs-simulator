@@ -83,6 +83,7 @@ class Controller:
         self.prior_history: deque = deque(maxlen=max_delay)
         # Stores (timestep, u) for each control applied
         self.control_history: deque = deque(maxlen=max_delay)
+        self.last_information_gain: Optional[float] = None
 
         # Create filterpy KalmanFilter
         # dim_x: state dimension, dim_z: measurement dimension
@@ -151,7 +152,20 @@ class Controller:
         """
         self.kf.update(measurement.reshape(-1, 1))
 
-    def delayed_update(self, measurement: np.ndarray, measurement_state_index: int) -> bool:
+    @staticmethod
+    def _compute_state_cost(
+        state_cost_matrix: np.ndarray, x: np.ndarray, covariance: np.ndarray
+    ) -> float:
+        """Quadratic cost on mean plus covariance trace term."""
+        x_vec = x.reshape(-1, 1)
+        return float((x_vec.T @ state_cost_matrix @ x_vec) + np.trace(state_cost_matrix @ covariance))
+
+    def delayed_update(
+        self,
+        measurement: np.ndarray,
+        measurement_state_index: int,
+        state_cost_matrix: Optional[np.ndarray] = None,
+    ) -> bool:
         """
         Handle a delayed measurement by retrodict-then-predict.
 
@@ -171,6 +185,8 @@ class Controller:
         bool
             True if update was successful, False if prior not found
         """
+        self.last_information_gain = None
+
         # Find the prior for the measurement state index
         prior_entry = None
         for entry in self.prior_history:
@@ -185,6 +201,9 @@ class Controller:
         # Restore the prior state
         x_prior = prior_entry['x'].copy()
         P_prior = prior_entry['P'].copy()
+        prior_cost = None
+        if state_cost_matrix is not None:
+            prior_cost = self._compute_state_cost(state_cost_matrix, x_prior, P_prior)
 
         # Apply Kalman update equations manually
         # y = z - H @ x_prior (innovation)
@@ -198,6 +217,9 @@ class Controller:
 
         x_posterior = x_prior + K_gain @ y
         P_posterior = (np.eye(P_prior.shape[0]) - K_gain @ H) @ P_prior
+        posterior_cost = None
+        if state_cost_matrix is not None:
+            posterior_cost = self._compute_state_cost(state_cost_matrix, x_posterior, P_posterior)
 
         # Collect controls from measurement_state_index to current_state_index
         controls = []
@@ -221,6 +243,8 @@ class Controller:
         # Update the Kalman filter state
         self.kf.x = x_current
         self.kf.P = P_current
+        if prior_cost is not None and posterior_cost is not None:
+            self.last_information_gain = prior_cost - posterior_cost
 
         return True
 
