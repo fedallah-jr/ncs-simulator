@@ -108,8 +108,8 @@ class NCS_Env(gym.Env):
             reward_cfg.get("state_cost_matrix", np.eye(self.state_dim))
         )
         self.error_reward_mode = reward_cfg.get("state_error_reward", "difference")
-        if self.error_reward_mode not in {"difference", "absolute"}:
-            raise ValueError("state_error_reward must be 'difference' or 'absolute'")
+        if self.error_reward_mode not in {"difference", "absolute", "simple"}:
+            raise ValueError("state_error_reward must be 'difference', 'absolute', or 'simple'")
         self.comm_recent_window = int(reward_cfg.get("comm_recent_window", self.history_window))
         self.comm_throughput_window = int(
             reward_cfg.get("comm_throughput_window", max(5 * self.history_window, 50))
@@ -370,7 +370,7 @@ class NCS_Env(gym.Env):
             prev_error = self.last_errors[i]
             curr_error = self._compute_state_error(x)
             comm_penalty = 0.0
-            if not self.perfect_communication and action == 1:
+            if not self.perfect_communication and action == 1 and self.error_reward_mode != "simple":
                 recent_tx = self._recent_transmission_count(i)
                 throughput_estimate = self._compute_agent_throughput(i)
                 comm_penalty = self.comm_penalty_alpha * (recent_tx / throughput_estimate)
@@ -378,6 +378,10 @@ class NCS_Env(gym.Env):
                 error_reward = prev_error - curr_error
             elif self.error_reward_mode == "absolute":
                 error_reward = -curr_error
+            elif self.error_reward_mode == "simple":
+                info_arrived = i in delivered_controller_ids
+                error_reward = 1.0 if info_arrived else -1.0
+                comm_penalty = 0.0
             else:
                 error_reward = 0.0
             reward = float(error_reward - comm_penalty)
@@ -388,6 +392,8 @@ class NCS_Env(gym.Env):
                 "curr_error": float(curr_error),
                 "comm_penalty": float(comm_penalty),
             }
+            if self.error_reward_mode == "simple":
+                reward_components["info_arrived"] = 1.0 if i in delivered_controller_ids else 0.0
             self.last_reward_components[agent_key] = reward_components
             stats = self.reward_component_stats[agent_key]
             stats["prev_error_sum"] += float(prev_error)
