@@ -18,7 +18,7 @@ The configuration file is divided into sections; each key controls a specific as
 
 ### `reward`
 - `state_cost_matrix`: Matrix (Q) used to compute the quadratic tracking error `(x - x_ref)^T Q (x - x_ref)`. Rewards are the improvement in this error between consecutive steps (`r_t = e_{t-1} - e_t`), minus the communication penalty.
-- `state_error_reward`: Either `"difference"` (default, reward improvement), `"absolute"` (reward equals `-e_t`), or `"simple"` (reward +1 if a new measurement was delivered this step, otherwise -1; no communication penalty).
+- `state_error_reward`: Either `"difference"` (default, reward improvement), `"absolute"` (reward equals `-e_t`), or `"simple"` (reward +1 if a new measurement was delivered this step, otherwise 0; no communication penalty).
 - `comm_recent_window`: Short window (steps) used to count how many recent transmission attempts (`p>0`) an agent has initiated.
 - `comm_throughput_window`: Long window (steps) used to estimate per-agent throughput from ACKed packets and their delays.
 - `comm_penalty_alpha`: Scalar multiplier (`α`) used in the communication penalty `R_{a,\text{comm}} = -α * N_\text{recent}/T`, applied only when `action=1` and the network is not set to `perfect_communication`.

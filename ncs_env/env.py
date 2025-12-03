@@ -380,7 +380,7 @@ class NCS_Env(gym.Env):
                 error_reward = -curr_error
             elif self.error_reward_mode == "simple":
                 info_arrived = i in delivered_controller_ids
-                error_reward = 1.0 if info_arrived else -1.0
+                error_reward = 1.0 if info_arrived else 0.0
                 comm_penalty = 0.0
             else:
                 error_reward = 0.0
