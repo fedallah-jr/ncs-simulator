@@ -115,6 +115,9 @@ class NCS_Env(gym.Env):
             reward_cfg.get("comm_throughput_window", max(5 * self.history_window, 50))
         )
         self.comm_penalty_alpha = float(reward_cfg.get("comm_penalty_alpha", self.comm_cost))
+        self.simple_comm_penalty_alpha = float(
+            reward_cfg.get("simple_comm_penalty_alpha", self.comm_penalty_alpha)
+        )
         self.comm_throughput_floor = float(reward_cfg.get("comm_throughput_floor", 1e-3))
 
         self.plants: List[Plant] = []
@@ -346,10 +349,16 @@ class NCS_Env(gym.Env):
             prev_error = self.last_errors[i]
             curr_error = self._compute_state_error(x)
             comm_penalty = 0.0
-            if not self.perfect_communication and action == 1 and self.error_reward_mode != "simple":
-                recent_tx = self._recent_transmission_count(i)
-                throughput_estimate = self._compute_agent_throughput(i)
-                comm_penalty = self.comm_penalty_alpha * (recent_tx / throughput_estimate)
+            if not self.perfect_communication and action == 1:
+                penalty_alpha = (
+                    self.comm_penalty_alpha
+                    if self.error_reward_mode != "simple"
+                    else self.simple_comm_penalty_alpha
+                )
+                if penalty_alpha > 0:
+                    recent_tx = self._recent_transmission_count(i)
+                    throughput_estimate = self._compute_agent_throughput(i)
+                    comm_penalty = penalty_alpha * (recent_tx / throughput_estimate)
             if self.error_reward_mode == "difference":
                 error_reward = prev_error - curr_error
             elif self.error_reward_mode == "absolute":
@@ -357,7 +366,6 @@ class NCS_Env(gym.Env):
             elif self.error_reward_mode == "simple":
                 info_arrived = i in delivered_controller_ids
                 error_reward = 1.0 if info_arrived else 0.0
-                comm_penalty = 0.0
             else:
                 error_reward = 0.0
             reward = float(error_reward - comm_penalty)
