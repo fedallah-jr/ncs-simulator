@@ -40,6 +40,12 @@ Observations are laid out as `[current_state, current_throughput, prev_states...
 - `backoff_range`: `(min, max)` slot range for random backoff; the upper bound grows exponentially after collisions.
 - `max_queue_size`: Pending-packet capacity per entity. A value of `1` means new data overwrites unsent packets, enforcing “freshest data only.”
 - `perfect_communication`: When `true`, disables CSMA behavior entirely—measurements reach controllers instantly, collisions/throughput bookkeeping is skipped, and decision histories record immediate successes for every transmission attempt.
+- `slots_per_step`: Number of micro-slots simulated inside each 10 ms environment step (default 32, ≈312 µs per slot).
+- `mac_min_be` / `mac_max_be`: CSMA/CA backoff exponent bounds (defaults 3/5).
+- `max_csma_backoffs`: How many CCA failures are allowed before a packet is dropped (default 4).
+- `max_frame_retries`: How many collided/NAKed frame retries are attempted before drop (default 3).
+- `cca_time_us`, `mac_ack_wait_us`, `mac_ack_turnaround_us`: Timing knobs (µs) for CCA duration, MAC ACK wait, and ACK turnaround.
+- `mac_ack_size_bytes`: Size of the MAC ACK frame (default 5 bytes).
 
 Adjusting these parameters lets you explore different plant dynamics, estimator fidelity, reward shaping, or network congestion levels without modifying the source code.
 
