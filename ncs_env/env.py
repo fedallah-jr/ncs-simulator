@@ -43,6 +43,7 @@ class NCS_Env(gym.Env):
         comm_cost: float = 0.01,
         config_path: Optional[str] = None,
         seed: Optional[int] = None,
+        reward_override: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
         self.n_agents = n_agents
@@ -116,7 +117,8 @@ class NCS_Env(gym.Env):
         controller_cfg = self.config.get("controller", {})
         self.use_kalman_filter = bool(controller_cfg.get("use_kalman_filter", True))
 
-        reward_cfg = self.config.get("reward", {})
+        base_reward_cfg = self.config.get("reward", {})
+        reward_cfg = self._merge_reward_override(base_reward_cfg, reward_override)
         self.state_cost_matrix = np.array(
             reward_cfg.get("state_cost_matrix", np.eye(self.state_dim))
         )
@@ -508,6 +510,17 @@ class NCS_Env(gym.Env):
         return scale_min, scale_max
 
     @staticmethod
+    def _merge_reward_override(
+        base_reward_cfg: Dict[str, Any], reward_override: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Merge reward override dict onto the base reward config."""
+        if reward_override is None:
+            return dict(base_reward_cfg)
+        merged = dict(base_reward_cfg)
+        merged.update(reward_override)
+        return merged
+
+    @staticmethod
     def _normalize_reward_mixing_cfg(raw_cfg: Any) -> Dict[str, Any]:
         """Normalize the reward_mixing config entry into a dict with an 'enabled' flag."""
         if isinstance(raw_cfg, bool):
@@ -761,3 +774,11 @@ class NCS_Env(gym.Env):
     def close(self):
         """Clean up resources."""
         pass
+
+    def get_reward_mix_weight(self) -> float:
+        """
+        Return the current reward mixing weight (0.0 when mixing is disabled).
+
+        This is useful for logging during evaluation.
+        """
+        return float(self.last_mix_weight) if hasattr(self, "last_mix_weight") else 0.0

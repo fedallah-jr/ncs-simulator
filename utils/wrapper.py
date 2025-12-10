@@ -48,3 +48,16 @@ class SingleAgentWrapper(gym.Env):
         if self.env is not None:
             self.env.close()
             self.env = None
+
+    def get_reward_mix_weight(self) -> float:
+        """
+        Expose the underlying environment's reward mixing weight.
+
+        Creates the env on demand to avoid attribute errors.
+        """
+        if self.env is None:
+            self.env = self._make_env()
+            self.env.reset()
+        if hasattr(self.env, "get_reward_mix_weight"):
+            return float(self.env.get_reward_mix_weight())
+        return 0.0
