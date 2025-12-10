@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import gymnasium as gym
@@ -11,6 +12,18 @@ from .controller import Controller, compute_discrete_lqr_gain
 from .config import load_config
 from .network import NetworkModel
 from .plant import Plant
+from utils.schedulers import build_scheduler
+
+
+@dataclass
+class RewardDefinition:
+    mode: str
+    comm_penalty_alpha: float
+    simple_comm_penalty_alpha: float
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"difference", "absolute", "simple"}:
+            raise ValueError("state_error_reward must be 'difference', 'absolute', or 'simple'")
 
 
 class NCS_Env(gym.Env):
@@ -107,18 +120,28 @@ class NCS_Env(gym.Env):
         self.state_cost_matrix = np.array(
             reward_cfg.get("state_cost_matrix", np.eye(self.state_dim))
         )
-        self.error_reward_mode = reward_cfg.get("state_error_reward", "difference")
-        if self.error_reward_mode not in {"difference", "absolute", "simple"}:
-            raise ValueError("state_error_reward must be 'difference', 'absolute', or 'simple'")
         self.comm_recent_window = int(reward_cfg.get("comm_recent_window", self.history_window))
         self.comm_throughput_window = int(
             reward_cfg.get("comm_throughput_window", max(5 * self.history_window, 50))
         )
-        self.comm_penalty_alpha = float(reward_cfg.get("comm_penalty_alpha", self.comm_cost))
-        self.simple_comm_penalty_alpha = float(
-            reward_cfg.get("simple_comm_penalty_alpha", self.comm_penalty_alpha)
+        base_comm_penalty_alpha = float(reward_cfg.get("comm_penalty_alpha", self.comm_cost))
+        base_simple_comm_penalty_alpha = float(
+            reward_cfg.get("simple_comm_penalty_alpha", base_comm_penalty_alpha)
         )
+        reward_mixing_cfg = self._normalize_reward_mixing_cfg(reward_cfg.get("reward_mixing", {}))
+        self.reward_definitions = self._build_reward_definitions(
+            reward_cfg, reward_mixing_cfg, base_comm_penalty_alpha, base_simple_comm_penalty_alpha
+        )
+        self.reward_mixing_enabled = bool(reward_mixing_cfg.get("enabled", False)) and len(self.reward_definitions) == 2
+        self.error_reward_mode = self.reward_definitions[0].mode
+        self.comm_penalty_alpha = self.reward_definitions[0].comm_penalty_alpha
+        self.simple_comm_penalty_alpha = self.reward_definitions[0].simple_comm_penalty_alpha
         self.comm_throughput_floor = float(reward_cfg.get("comm_throughput_floor", 1e-3))
+        self.reward_scheduler: Optional[Callable[[int], float]] = self._build_reward_scheduler(
+            reward_mixing_cfg
+        )
+        self.total_env_steps = 0
+        self.last_mix_weight = self._current_mix_weight()
 
         self.plants: List[Plant] = []
         for _ in range(self.n_agents):
@@ -195,8 +218,23 @@ class NCS_Env(gym.Env):
             f"agent_{i}": {"prev_error_sum": 0.0, "curr_error_sum": 0.0, "comm_penalty_sum": 0.0, "count": 0.0}
             for i in range(self.n_agents)
         }
+        current_mix_weight = self._current_mix_weight()
+        self.last_mix_weight = current_mix_weight
+        base_components: Dict[str, float] = {
+            "prev_error": 0.0,
+            "curr_error": 0.0,
+            "comm_penalty": 0.0,
+        }
+        if self.reward_mixing_enabled:
+            base_components.update(
+                {
+                    "primary_reward": 0.0,
+                    "secondary_reward": 0.0,
+                    "mix_weight": float(current_mix_weight),
+                }
+            )
         self.last_reward_components: Dict[str, Dict[str, float]] = {
-            f"agent_{i}": {"prev_error": 0.0, "curr_error": 0.0, "comm_penalty": 0.0}
+            f"agent_{i}": dict(base_components)
             for i in range(self.n_agents)
         }
         self.last_errors: List[float] = [0.0 for _ in range(self.n_agents)]
@@ -342,49 +380,65 @@ class NCS_Env(gym.Env):
             for i in range(self.n_agents):
                 self.controllers[i].predict()
 
+        mix_weight = self._current_mix_weight()
         rewards = {}
         for i in range(self.n_agents):
             x = self.plants[i].get_state()
             action = actions[f"agent_{i}"]
             prev_error = self.last_errors[i]
             curr_error = self._compute_state_error(x)
-            comm_penalty = 0.0
-            if not self.perfect_communication and action == 1:
-                penalty_alpha = (
-                    self.comm_penalty_alpha
-                    if self.error_reward_mode != "simple"
-                    else self.simple_comm_penalty_alpha
+            info_arrived = i in delivered_controller_ids
+
+            if self.reward_mixing_enabled and len(self.reward_definitions) == 2:
+                primary_def, secondary_def = self.reward_definitions
+                primary_components = self._compute_reward_for_definition(
+                    i, primary_def, prev_error, curr_error, action, info_arrived
                 )
-                if penalty_alpha > 0:
-                    recent_tx = self._recent_transmission_count(i)
-                    throughput_estimate = self._compute_agent_throughput(i)
-                    comm_penalty = penalty_alpha * (recent_tx / throughput_estimate)
-            if self.error_reward_mode == "difference":
-                error_reward = prev_error - curr_error
-            elif self.error_reward_mode == "absolute":
-                error_reward = -curr_error
-            elif self.error_reward_mode == "simple":
-                info_arrived = i in delivered_controller_ids
-                error_reward = 1.0 if info_arrived else 0.0
+                secondary_components = self._compute_reward_for_definition(
+                    i, secondary_def, prev_error, curr_error, action, info_arrived
+                )
+                primary_reward = primary_components.pop("reward")
+                secondary_reward = secondary_components.pop("reward")
+                combined_reward = (1.0 - mix_weight) * primary_reward + mix_weight * secondary_reward
+                combined_comm_penalty = (
+                    (1.0 - mix_weight) * primary_components["comm_penalty"]
+                    + mix_weight * secondary_components["comm_penalty"]
+                )
+                reward_components: Dict[str, float] = {
+                    "prev_error": float(prev_error),
+                    "curr_error": float(curr_error),
+                    "comm_penalty": float(combined_comm_penalty),
+                    "primary_reward": float(primary_reward),
+                    "secondary_reward": float(secondary_reward),
+                    "mix_weight": float(mix_weight),
+                }
+                if "info_arrived" in primary_components or "info_arrived" in secondary_components:
+                    reward_components["info_arrived"] = float(
+                        primary_components.get("info_arrived", secondary_components.get("info_arrived", 0.0))
+                    )
             else:
-                error_reward = 0.0
-            reward = float(error_reward - comm_penalty)
+                definition = self.reward_definitions[0]
+                components = self._compute_reward_for_definition(
+                    i, definition, prev_error, curr_error, action, info_arrived
+                )
+                reward_value = components.pop("reward")
+                combined_reward = reward_value
+                combined_comm_penalty = components.get("comm_penalty", 0.0)
+                reward_components = components
+
+            reward = float(combined_reward)
             agent_key = f"agent_{i}"
             rewards[agent_key] = reward
-            reward_components: Dict[str, float] = {
-                "prev_error": float(prev_error),
-                "curr_error": float(curr_error),
-                "comm_penalty": float(comm_penalty),
-            }
-            if self.error_reward_mode == "simple":
-                reward_components["info_arrived"] = 1.0 if i in delivered_controller_ids else 0.0
             self.last_reward_components[agent_key] = reward_components
             stats = self.reward_component_stats[agent_key]
             stats["prev_error_sum"] += float(prev_error)
             stats["curr_error_sum"] += float(curr_error)
-            stats["comm_penalty_sum"] += float(comm_penalty)
+            stats["comm_penalty_sum"] += float(combined_comm_penalty)
             stats["count"] += 1
             self.last_errors[i] = curr_error
+
+        self.last_mix_weight = mix_weight
+        self.total_env_steps += 1
 
         terminated = {f"agent_{i}": False for i in range(self.n_agents)}
         truncated = {
@@ -452,6 +506,83 @@ class NCS_Env(gym.Env):
         if np.any(scale_max < scale_min):
             raise ValueError("initial_state_scale_max must be >= initial_state_scale_min for all dimensions")
         return scale_min, scale_max
+
+    @staticmethod
+    def _normalize_reward_mixing_cfg(raw_cfg: Any) -> Dict[str, Any]:
+        """Normalize the reward_mixing config entry into a dict with an 'enabled' flag."""
+        if isinstance(raw_cfg, bool):
+            return {"enabled": raw_cfg}
+        if raw_cfg is None:
+            return {"enabled": False}
+        if not isinstance(raw_cfg, dict):
+            raise ValueError("reward_mixing must be a boolean or mapping")
+        return raw_cfg
+
+    def _build_reward_definitions(
+        self,
+        reward_cfg: Dict[str, Any],
+        mixing_cfg: Dict[str, Any],
+        base_comm_penalty_alpha: float,
+        base_simple_comm_penalty_alpha: float,
+    ) -> List[RewardDefinition]:
+        """Create reward definitions for primary/secondary reward functions."""
+        base_mode = reward_cfg.get("state_error_reward", "difference")
+        if not mixing_cfg.get("enabled", False):
+            return [
+                RewardDefinition(
+                    base_mode,
+                    base_comm_penalty_alpha,
+                    base_simple_comm_penalty_alpha,
+                )
+            ]
+
+        rewards_list = mixing_cfg.get("rewards", [])
+        if not isinstance(rewards_list, list) or len(rewards_list) != 2:
+            raise ValueError(
+                "reward.reward_mixing.rewards must contain exactly two reward configs "
+                "when reward_mixing.enabled is true."
+            )
+
+        definitions: List[RewardDefinition] = []
+        for reward_entry in rewards_list:
+            definitions.append(
+                RewardDefinition(
+                    mode=str(reward_entry.get("state_error_reward", base_mode)),
+                    comm_penalty_alpha=float(
+                        reward_entry.get("comm_penalty_alpha", base_comm_penalty_alpha)
+                    ),
+                    simple_comm_penalty_alpha=float(
+                        reward_entry.get(
+                            "simple_comm_penalty_alpha",
+                            reward_entry.get("comm_penalty_alpha", base_simple_comm_penalty_alpha),
+                        )
+                    ),
+                )
+            )
+        return definitions
+
+    def _build_reward_scheduler(self, mixing_cfg: Dict[str, Any]) -> Optional[Callable[[int], float]]:
+        """Create the mixing scheduler callable (or None when mixing is disabled)."""
+        if not mixing_cfg.get("enabled", False):
+            return None
+        scheduler_cfg = mixing_cfg.get("scheduler", {})
+        if not isinstance(scheduler_cfg, dict):
+            scheduler_cfg = {}
+        default_steps = int(mixing_cfg.get("total_steps", 100_000))
+        default_start = float(mixing_cfg.get("start_value", 0.0))
+        default_end = float(mixing_cfg.get("end_value", 1.0))
+        return build_scheduler(
+            scheduler_cfg,
+            default_start=default_start,
+            default_end=default_end,
+            default_steps=default_steps,
+        )
+
+    def _current_mix_weight(self) -> float:
+        """Return the current reward mixing weight."""
+        if not self.reward_mixing_enabled or self.reward_scheduler is None:
+            return 0.0
+        return float(self.reward_scheduler(self.total_env_steps))
 
     def _quantize_state(self, state: np.ndarray) -> np.ndarray:
         """Quantize the measured plant state."""
@@ -521,6 +652,46 @@ class NCS_Env(gym.Env):
         recent_entries = list(self.decision_history[agent_idx])[-self.comm_recent_window :]
         return sum(1 for entry in recent_entries if entry["status"] > 0)
 
+    def _compute_reward_for_definition(
+        self,
+        agent_idx: int,
+        definition: RewardDefinition,
+        prev_error: float,
+        curr_error: float,
+        action: int,
+        info_arrived: bool,
+    ) -> Dict[str, float]:
+        """Compute reward and components for the given reward definition."""
+        comm_penalty = 0.0
+        if not self.perfect_communication and action == 1:
+            penalty_alpha = (
+                definition.comm_penalty_alpha
+                if definition.mode != "simple"
+                else definition.simple_comm_penalty_alpha
+            )
+            if penalty_alpha > 0:
+                recent_tx = self._recent_transmission_count(agent_idx)
+                throughput_estimate = self._compute_agent_throughput(agent_idx)
+                comm_penalty = penalty_alpha * (recent_tx / throughput_estimate)
+
+        if definition.mode == "difference":
+            error_reward = prev_error - curr_error
+        elif definition.mode == "absolute":
+            error_reward = -curr_error
+        else:
+            error_reward = 1.0 if info_arrived else 0.0
+
+        reward_value = float(error_reward - comm_penalty)
+        components: Dict[str, float] = {
+            "prev_error": float(prev_error),
+            "curr_error": float(curr_error),
+            "comm_penalty": float(comm_penalty),
+            "reward": reward_value,
+        }
+        if definition.mode == "simple":
+            components["info_arrived"] = 1.0 if info_arrived else 0.0
+        return components
+
     def _get_observations(self) -> Dict[str, np.ndarray]:
         """Construct observations for all agents."""
         observations = {}
@@ -580,6 +751,7 @@ class NCS_Env(gym.Env):
             "throughput_kbps": 0.0 if self.perfect_communication else self._compute_throughput(),
             "collided_packets": 0 if self.perfect_communication else self.network.total_collided_packets,
             "reward_components": {k: v.copy() for k, v in self.last_reward_components.items()},
+            "reward_mix_weight": float(self.last_mix_weight) if self.reward_mixing_enabled else 0.0,
         }
 
     def render(self):

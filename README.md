@@ -24,6 +24,21 @@ The configuration file is divided into sections; each key controls a specific as
 - `comm_penalty_alpha`: Scalar multiplier (`α`) used in the communication penalty `R_{a,\text{comm}} = -α * N_\text{recent}/T`, applied only when `action=1` and the network is not set to `perfect_communication`.
 - `simple_comm_penalty_alpha`: Optional override for the `"simple"` reward mode. Set to `0` to keep no comm penalty in that mode; otherwise the same penalty formula applies.
 - `comm_throughput_floor`: Small positive value to keep the throughput estimate from collapsing to zero when no ACKs have been observed recently.
+- `reward_mixing`: Optional curriculum block (default disabled). Provide two reward configs under `rewards` (each accepts `state_error_reward`, `comm_penalty_alpha`, `simple_comm_penalty_alpha`) and a `scheduler` (`type`: `"linear"`, `"cosine"`, or `"constant"`, plus `start_value`, `end_value`, `total_steps`). The environment mixes rewards as `(1-w)*r0 + w*r1`, where `w` follows the scheduler built in `utils/schedulers.py` and advances with the per-environment step counter (it persists across episodes for that env instance).
+  - Example:
+    ```json
+    "reward": {
+      "...": "...",
+      "reward_mixing": {
+        "enabled": true,
+        "rewards": [
+          {"state_error_reward": "difference"},
+          {"state_error_reward": "simple", "simple_comm_penalty_alpha": 0.0}
+        ],
+        "scheduler": {"type": "linear", "start_value": 0.0, "end_value": 1.0, "total_steps": 80000}
+      }
+    }
+    ```
 
 With these fields the environment discourages bursts of transmissions in congested conditions: if an agent spams the channel (large `N_recent_tx`) while the measured throughput is low, the penalty grows rapidly; skipping a send (`action=0`) adds no communication cost. When `perfect_communication=true`, the penalty logic is bypassed entirely.
 
@@ -58,6 +73,8 @@ Learning-based baselines live under `algorithms/`:
 - DQN (single agent, SB3): `python -m algorithms.deep_q_learning --config configs/perfect_comm.json --total-timesteps 200000`
 - OpenAI-ES (single agent, JAX): `python -m algorithms.openai_es --config configs/perfect_comm.json --generations 1000 --popsize 128`
   - Enable a meta-population search over initializations with `--meta-population-size 4 --truncation-percentage 0.25 --pbt-interval 10`, which periodically copies top-performing strategies into the worst ones.
+
+SB3 baselines automatically honor `reward.reward_mixing` (curriculum reward blending) when enabled in the config; the OpenAI-ES baseline can continue to use the single reward definition.
 
 CLI flags let you change environment parameters. Use `--output-root` (defaults to `outputs/`) to control where training artifacts land. Each run calls `utils.run_utils.prepare_run_directory(...)`, which creates a uniquely named folder that encodes the algorithm and key config values (noise level, initial-state scale, reward mode, etc.) plus an incrementing `run#` suffix. That directory always contains:
 

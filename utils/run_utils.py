@@ -122,6 +122,18 @@ def gather_config_metadata(algorithm: str, config_path: Optional[Path]) -> Confi
     q_matrix = _ensure_array(lqr_cfg.get("Q"), np.eye(state_dim))
     r_matrix = _ensure_array(lqr_cfg.get("R"), np.eye(control_dim))
     reward_type = str(reward_cfg.get("state_error_reward", "difference"))
+    reward_mixing_cfg = reward_cfg.get("reward_mixing", {})
+    if isinstance(reward_mixing_cfg, bool):
+        reward_mixing_cfg = {"enabled": reward_mixing_cfg}
+    if reward_mixing_cfg.get("enabled"):
+        rewards_list = reward_mixing_cfg.get("rewards", [])
+        if isinstance(rewards_list, list) and len(rewards_list) == 2:
+            reward_modes = [
+                str(entry.get("state_error_reward", reward_type)) for entry in rewards_list
+            ]
+            reward_type = f"mix-{reward_modes[0]}-{reward_modes[1]}"
+        else:
+            reward_type = f"mix-{reward_type}"
 
     return ConfigMetadata(
         algorithm=algorithm,
