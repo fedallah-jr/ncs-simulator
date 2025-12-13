@@ -21,7 +21,6 @@ class BaseHeuristicPolicy:
             n_agents: Number of agents in the system
         """
         self.n_agents = n_agents
-        self.timestep = 0
 
     def predict(self, observation: np.ndarray, deterministic: bool = True) -> Tuple[np.ndarray, Optional[Any]]:
         """
@@ -38,8 +37,8 @@ class BaseHeuristicPolicy:
         raise NotImplementedError
 
     def reset(self):
-        """Reset policy state."""
-        self.timestep = 0
+        """Reset policy state. Override in subclasses if needed."""
+        pass
 
 
 class AlwaysSendPolicy(BaseHeuristicPolicy):
@@ -57,7 +56,6 @@ class AlwaysSendPolicy(BaseHeuristicPolicy):
             action: Always 1 (send)
             state: None
         """
-        self.timestep += 1
         return 1, None
 
 
@@ -76,7 +74,6 @@ class NeverSendPolicy(BaseHeuristicPolicy):
             action: Always 0 (don't send)
             state: None
         """
-        self.timestep += 1
         return 0, None
 
 
@@ -93,6 +90,11 @@ class SendEveryNPolicy(BaseHeuristicPolicy):
         """
         super().__init__(n_agents)
         self.n = n
+        self.timestep = 0
+
+    def reset(self):
+        """Reset timestep counter."""
+        self.timestep = 0
 
     def predict(self, observation: np.ndarray, deterministic: bool = True) -> Tuple[int, None]:
         """
@@ -139,12 +141,9 @@ class RandomSendPolicy(BaseHeuristicPolicy):
             action: 1 with probability prob, else 0
             state: None
         """
-        self.timestep += 1
         if deterministic:
-            # Deterministic mode: use fixed threshold
             return int(self.prob >= 0.5), None
         else:
-            # Stochastic mode: sample from probability
             return int(self.rng.rand() < self.prob), None
 
 
@@ -176,18 +175,11 @@ class ThresholdPolicy(BaseHeuristicPolicy):
             action: 1 if ||state|| > threshold, else 0
             state: None
         """
-        self.timestep += 1
         # Extract current state (first 2 elements by default)
-        # Note: observation format is [current_state, current_throughput, history...]
-        state_dim = 2  # Default state dimension
+        state_dim = 2
         current_state = observation[:state_dim]
-
-        # Compute state magnitude
         state_magnitude = np.linalg.norm(current_state)
-
-        # Send if magnitude exceeds threshold
-        action = 1 if state_magnitude > self.threshold else 0
-        return action, None
+        return (1 if state_magnitude > self.threshold else 0), None
 
 
 class AdaptiveThresholdPolicy(BaseHeuristicPolicy):
@@ -218,23 +210,16 @@ class AdaptiveThresholdPolicy(BaseHeuristicPolicy):
             action: 1 if state magnitude exceeds adaptive threshold, else 0
             state: None
         """
-        self.timestep += 1
-
         # Extract current state and throughput
         state_dim = 2
         current_state = observation[:state_dim]
-        current_throughput = observation[state_dim]  # Next element after state
+        current_throughput = observation[state_dim]
 
-        # Compute state magnitude
+        # Compute state magnitude and adaptive threshold
         state_magnitude = np.linalg.norm(current_state)
-
-        # Adaptive threshold: increase threshold when throughput is high
-        # (i.e., be more conservative when channel is busy)
         adaptive_threshold = self.base_threshold + self.throughput_weight * current_throughput
 
-        # Send if magnitude exceeds adaptive threshold
-        action = 1 if state_magnitude > adaptive_threshold else 0
-        return action, None
+        return (1 if state_magnitude > adaptive_threshold else 0), None
 
 
 # Dictionary for easy policy lookup

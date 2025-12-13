@@ -178,7 +178,6 @@ class NCS_Env(gym.Env):
             data_rate_kbps=network_cfg.get("data_rate_kbps", 250.0),
             data_packet_size=network_cfg.get("data_packet_size", 50),
             ack_packet_size=network_cfg.get("ack_packet_size", 10),
-            backoff_range=tuple(network_cfg.get("backoff_range", (0, 15))),
             max_queue_size=network_cfg.get("max_queue_size", 1),
             slots_per_step=network_cfg.get("slots_per_step", 32),
             mac_min_be=network_cfg.get("mac_min_be", 3),
