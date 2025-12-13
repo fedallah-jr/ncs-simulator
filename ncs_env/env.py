@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import gymnasium as gym
@@ -49,6 +49,7 @@ class NCS_Env(gym.Env):
         self.n_agents = n_agents
         self.episode_length = episode_length
         self.comm_cost = comm_cost
+        self.reward_override = reward_override
 
         self.config = load_config(config_path)
         self.system_cfg = self.config.get("system", {})
@@ -97,8 +98,8 @@ class NCS_Env(gym.Env):
 
     def _initialize_systems(self):
         """Initialize plants, controllers, and the shared network."""
-        A = self.A
-        B = self.B
+        agent_matrices = self._resolve_agent_system_matrices()
+        A, B = agent_matrices[0]
         W = np.array(self.system_cfg.get("process_noise_cov", np.eye(self.state_dim)))
         self.process_noise_cov = W
         self.measurement_noise_cov = np.array(
@@ -112,13 +113,16 @@ class NCS_Env(gym.Env):
         lqr_cfg = self.config.get("lqr", {})
         lqr_Q = np.array(lqr_cfg.get("Q", np.eye(self.state_dim)))
         lqr_R = np.array(lqr_cfg.get("R", np.eye(self.control_dim)))
-        self.K = compute_discrete_lqr_gain(A, B, lqr_Q, lqr_R)
+        self.K_list: List[np.ndarray] = [
+            compute_discrete_lqr_gain(A_i, B_i, lqr_Q, lqr_R) for (A_i, B_i) in agent_matrices
+        ]
+        self.K = self.K_list[0]
 
         controller_cfg = self.config.get("controller", {})
         self.use_kalman_filter = bool(controller_cfg.get("use_kalman_filter", True))
 
         base_reward_cfg = self.config.get("reward", {})
-        reward_cfg = self._merge_reward_override(base_reward_cfg, reward_override)
+        reward_cfg = self._merge_reward_override(base_reward_cfg, self.reward_override)
         self.state_cost_matrix = np.array(
             reward_cfg.get("state_cost_matrix", np.eye(self.state_dim))
         )
@@ -146,19 +150,20 @@ class NCS_Env(gym.Env):
         self.last_mix_weight = self._current_mix_weight()
 
         self.plants: List[Plant] = []
-        for _ in range(self.n_agents):
+        for i in range(self.n_agents):
             x0 = self._sample_initial_state()
             # Pass self.np_random to Plant for isolated RNG
-            self.plants.append(Plant(A, B, W, x0, rng=self.np_random))
+            A_i, B_i = agent_matrices[i]
+            self.plants.append(Plant(A_i, B_i, W, x0, rng=self.np_random))
 
         self.controllers: List[Controller] = []
-        for _ in range(self.n_agents):
+        for i in range(self.n_agents):
             initial_estimate = np.zeros(self.state_dim)
             self.controllers.append(
                 Controller(
-                    A,
-                    B,
-                    self.K,
+                    agent_matrices[i][0],
+                    agent_matrices[i][1],
+                    self.K_list[i],
                     initial_estimate,
                     process_noise_cov=W,
                     measurement_noise_cov=self.measurement_noise_cov,
@@ -372,7 +377,7 @@ class NCS_Env(gym.Env):
             if self.use_kalman_filter:
                 u = self.controllers[i].compute_control()
             else:
-                u = -self.K @ self.last_measurements[i]
+                u = -self.K_list[i] @ self.last_measurements[i]
             self.plants[i].step(u)
 
         # Kalman filter time update (predict) - done AFTER plant update
@@ -469,6 +474,48 @@ class NCS_Env(gym.Env):
         magnitudes = self.np_random.uniform(low=scale_min, high=scale_max)
         signs = self.np_random.choice([-1.0, 1.0], size=self.state_dim)
         return signs * magnitudes
+
+    def _resolve_agent_system_matrices(self) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """
+        Resolve per-agent (A, B) matrices.
+
+        Supports `system.heterogeneous_plants` as a list of dictionaries. Each entry may
+        override `A` and/or `B` for the corresponding agent index. A separate entry with
+        `"default": true` can define a fallback override used for agents whose index is
+        not explicitly listed.
+
+        All agents must share the same state/control dimensions because the observation
+        and action spaces are shared across agents.
+        """
+        base_A = np.array(self.system_cfg.get("A"))
+        base_B = np.array(self.system_cfg.get("B"))
+        het_cfg = self.system_cfg.get("heterogeneous_plants", None)
+        if not isinstance(het_cfg, list) or len(het_cfg) == 0:
+            return [(base_A, base_B) for _ in range(self.n_agents)]
+
+        default_entry: Optional[Dict[str, Any]] = None
+        for entry in het_cfg:
+            if isinstance(entry, dict) and bool(entry.get("default", False)):
+                default_entry = entry
+                break
+
+        matrices: List[Tuple[np.ndarray, np.ndarray]] = []
+        for i in range(self.n_agents):
+            entry: Dict[str, Any] = {}
+            if i < len(het_cfg) and isinstance(het_cfg[i], dict):
+                entry = het_cfg[i]
+            elif default_entry is not None:
+                entry = default_entry
+
+            A_i = np.array(entry.get("A", base_A))
+            B_i = np.array(entry.get("B", base_B))
+            if A_i.shape != base_A.shape:
+                raise ValueError("heterogeneous_plants entries must not change the A matrix shape")
+            if B_i.shape != base_B.shape:
+                raise ValueError("heterogeneous_plants entries must not change the B matrix shape")
+            matrices.append((A_i, B_i))
+
+        return matrices
 
     @staticmethod
     def _resolve_initial_state_scale_range(system_cfg: Dict[str, Any], state_dim: int):

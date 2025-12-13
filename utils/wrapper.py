@@ -19,11 +19,13 @@ class SingleAgentWrapper(gym.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, make_env: Callable[[], Any]):
+    def __init__(self, make_env: Callable[[], Any], other_agent_action: int = 0):
         super().__init__()
         self._make_env = make_env
+        self._other_agent_action = int(other_agent_action)
         self.env: Optional[Any] = None
         tmp_env = make_env()
+        self._n_agents = int(getattr(tmp_env, "n_agents", 1))
         self.observation_space = tmp_env.observation_space.spaces["agent_0"]
         self.action_space = tmp_env.action_space.spaces["agent_0"]
         tmp_env.close()
@@ -35,7 +37,11 @@ class SingleAgentWrapper(gym.Env):
         return obs_dict["agent_0"], info
 
     def step(self, action):
-        obs_dict, rewards, terminated, truncated, info = self.env.step({"agent_0": int(action)})
+        full_actions: Dict[str, int] = {
+            f"agent_{i}": self._other_agent_action for i in range(self._n_agents)
+        }
+        full_actions["agent_0"] = int(action)
+        obs_dict, rewards, terminated, truncated, info = self.env.step(full_actions)
         return (
             obs_dict["agent_0"],
             float(rewards["agent_0"]),

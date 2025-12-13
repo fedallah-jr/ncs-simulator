@@ -1,0 +1,112 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional
+
+import numpy as np
+import torch
+
+
+@dataclass(frozen=True)
+class MARLBatch:
+    obs: torch.Tensor
+    actions: torch.Tensor
+    rewards: torch.Tensor
+    next_obs: torch.Tensor
+    dones: torch.Tensor
+    states: torch.Tensor
+    next_states: torch.Tensor
+
+
+class MARLReplayBuffer:
+    """
+    Simple transition replay buffer for MLP-based MARL (IQL/VDN/QMIX).
+
+    Stores per-step transitions with shapes:
+      obs:        (buffer, n_agents, obs_dim)
+      actions:    (buffer, n_agents)
+      rewards:    (buffer, n_agents)
+      next_obs:   (buffer, n_agents, obs_dim)
+      dones:      (buffer,)
+      states:     (buffer, state_dim)      where state_dim = n_agents * obs_dim
+      next_states:(buffer, state_dim)
+    """
+
+    def __init__(
+        self,
+        capacity: int,
+        n_agents: int,
+        obs_dim: int,
+        device: torch.device,
+        rng: Optional[np.random.Generator] = None,
+    ) -> None:
+        if capacity <= 0:
+            raise ValueError("capacity must be positive")
+        if n_agents <= 0 or obs_dim <= 0:
+            raise ValueError("n_agents and obs_dim must be positive")
+        self.capacity = int(capacity)
+        self.n_agents = int(n_agents)
+        self.obs_dim = int(obs_dim)
+        self.state_dim = self.n_agents * self.obs_dim
+        self.device = device
+        self.rng = rng if rng is not None else np.random.default_rng()
+
+        self._ptr = 0
+        self._size = 0
+
+        self._obs = np.zeros((self.capacity, self.n_agents, self.obs_dim), dtype=np.float32)
+        self._actions = np.zeros((self.capacity, self.n_agents), dtype=np.int64)
+        self._rewards = np.zeros((self.capacity, self.n_agents), dtype=np.float32)
+        self._next_obs = np.zeros((self.capacity, self.n_agents, self.obs_dim), dtype=np.float32)
+        self._dones = np.zeros((self.capacity,), dtype=np.float32)
+        self._states = np.zeros((self.capacity, self.state_dim), dtype=np.float32)
+        self._next_states = np.zeros((self.capacity, self.state_dim), dtype=np.float32)
+
+    def __len__(self) -> int:
+        return self._size
+
+    def add(
+        self,
+        obs: np.ndarray,
+        actions: np.ndarray,
+        rewards: np.ndarray,
+        next_obs: np.ndarray,
+        done: bool,
+    ) -> None:
+        if obs.shape != (self.n_agents, self.obs_dim):
+            raise ValueError("obs must have shape (n_agents, obs_dim)")
+        if next_obs.shape != (self.n_agents, self.obs_dim):
+            raise ValueError("next_obs must have shape (n_agents, obs_dim)")
+        if actions.shape != (self.n_agents,):
+            raise ValueError("actions must have shape (n_agents,)")
+        if rewards.shape != (self.n_agents,):
+            raise ValueError("rewards must have shape (n_agents,)")
+
+        idx = self._ptr
+        self._obs[idx] = obs
+        self._actions[idx] = actions
+        self._rewards[idx] = rewards
+        self._next_obs[idx] = next_obs
+        self._dones[idx] = float(done)
+        self._states[idx] = obs.reshape(-1)
+        self._next_states[idx] = next_obs.reshape(-1)
+
+        self._ptr = (self._ptr + 1) % self.capacity
+        self._size = min(self._size + 1, self.capacity)
+
+    def sample(self, batch_size: int) -> MARLBatch:
+        if self._size == 0:
+            raise RuntimeError("Cannot sample from an empty buffer")
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        indices = self.rng.integers(0, self._size, size=int(batch_size), endpoint=False)
+
+        return MARLBatch(
+            obs=torch.as_tensor(self._obs[indices], device=self.device, dtype=torch.float32),
+            actions=torch.as_tensor(self._actions[indices], device=self.device, dtype=torch.long),
+            rewards=torch.as_tensor(self._rewards[indices], device=self.device, dtype=torch.float32),
+            next_obs=torch.as_tensor(self._next_obs[indices], device=self.device, dtype=torch.float32),
+            dones=torch.as_tensor(self._dones[indices], device=self.device, dtype=torch.float32),
+            states=torch.as_tensor(self._states[indices], device=self.device, dtype=torch.float32),
+            next_states=torch.as_tensor(self._next_states[indices], device=self.device, dtype=torch.float32),
+        )

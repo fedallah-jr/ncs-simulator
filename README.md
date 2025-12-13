@@ -73,6 +73,9 @@ Learning-based baselines live under `algorithms/`:
 - DQN (single agent, SB3): `python -m algorithms.deep_q_learning --config configs/perfect_comm.json --total-timesteps 200000`
 - OpenAI-ES (single agent, JAX): `python -m algorithms.openai_es --config configs/perfect_comm.json --generations 1000 --popsize 128`
   - Enable a meta-population search over initializations with `--meta-population-size 4 --truncation-percentage 0.25 --pbt-interval 10`, which periodically copies top-performing strategies into the worst ones.
+- IQL (multi-agent, PyTorch): `python -m algorithms.marl_iql --config configs/marl_mixed_plants.json --total-timesteps 200000`
+- VDN (multi-agent, PyTorch): `python -m algorithms.marl_vdn --config configs/marl_mixed_plants.json --total-timesteps 200000`
+- QMIX (multi-agent, PyTorch): `python -m algorithms.marl_qmix --config configs/marl_mixed_plants.json --total-timesteps 200000`
 
 SB3 baselines automatically honor `reward.reward_mixing` (curriculum reward blending) when enabled in the config; the OpenAI-ES baseline can continue to use the single reward definition.
 
@@ -81,6 +84,7 @@ CLI flags let you change environment parameters. Use `--output-root` (defaults t
 - **Model Checkpoints:**
   - For SB3 (PPO/DQN): `best_model.zip`, `latest_model.zip`, and `evaluations.npz` (from `EvalCallback`).
   - For OpenAI-ES: `best_model.npz` (flattened params of best individual) and `latest_model.npz`.
+  - For MARL (IQL/VDN/QMIX): `best_model.pt` and `latest_model.pt`.
 - `training_rewards.csv`: A simple CSV table tracking performance. For SB3 this logs `[episode, reward]`; for OpenAI-ES it logs `[generation, mean_reward, max_reward, time]`.
 - **`config.json`**, which combines the full environment configuration with a `training_run` section containing the algorithm name, timestamp, source config path, and all hyperparameters from the run. This structured format makes it easy to reload configurations or use them directly with visualization tools.
 

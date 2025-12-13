@@ -14,6 +14,9 @@ Usage:
     # Visualize a heuristic policy
     python -m tools.visualize_policy --config configs/perfect_comm.json --policy always_send --policy-type heuristic
 
+    # Visualize an IQL/VDN/QMIX PyTorch checkpoint (agent_0)
+    python -m tools.visualize_policy --config configs/perfect_comm.json --policy path/to/latest_model.pt --policy-type marl_torch --n-agents 3
+
     # Compare multiple policies
     python -m tools.visualize_policy --config configs/perfect_comm.json \
         --policies path/to/ppo.zip always_send send_every_5 \
@@ -165,7 +168,87 @@ def load_es_policy(model_path: str, env: Any):
     return ESPolicyWrapper(model, params)
 
 
-def load_policy(policy_path: str, policy_type: str, env: Any, n_agents: int = 1, seed: Optional[int] = None):
+def load_marl_torch_policy(model_path: str, env: Any, marl_agent_index: int = 0):
+    """
+    Load a PyTorch MARL (IQL/VDN/QMIX) policy checkpoint saved by `algorithms/marl_*.py`.
+
+    Returns a lightweight wrapper with a `predict(obs, deterministic=True)` method.
+    Note: Visualization uses `SingleAgentWrapper`, so only the selected agent index is
+    queried for actions while other agents are held at `SingleAgentWrapper(other_agent_action=...)`.
+    """
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+
+    try:
+        import torch
+        from utils.marl.networks import MLPAgent
+    except ImportError as e:
+        raise ImportError("torch is required to load MARL torch checkpoints") from e
+
+    ckpt = torch.load(model_path, map_location="cpu")
+    if not isinstance(ckpt, dict):
+        raise ValueError("MARL torch checkpoint must be a dict")
+
+    n_agents = int(ckpt.get("n_agents", 1))
+    obs_dim = int(ckpt.get("obs_dim", 0))
+    n_actions = int(ckpt.get("n_actions", 0))
+    if obs_dim <= 0 or n_actions <= 0:
+        raise ValueError("Checkpoint must include positive 'obs_dim' and 'n_actions'")
+    if marl_agent_index < 0 or marl_agent_index >= n_agents:
+        raise ValueError("marl_agent_index must be within [0, n_agents)")
+
+    env_obs_dim = int(getattr(env.observation_space, "shape", (0,))[0])
+    if env_obs_dim != obs_dim:
+        raise ValueError(f"Env obs_dim={env_obs_dim} does not match checkpoint obs_dim={obs_dim}")
+
+    use_agent_id = bool(ckpt.get("use_agent_id", n_agents > 1))
+    input_dim = obs_dim + (n_agents if use_agent_id else 0)
+    hidden_dims = tuple(int(x) for x in ckpt.get("agent_hidden_dims", [128, 128]))
+    activation = str(ckpt.get("agent_activation", "relu"))
+    layer_norm = bool(ckpt.get("agent_layer_norm", False))
+    state_dict = ckpt.get("agent_state_dict", None)
+    if state_dict is None:
+        raise ValueError("Checkpoint must include 'agent_state_dict'")
+
+    agent = MLPAgent(
+        input_dim=input_dim,
+        n_actions=n_actions,
+        hidden_dims=hidden_dims,
+        activation=activation,
+        layer_norm=layer_norm,
+    )
+    agent.load_state_dict(state_dict)
+    agent.eval()
+
+    class MARLTorchPolicyWrapper:
+        def __init__(self, agent, n_agents: int, use_agent_id: bool, marl_agent_index: int):
+            self.agent = agent
+            self.n_agents = n_agents
+            self.use_agent_id = use_agent_id
+            self.marl_agent_index = marl_agent_index
+
+        def predict(self, observation, deterministic=True):
+            obs = np.asarray(observation, dtype=np.float32)
+            obs_t = torch.from_numpy(obs).float()
+            if self.use_agent_id:
+                onehot = torch.zeros(self.n_agents, dtype=torch.float32)
+                onehot[self.marl_agent_index] = 1.0
+                obs_t = torch.cat([obs_t, onehot], dim=0)
+            q = self.agent(obs_t.unsqueeze(0))
+            action = int(torch.argmax(q, dim=-1).item())
+            return action, None
+
+    return MARLTorchPolicyWrapper(agent, n_agents=n_agents, use_agent_id=use_agent_id, marl_agent_index=marl_agent_index)
+
+
+def load_policy(
+    policy_path: str,
+    policy_type: str,
+    env: Any,
+    n_agents: int = 1,
+    seed: Optional[int] = None,
+    marl_agent_index: int = 0,
+):
     """
     Load a policy (SB3, ES, or heuristic).
 
@@ -185,8 +268,10 @@ def load_policy(policy_path: str, policy_type: str, env: Any, n_agents: int = 1,
         return load_es_policy(policy_path, env)
     elif policy_type.lower() == 'heuristic':
         return get_heuristic_policy(policy_path, n_agents=n_agents, seed=seed)
+    elif policy_type.lower() in {'marl_torch', 'marl', 'torch_marl'}:
+        return load_marl_torch_policy(policy_path, env, marl_agent_index=marl_agent_index)
     else:
-        raise ValueError(f"Unknown policy type: {policy_type}. Use 'sb3', 'es', or 'heuristic'")
+        raise ValueError(f"Unknown policy type: {policy_type}. Use 'sb3', 'es', 'heuristic', or 'marl_torch'")
 
 
 def run_episode(env: Any, policy: Any, episode_length: int, deterministic: bool = True) -> Dict[str, np.ndarray]:
@@ -648,8 +733,8 @@ def main():
     parser.add_argument(
         '--policy-type',
         type=str,
-        choices=['sb3', 'es', 'heuristic'],
-        help='Type of policy: sb3, es, or heuristic'
+        choices=['sb3', 'es', 'heuristic', 'marl_torch'],
+        help='Type of policy: sb3, es, heuristic, or marl_torch'
     )
 
     # Multi-policy comparison mode
@@ -663,8 +748,14 @@ def main():
         '--policy-types',
         type=str,
         nargs='+',
-        choices=['sb3', 'es', 'heuristic'],
+        choices=['sb3', 'es', 'heuristic', 'marl_torch'],
         help='List of policy types corresponding to --policies'
+    )
+    parser.add_argument(
+        '--marl-agent-index',
+        type=int,
+        default=0,
+        help='Agent index for marl_torch checkpoints (default: 0)'
     )
     parser.add_argument(
         '--labels',
@@ -690,7 +781,7 @@ def main():
         '--n-agents',
         type=int,
         default=1,
-        help='Number of agents (default: 1, only single-agent supported currently)'
+        help='Number of agents in the environment (default: 1; visualization controls agent_0, others fixed to 0)'
     )
 
     # Visualization parameters
@@ -829,7 +920,14 @@ def main():
 
         # Load policy
         try:
-            policy = load_policy(policy_path, policy_type, env, n_agents=args.n_agents, seed=args.seed)
+            policy = load_policy(
+                policy_path,
+                policy_type,
+                env,
+                n_agents=args.n_agents,
+                seed=args.seed,
+                marl_agent_index=int(args.marl_agent_index),
+            )
         except Exception as e:
             print(f"  ✗ Error loading policy: {e}\n")
             continue
