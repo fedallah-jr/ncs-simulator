@@ -30,7 +30,6 @@
     "data_rate_kbps": 250.0,
     "data_packet_size": 50,
     "ack_packet_size": 10,
-    "backoff_range": [0, 15],
     "max_queue_size": 1,
     "perfect_communication": true
   },

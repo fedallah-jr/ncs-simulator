@@ -23,8 +23,9 @@ The configuration file is divided into sections; each key controls a specific as
 - `comm_throughput_window`: Long window (steps) used to estimate per-agent throughput from ACKed packets and their delays.
 - `comm_penalty_alpha`: Scalar multiplier (`α`) used in the communication penalty `R_{a,\text{comm}} = -α * N_\text{recent}/T`, applied only when `action=1` and the network is not set to `perfect_communication`.
 - `simple_comm_penalty_alpha`: Optional override for the `"simple"` reward mode. Set to `0` to keep no comm penalty in that mode; otherwise the same penalty formula applies.
+- `simple_freshness_decay`: Exponential freshness decay rate for `"simple"` reward mode (default `0.0`). When a measurement is delivered, the base reward becomes `exp(-simple_freshness_decay * age_steps)`, where `age_steps` is the measurement staleness in environment steps.
 - `comm_throughput_floor`: Small positive value to keep the throughput estimate from collapsing to zero when no ACKs have been observed recently.
-- `reward_mixing`: Optional curriculum block (default disabled). Provide two reward configs under `rewards` (each accepts `state_error_reward`, `comm_penalty_alpha`, `simple_comm_penalty_alpha`) and a `scheduler` (`type`: `"linear"`, `"cosine"`, or `"constant"`, plus `start_value`, `end_value`, `total_steps`). The environment mixes rewards as `(1-w)*r0 + w*r1`, where `w` follows the scheduler built in `utils/schedulers.py` and advances with the per-environment step counter (it persists across episodes for that env instance).
+- `reward_mixing`: Optional curriculum block (default disabled). Provide two reward configs under `rewards` (each accepts `state_error_reward`, `comm_penalty_alpha`, `simple_comm_penalty_alpha`, `simple_freshness_decay`) and a `scheduler` (`type`: `"linear"`, `"cosine"`, or `"constant"`, plus `start_value`, `end_value`, `total_steps`). The environment mixes rewards as `(1-w)*r0 + w*r1`, where `w` follows the scheduler built in `utils/schedulers.py` and advances with the per-environment step counter (it persists across episodes for that env instance).
   - Example:
     ```json
     "reward": {
@@ -53,7 +54,6 @@ Observations are laid out as `[current_state, current_throughput, prev_states...
 ### `network`
 - `data_rate_kbps`: Physical-layer rate used to convert packet sizes into transmission durations.
 - `data_packet_size`, `ack_packet_size`: Sensor/ACK payload sizes in bytes. Larger packets hold the channel for more timesteps.
-- `backoff_range`: `(min, max)` slot range for random backoff; the upper bound grows exponentially after collisions.
 - `max_queue_size`: Pending-packet capacity per entity. A value of `1` means new data overwrites unsent packets, enforcing “freshest data only.”
 - `perfect_communication`: When `true`, disables CSMA behavior entirely—measurements reach controllers instantly, collisions/throughput bookkeeping is skipped, and decision histories record immediate successes for every transmission attempt.
 - `slots_per_step`: Number of micro-slots simulated inside each 10 ms environment step (default 32, ≈312 µs per slot).

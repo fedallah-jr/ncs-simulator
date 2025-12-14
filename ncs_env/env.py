@@ -20,10 +20,13 @@ class RewardDefinition:
     mode: str
     comm_penalty_alpha: float
     simple_comm_penalty_alpha: float
+    simple_freshness_decay: float = 0.0
 
     def __post_init__(self) -> None:
         if self.mode not in {"difference", "absolute", "simple"}:
             raise ValueError("state_error_reward must be 'difference', 'absolute', or 'simple'")
+        if float(self.simple_freshness_decay) < 0.0:
+            raise ValueError("simple_freshness_decay must be >= 0")
 
 
 class NCS_Env(gym.Env):
@@ -134,9 +137,14 @@ class NCS_Env(gym.Env):
         base_simple_comm_penalty_alpha = float(
             reward_cfg.get("simple_comm_penalty_alpha", base_comm_penalty_alpha)
         )
+        base_simple_freshness_decay = float(reward_cfg.get("simple_freshness_decay", 0.0))
         reward_mixing_cfg = self._normalize_reward_mixing_cfg(reward_cfg.get("reward_mixing", {}))
         self.reward_definitions = self._build_reward_definitions(
-            reward_cfg, reward_mixing_cfg, base_comm_penalty_alpha, base_simple_comm_penalty_alpha
+            reward_cfg,
+            reward_mixing_cfg,
+            base_comm_penalty_alpha,
+            base_simple_comm_penalty_alpha,
+            base_simple_freshness_decay,
         )
         self.reward_mixing_enabled = bool(reward_mixing_cfg.get("enabled", False)) and len(self.reward_definitions) == 2
         self.error_reward_mode = self.reward_definitions[0].mode
@@ -293,6 +301,7 @@ class NCS_Env(gym.Env):
         # Kalman filter measurement update (conditionally, based on packet delivery)
         # Note: predict() is called AFTER plant update to maintain correct timing
         delivered_controller_ids = set()
+        delivered_message_ages: Dict[int, int] = {}
 
         if self.perfect_communication:
             for i in range(self.n_agents):
@@ -308,6 +317,7 @@ class NCS_Env(gym.Env):
                     # returns early for perfect_communication anyway)
                     self._log_successful_comm(i, state_index, state_index)
                     delivered_controller_ids.add(i)
+                    delivered_message_ages[i] = 0
                 else:
                     self._record_decision(i, status=0)
         else:
@@ -341,11 +351,15 @@ class NCS_Env(gym.Env):
                     controller_id = packet.dest_id
                     measurement = packet.payload["state"]
                     measurement_timestamp = packet.payload["timestamp"]
+                    age_steps = max(0, int(state_index - int(measurement_timestamp)))
 
                     if self.use_kalman_filter:
                         self.controllers[controller_id].delayed_update(measurement, measurement_timestamp)
                     self.last_measurements[controller_id] = measurement
                     delivered_controller_ids.add(controller_id)
+                    existing_age = delivered_message_ages.get(controller_id)
+                    if existing_age is None or age_steps < existing_age:
+                        delivered_message_ages[controller_id] = age_steps
 
                 for mac_ack in network_result.get("delivered_mac_acks", []):
                     sensor_id = mac_ack.get("sensor_id")
@@ -394,14 +408,15 @@ class NCS_Env(gym.Env):
             prev_error = self.last_errors[i]
             curr_error = self._compute_state_error(x)
             info_arrived = i in delivered_controller_ids
+            message_age_steps = delivered_message_ages.get(i) if info_arrived else None
 
             if self.reward_mixing_enabled and len(self.reward_definitions) == 2:
                 primary_def, secondary_def = self.reward_definitions
                 primary_components = self._compute_reward_for_definition(
-                    i, primary_def, prev_error, curr_error, action, info_arrived
+                    i, primary_def, prev_error, curr_error, action, info_arrived, message_age_steps
                 )
                 secondary_components = self._compute_reward_for_definition(
-                    i, secondary_def, prev_error, curr_error, action, info_arrived
+                    i, secondary_def, prev_error, curr_error, action, info_arrived, message_age_steps
                 )
                 primary_reward = primary_components.pop("reward")
                 secondary_reward = secondary_components.pop("reward")
@@ -418,14 +433,13 @@ class NCS_Env(gym.Env):
                     "secondary_reward": float(secondary_reward),
                     "mix_weight": float(mix_weight),
                 }
-                if "info_arrived" in primary_components or "info_arrived" in secondary_components:
-                    reward_components["info_arrived"] = float(
-                        primary_components.get("info_arrived", secondary_components.get("info_arrived", 0.0))
-                    )
+                for key in ("info_arrived", "message_age_steps", "freshness"):
+                    if key in primary_components or key in secondary_components:
+                        reward_components[key] = float(primary_components.get(key, secondary_components.get(key, 0.0)))
             else:
                 definition = self.reward_definitions[0]
                 components = self._compute_reward_for_definition(
-                    i, definition, prev_error, curr_error, action, info_arrived
+                    i, definition, prev_error, curr_error, action, info_arrived, message_age_steps
                 )
                 reward_value = components.pop("reward")
                 combined_reward = reward_value
@@ -583,6 +597,7 @@ class NCS_Env(gym.Env):
         mixing_cfg: Dict[str, Any],
         base_comm_penalty_alpha: float,
         base_simple_comm_penalty_alpha: float,
+        base_simple_freshness_decay: float,
     ) -> List[RewardDefinition]:
         """Create reward definitions for primary/secondary reward functions."""
         base_mode = reward_cfg.get("state_error_reward", "difference")
@@ -592,6 +607,7 @@ class NCS_Env(gym.Env):
                     base_mode,
                     base_comm_penalty_alpha,
                     base_simple_comm_penalty_alpha,
+                    base_simple_freshness_decay,
                 )
             ]
 
@@ -615,6 +631,9 @@ class NCS_Env(gym.Env):
                             "simple_comm_penalty_alpha",
                             reward_entry.get("comm_penalty_alpha", base_simple_comm_penalty_alpha),
                         )
+                    ),
+                    simple_freshness_decay=float(
+                        reward_entry.get("simple_freshness_decay", base_simple_freshness_decay)
                     ),
                 )
             )
@@ -719,6 +738,7 @@ class NCS_Env(gym.Env):
         curr_error: float,
         action: int,
         info_arrived: bool,
+        message_age_steps: Optional[int] = None,
     ) -> Dict[str, float]:
         """Compute reward and components for the given reward definition."""
         comm_penalty = 0.0
@@ -738,7 +758,11 @@ class NCS_Env(gym.Env):
         elif definition.mode == "absolute":
             error_reward = -curr_error
         else:
-            error_reward = 1.0 if info_arrived else 0.0
+            if not info_arrived:
+                error_reward = 0.0
+            else:
+                age_steps = max(0, int(message_age_steps or 0))
+                error_reward = float(np.exp(-float(definition.simple_freshness_decay) * float(age_steps)))
 
         reward_value = float(error_reward - comm_penalty)
         components: Dict[str, float] = {
@@ -749,6 +773,8 @@ class NCS_Env(gym.Env):
         }
         if definition.mode == "simple":
             components["info_arrived"] = 1.0 if info_arrived else 0.0
+            components["message_age_steps"] = float(max(0, int(message_age_steps or 0))) if info_arrived else 0.0
+            components["freshness"] = float(error_reward) if info_arrived else 0.0
         return components
 
     def _get_observations(self) -> Dict[str, np.ndarray]:
