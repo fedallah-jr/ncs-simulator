@@ -239,9 +239,24 @@ class NetworkModel:
         entity.backoff_counter = self._draw_backoff(entity.backoff_exponent)
 
     def _draw_backoff(self, backoff_exponent: int) -> int:
-        """Draw a random backoff (number of slots) for the given BE."""
+        """
+        Draw a random backoff for the given BE.
+
+        We abide by the IEEE 802.15.4 standard where 1 Backoff Unit = 320 microseconds.
+        We convert this physical duration into simulation slots.
+        """
         upper = (2**backoff_exponent) - 1
-        return int(self.rng.integers(0, upper + 1))
+        backoff_units = int(self.rng.integers(0, upper + 1))
+
+        if backoff_units == 0:
+            return 0
+
+        # 320 us per unit
+        duration_seconds = backoff_units * 320.0 * 1e-6
+
+        # Convert to slots (ceiling to ensure we wait at least the duration)
+        slots = int(np.ceil(duration_seconds / self.slot_duration))
+        return max(1, slots)
 
     def _compute_tx_slots(self, packet_size_bytes: int) -> int:
         """Compute number of slots needed to send a packet of given size."""
@@ -376,50 +391,6 @@ class NetworkModel:
         self.active_transmissions = remaining
         self.channel_state = ChannelState.BUSY if self.active_transmissions else ChannelState.IDLE
 
-    def _mark_ack_received(self, entity_idx: int) -> None:
-        """Clear the transmitter once its MAC ACK is received."""
-        entity = self.entities[entity_idx]
-        if entity.pending_packet is not None and entity.pending_packet.packet_type == "data":
-            measurement_timestamp = entity.pending_packet.payload.get("timestamp")
-            self.delivered_mac_acks.append(
-                {
-                    "sensor_id": entity.pending_packet.source_id,
-                    "measurement_timestamp": measurement_timestamp,
-                }
-            )
-        self._clear_entity(entity)
-
-    def _handle_failed_tx(self, entity: NetworkEntity, dropped_packets: List[Packet]) -> None:
-        """Handle a collided transmission by retrying or dropping."""
-        entity.collision_count += 1
-        self._schedule_retry_or_drop(entity, dropped_packets)
-
-    def _schedule_retry_or_drop(self, entity: NetworkEntity, dropped_packets: List[Packet]) -> None:
-        entity.retry_count += 1
-        if entity.retry_count > self.max_frame_retries:
-            if entity.pending_packet is not None:
-                dropped_packets.append(entity.pending_packet)
-            self._clear_entity(entity)
-            return
-
-        entity.state = EntityState.BACKING_OFF
-        entity.backoff_exponent = min(self.mac_max_be, entity.backoff_exponent + 1)
-        entity.backoff_counter = self._draw_backoff(entity.backoff_exponent)
-        entity.cca_countdown = 0
-        entity.awaiting_ack_until = None
-
-    def _clear_entity(self, entity: NetworkEntity) -> None:
-        entity.state = EntityState.IDLE
-        entity.pending_packet = None
-        entity.backoff_counter = 0
-        entity.collision_count = 0
-        entity.csma_backoffs = 0
-        entity.retry_count = 0
-        entity.backoff_exponent = self.mac_min_be
-        entity.awaiting_ack_until = None
-        entity.cca_countdown = 0
-        entity.expects_ack = False
-
     def _collect_mac_ack_transmissions(self) -> List[ActiveTransmission]:
         ready: List[ActiveTransmission] = []
         remaining: List[Dict[str, int]] = []
@@ -467,3 +438,47 @@ class NetworkModel:
             if entity.state == EntityState.WAITING_ACK and entity.awaiting_ack_until is not None:
                 if self.current_slot >= entity.awaiting_ack_until:
                     self._schedule_retry_or_drop(entity, dropped_packets)
+
+    def _mark_ack_received(self, entity_idx: int) -> None:
+        """Clear the transmitter once its MAC ACK is received."""
+        entity = self.entities[entity_idx]
+        if entity.pending_packet is not None and entity.pending_packet.packet_type == "data":
+            measurement_timestamp = entity.pending_packet.payload.get("timestamp")
+            self.delivered_mac_acks.append(
+                {
+                    "sensor_id": entity.pending_packet.source_id,
+                    "measurement_timestamp": measurement_timestamp,
+                }
+            )
+        self._clear_entity(entity)
+
+    def _handle_failed_tx(self, entity: NetworkEntity, dropped_packets: List[Packet]) -> None:
+        """Handle a collided transmission by retrying or dropping."""
+        entity.collision_count += 1
+        self._schedule_retry_or_drop(entity, dropped_packets)
+
+    def _schedule_retry_or_drop(self, entity: NetworkEntity, dropped_packets: List[Packet]) -> None:
+        entity.retry_count += 1
+        if entity.retry_count > self.max_frame_retries:
+            if entity.pending_packet is not None:
+                dropped_packets.append(entity.pending_packet)
+            self._clear_entity(entity)
+            return
+
+        entity.state = EntityState.BACKING_OFF
+        entity.backoff_exponent = min(self.mac_max_be, entity.backoff_exponent + 1)
+        entity.backoff_counter = self._draw_backoff(entity.backoff_exponent)
+        entity.cca_countdown = 0
+        entity.awaiting_ack_until = None
+
+    def _clear_entity(self, entity: NetworkEntity) -> None:
+        entity.state = EntityState.IDLE
+        entity.pending_packet = None
+        entity.backoff_counter = 0
+        entity.collision_count = 0
+        entity.csma_backoffs = 0
+        entity.retry_count = 0
+        entity.backoff_exponent = self.mac_min_be
+        entity.awaiting_ack_until = None
+        entity.cca_countdown = 0
+        entity.expects_ack = False
