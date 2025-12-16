@@ -18,11 +18,15 @@ The configuration file is divided into sections; each key controls a specific as
 
 ### `reward`
 - `state_cost_matrix`: Matrix (Q) used to compute the quadratic tracking error `(x - x_ref)^T Q (x - x_ref)`. Rewards are the improvement in this error between consecutive steps (`r_t = e_{t-1} - e_t`), minus the communication penalty.
-- `state_error_reward`: Either `"difference"` (default, reward improvement), `"absolute"` (reward equals `-e_t`), or `"simple"` (reward +1 if a new measurement was delivered this step, otherwise 0; no communication penalty).
+- `state_error_reward`: Reward mode for tracking error. Options:
+  - `"difference"` (default): Reward is improvement in tracking error (`r_t = e_{t-1} - e_t`).
+  - `"absolute"`: Reward equals negative tracking error (`r_t = -e_t`).
+  - `"simple"`: Reward +1 if measurement delivered this step, 0 otherwise. Range: [0, max_steps].
+  - `"simple_penalty"`: Reward 0 if measurement delivered, -1 otherwise. Range: [-max_steps, 0]. Symmetric version of "simple".
 - `comm_recent_window`: Short window (steps) used to count how many recent transmission attempts (`p>0`) an agent has initiated.
 - `comm_throughput_window`: Long window (steps) used to estimate per-agent throughput from ACKed packets and their delays.
 - `comm_penalty_alpha`: Scalar multiplier (`α`) used in the communication penalty `R_{a,\text{comm}} = -α * N_\text{recent}/T`, applied only when `action=1` and the network is not set to `perfect_communication`.
-- `simple_comm_penalty_alpha`: Optional override for the `"simple"` reward mode. Set to `0` to keep no comm penalty in that mode; otherwise the same penalty formula applies.
+- `simple_comm_penalty_alpha`: Optional override for `"simple"` and `"simple_penalty"` reward modes. Set to `0` to keep no comm penalty in those modes; otherwise the same penalty formula applies.
 - `simple_freshness_decay`: Exponential freshness decay rate for `"simple"` reward mode (default `0.0`). When a measurement is delivered, the base reward becomes `exp(-simple_freshness_decay * age_steps)`, where `age_steps` is the measurement staleness in environment steps.
 - `comm_throughput_floor`: Small positive value to keep the throughput estimate from collapsing to zero when no ACKs have been observed recently.
 - `reward_mixing`: Optional curriculum block (default disabled). Provide two reward configs under `rewards` (each accepts `state_error_reward`, `comm_penalty_alpha`, `simple_comm_penalty_alpha`, `simple_freshness_decay`) and a `scheduler` (`type`: `"linear"`, `"cosine"`, or `"constant"`, plus `start_value`, `end_value`, `total_steps`). The environment mixes rewards as `(1-w)*r0 + w*r1`, where `w` follows the scheduler built in `utils/schedulers.py` and advances with the per-environment step counter (it persists across episodes for that env instance).

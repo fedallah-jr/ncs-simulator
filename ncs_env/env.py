@@ -23,8 +23,8 @@ class RewardDefinition:
     simple_freshness_decay: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.mode not in {"difference", "absolute", "simple"}:
-            raise ValueError("state_error_reward must be 'difference', 'absolute', or 'simple'")
+        if self.mode not in {"difference", "absolute", "simple", "simple_penalty"}:
+            raise ValueError("state_error_reward must be 'difference', 'absolute', 'simple', or 'simple_penalty'")
         if float(self.simple_freshness_decay) < 0.0:
             raise ValueError("simple_freshness_decay must be >= 0")
 
@@ -761,7 +761,7 @@ class NCS_Env(gym.Env):
         if not self.perfect_communication and action == 1:
             penalty_alpha = (
                 definition.comm_penalty_alpha
-                if definition.mode != "simple"
+                if definition.mode not in {"simple", "simple_penalty"}
                 else definition.simple_comm_penalty_alpha
             )
             if penalty_alpha > 0:
@@ -773,7 +773,13 @@ class NCS_Env(gym.Env):
             error_reward = prev_error - curr_error
         elif definition.mode == "absolute":
             error_reward = -curr_error
-        else:
+        elif definition.mode == "simple_penalty":
+            # Symmetric version of "simple": 0 if measurement delivered, -1 otherwise
+            if info_arrived:
+                error_reward = 0.0
+            else:
+                error_reward = -1.0
+        else:  # mode == "simple"
             if not info_arrived:
                 error_reward = 0.0
             else:
@@ -787,10 +793,13 @@ class NCS_Env(gym.Env):
             "comm_penalty": float(comm_penalty),
             "reward": reward_value,
         }
-        if definition.mode == "simple":
+        if definition.mode in {"simple", "simple_penalty"}:
             components["info_arrived"] = 1.0 if info_arrived else 0.0
             components["message_age_steps"] = float(max(0, int(message_age_steps or 0))) if info_arrived else 0.0
-            components["freshness"] = float(error_reward) if info_arrived else 0.0
+            if definition.mode == "simple":
+                components["freshness"] = float(error_reward) if info_arrived else 0.0
+            else:  # simple_penalty
+                components["penalty"] = float(error_reward)
         return components
 
     def _get_observations(self) -> Dict[str, np.ndarray]:
