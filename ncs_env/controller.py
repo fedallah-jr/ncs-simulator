@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Optional
+from typing import List, Optional, Union
 
 import numpy as np
 from filterpy.kalman import KalmanFilter
@@ -46,6 +46,71 @@ def compute_discrete_lqr_gain(
     return K
 
 
+def compute_finite_horizon_lqr_gains(
+    A: np.ndarray,
+    B: np.ndarray,
+    Q: np.ndarray,
+    R: np.ndarray,
+    horizon: int,
+) -> List[np.ndarray]:
+    """
+    Compute finite-horizon LQR gains using backward dynamic Riccati recursion.
+
+    Solves the discrete-time dynamic Riccati equation (DRE) backward from
+    terminal time k=N to k=0:
+
+        P[N] = Q
+
+        For k = N-1, N-2, ..., 0:
+            S[k] = R + B^T P[k+1] B
+            K[k] = S[k]^{-1} B^T P[k+1] A
+            P[k] = Q + A^T P[k+1] A - A^T P[k+1] B K[k]
+
+    This is the standard discrete-time LQR backward recursion for optimal
+    control with finite horizon. See Bertsekas "Dynamic Programming and
+    Optimal Control".
+
+    Parameters
+    ----------
+    A : np.ndarray
+        State transition matrix (n × n)
+    B : np.ndarray
+        Control input matrix (n × m)
+    Q : np.ndarray
+        State cost matrix (n × n)
+    R : np.ndarray
+        Control cost matrix (m × m)
+    horizon : int
+        Episode length (number of timesteps)
+
+    Returns
+    -------
+    gains : List[np.ndarray]
+        List of time-varying gains [K[0], K[1], ..., K[N-1]]
+        where K[k] is the optimal gain at timestep k (m × n matrix)
+    """
+    # Terminal cost
+    P = Q.copy()
+
+    # Store gains in reverse order (computed backward)
+    gains = []
+
+    # Backward recursion from k=N-1 down to k=0
+    for k in range(horizon - 1, -1, -1):
+        # Compute gain at timestep k
+        S = R + B.T @ P @ B
+        K = np.linalg.solve(S, B.T @ P @ A)  # More stable than inv(S) @ ...
+        gains.append(K)
+
+        # Update P for previous timestep
+        P = Q + A.T @ P @ A - A.T @ P @ B @ K
+
+    # Reverse to get forward-time order [K[0], K[1], ..., K[N-1]]
+    gains.reverse()
+
+    return gains
+
+
 class Controller:
     """
     Remote controller with Kalman-filtered state estimation and LQR control.
@@ -58,7 +123,7 @@ class Controller:
         self,
         A: np.ndarray,
         B: np.ndarray,
-        K: np.ndarray,
+        K: Union[np.ndarray, List[np.ndarray]],
         initial_estimate: np.ndarray,
         process_noise_cov: np.ndarray,
         measurement_noise_cov: np.ndarray,
@@ -67,7 +132,19 @@ class Controller:
     ):
         self.A = A
         self.B = B
-        self.K = K
+
+        # Support both static and time-varying gains
+        self.use_finite_horizon = isinstance(K, list)
+        if self.use_finite_horizon:
+            self.K_list: List[np.ndarray] = K
+            self.K = K[0]  # For compatibility with existing code that checks self.K
+        else:
+            self.K: np.ndarray = K
+            self.K_list = None
+
+        # Time tracking for finite-horizon mode
+        self.time_step: int = 0
+
         self.last_u = np.zeros(B.shape[1])
         self.current_state_index = 0
 
@@ -223,7 +300,16 @@ class Controller:
 
     def compute_control(self) -> np.ndarray:
         """Compute control input based on current estimate."""
-        u = -self.K @ self.kf.x.flatten()
+        if self.use_finite_horizon:
+            # Use time-varying gain K[k], clamped to last gain if episode exceeds pre-computed horizon
+            k = min(self.time_step, len(self.K_list) - 1)
+            K_now = self.K_list[k]
+            u = -K_now @ self.kf.x.flatten()
+            self.time_step += 1
+        else:
+            # Original infinite-horizon static gain
+            u = -self.K @ self.kf.x.flatten()
+
         self.last_u = u.copy()
 
         # Store control for delayed measurement handling
@@ -243,3 +329,6 @@ class Controller:
         self.current_state_index = 0
         self.prior_history.clear()
         self.control_history.clear()
+
+        # Reset time counter for finite-horizon mode
+        self.time_step = 0

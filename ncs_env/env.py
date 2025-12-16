@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
-from .controller import Controller, compute_discrete_lqr_gain
+from .controller import Controller, compute_discrete_lqr_gain, compute_finite_horizon_lqr_gains
 from .config import load_config
 from .network import NetworkModel
 from .plant import Plant
@@ -116,9 +116,25 @@ class NCS_Env(gym.Env):
         lqr_cfg = self.config.get("lqr", {})
         lqr_Q = np.array(lqr_cfg.get("Q", np.eye(self.state_dim)))
         lqr_R = np.array(lqr_cfg.get("R", np.eye(self.control_dim)))
-        self.K_list: List[np.ndarray] = [
-            compute_discrete_lqr_gain(A_i, B_i, lqr_Q, lqr_R) for (A_i, B_i) in agent_matrices
-        ]
+
+        # Check if finite-horizon LQR is enabled (default: True)
+        use_finite_horizon = bool(lqr_cfg.get("finite_horizon", True))
+
+        if use_finite_horizon:
+            # Compute time-varying gains for finite horizon (uses self.episode_length)
+            self.K_list: List[Union[np.ndarray, List[np.ndarray]]] = [
+                compute_finite_horizon_lqr_gains(A_i, B_i, lqr_Q, lqr_R, self.episode_length)
+                for (A_i, B_i) in agent_matrices
+            ]
+        else:
+            # Original infinite-horizon DARE solver
+            self.K_list: List[np.ndarray] = [
+                compute_discrete_lqr_gain(A_i, B_i, lqr_Q, lqr_R)
+                for (A_i, B_i) in agent_matrices
+            ]
+
+        # For single-agent compatibility, store first agent's gain
+        # (For finite-horizon, this will be the list of gains; for infinite-horizon, a single matrix)
         self.K = self.K_list[0]
 
         controller_cfg = self.config.get("controller", {})
