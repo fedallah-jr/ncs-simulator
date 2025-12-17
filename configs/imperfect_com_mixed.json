@@ -35,6 +35,7 @@
 "network": {
     "data_rate_kbps": 250.0,
     "data_packet_size": 50,
+    "ack_packet_size": 2,
     "max_queue_size": 1,
     "perfect_communication": false
 },

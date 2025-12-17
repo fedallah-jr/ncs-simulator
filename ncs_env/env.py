@@ -13,6 +13,7 @@ from .config import load_config
 from .network import NetworkModel
 from .plant import Plant
 from utils.schedulers import build_scheduler
+from utils.reward_normalization import ZScoreRewardNormalizer
 
 
 @dataclass
@@ -21,12 +22,37 @@ class RewardDefinition:
     comm_penalty_alpha: float
     simple_comm_penalty_alpha: float
     simple_freshness_decay: float = 0.0
+    normalize: Optional[bool] = None  # None = auto-detect, True/False = explicit override
+    normalizer: Optional[ZScoreRewardNormalizer] = None  # Set during init if normalization needed
 
     def __post_init__(self) -> None:
         if self.mode not in {"difference", "absolute", "simple", "simple_penalty"}:
             raise ValueError("state_error_reward must be 'difference', 'absolute', 'simple', or 'simple_penalty'")
         if float(self.simple_freshness_decay) < 0.0:
             raise ValueError("simple_freshness_decay must be >= 0")
+
+
+def _should_normalize_reward(definition: RewardDefinition) -> bool:
+    """
+    Determine if a reward should be normalized based on its type.
+
+    Logic:
+    - If explicit override provided: use it
+    - Otherwise, auto-detect:
+      - simple, simple_penalty: NO (bounded rewards [-1, 0] or [0, 1])
+      - absolute, difference: YES (unbounded rewards, scale varies by system)
+
+    Returns:
+        True if reward should be normalized, False otherwise
+    """
+    # Explicit user override takes precedence
+    if definition.normalize is not None:
+        return definition.normalize
+
+    # Automatic detection based on reward type
+    # Simple rewards are bounded and well-scaled, don't normalize
+    # Absolute/difference rewards are unbounded, do normalize
+    return definition.mode in ["absolute", "difference"]
 
 
 class NCS_Env(gym.Env):
@@ -98,6 +124,13 @@ class NCS_Env(gym.Env):
 
         self._initialize_systems()
         self._initialize_tracking_structures()
+
+        # Compute reward normalization statistics if reward mixing enabled
+        # This must be done AFTER systems are initialized so we can run episodes
+        if self.reward_mixing_enabled:
+            print("\n[Reward Mixing] Computing normalization statistics...")
+            self._compute_reward_normalizers()
+            print("[Reward Mixing] Normalization statistics computed.\n")
 
     def _initialize_systems(self):
         """Initialize plants, controllers, and the shared network."""
@@ -620,10 +653,12 @@ class NCS_Env(gym.Env):
         if not mixing_cfg.get("enabled", False):
             return [
                 RewardDefinition(
-                    base_mode,
-                    base_comm_penalty_alpha,
-                    base_simple_comm_penalty_alpha,
-                    base_simple_freshness_decay,
+                    mode=base_mode,
+                    comm_penalty_alpha=base_comm_penalty_alpha,
+                    simple_comm_penalty_alpha=base_simple_comm_penalty_alpha,
+                    simple_freshness_decay=base_simple_freshness_decay,
+                    normalize=None,  # No normalization when mixing disabled
+                    normalizer=None,
                 )
             ]
 
@@ -636,6 +671,11 @@ class NCS_Env(gym.Env):
 
         definitions: List[RewardDefinition] = []
         for reward_entry in rewards_list:
+            # Parse optional normalize override
+            normalize_override = reward_entry.get("normalize", None)
+            if normalize_override is not None:
+                normalize_override = bool(normalize_override)
+
             definitions.append(
                 RewardDefinition(
                     mode=str(reward_entry.get("state_error_reward", base_mode)),
@@ -651,6 +691,8 @@ class NCS_Env(gym.Env):
                     simple_freshness_decay=float(
                         reward_entry.get("simple_freshness_decay", base_simple_freshness_decay)
                     ),
+                    normalize=normalize_override,  # Optional user override
+                    normalizer=None,  # Will be set during _compute_reward_normalizers()
                 )
             )
         return definitions
@@ -746,6 +788,109 @@ class NCS_Env(gym.Env):
         recent_entries = list(self.decision_history[agent_idx])[-self.comm_recent_window :]
         return sum(1 for entry in recent_entries if entry["status"] > 0)
 
+    def _compute_reward_normalizers(self) -> None:
+        """
+        Compute normalization statistics for rewards that need it.
+
+        This runs random rollouts to estimate mean/std of each reward component,
+        but ONLY for rewards where normalization is enabled (unbounded rewards).
+        Simple/simple_penalty rewards are NOT normalized as they are already bounded.
+        """
+        if not self.reward_mixing_enabled:
+            return
+
+        for idx, definition in enumerate(self.reward_definitions):
+            if not _should_normalize_reward(definition):
+                # Skip normalization for this reward (e.g., simple_penalty)
+                print(f"  Reward {idx} ({definition.mode}): No normalization (bounded reward)")
+                continue
+
+            print(f"  Reward {idx} ({definition.mode}): Computing normalization statistics...")
+
+            # Compute normalizer for this reward definition
+            temp_normalizer = self._compute_normalizer_for_definition(definition, idx)
+            definition.normalizer = temp_normalizer
+
+            print(f"    → Normalizer: mean={temp_normalizer.mean:.3f}, std={temp_normalizer.std:.3f}")
+
+    def _compute_normalizer_for_definition(
+        self,
+        definition: RewardDefinition,
+        definition_idx: int,
+        episodes: int = 10,
+    ) -> ZScoreRewardNormalizer:
+        """
+        Compute normalizer for a single reward definition.
+
+        Runs random episodes and collects rewards for this specific reward component.
+
+        Args:
+            definition: The reward definition to normalize
+            definition_idx: Index of the definition (for debugging)
+            episodes: Number of random episodes to sample
+
+        Returns:
+            ZScoreRewardNormalizer with computed mean and std
+        """
+        # Use the environment's RNG to generate seeds for normalization episodes
+        rng = self.np_random
+        collected_rewards = []
+
+        for ep in range(episodes):
+            # Reset environment
+            self.reset(seed=int(rng.integers(0, 1_000_000)))
+
+            for step in range(self.episode_length):
+                # Random actions for all agents
+                actions = {}
+                for i in range(self.n_agents):
+                    actions[f"agent_{i}"] = int(rng.integers(0, 2))  # 0 or 1
+
+                # Step environment
+                try:
+                    obs, rewards, terminated, truncated, info = self.step(actions)
+                except Exception:
+                    # If step fails during initialization, skip this sample
+                    break
+
+                # Collect error rewards for each agent
+                for i in range(self.n_agents):
+                    # Get current state error
+                    x = self.plants[i].x  # Plant state is stored in .x attribute
+                    curr_error = self._compute_state_error(x)
+
+                    # Compute the error reward component based on definition mode
+                    if definition.mode == "absolute":
+                        error_reward = -curr_error
+                    elif definition.mode == "difference":
+                        # For difference, we need previous error
+                        prev_error = self.last_errors[i]
+                        error_reward = prev_error - curr_error
+                    else:
+                        # Simple rewards - shouldn't reach here but handle it
+                        # Just use the actual reward value
+                        error_reward = rewards[f"agent_{i}"]
+
+                    collected_rewards.append(error_reward)
+
+                if all(terminated.values()) or all(truncated.values()):
+                    break
+
+        # Compute statistics
+        if len(collected_rewards) == 0:
+            # Fallback if no rewards collected
+            print(f"    ⚠️  Warning: No rewards collected for normalization, using defaults")
+            return ZScoreRewardNormalizer(mean=0.0, std=1.0)
+
+        rewards_array = np.array(collected_rewards, dtype=np.float32)
+        mean = float(rewards_array.mean())
+        std = float(rewards_array.std())
+
+        # Ensure std is not too small to avoid division issues
+        std = max(std, 1e-8)
+
+        return ZScoreRewardNormalizer(mean=mean, std=std)
+
     def _compute_reward_for_definition(
         self,
         agent_idx: int,
@@ -785,6 +930,12 @@ class NCS_Env(gym.Env):
             else:
                 age_steps = max(0, int(message_age_steps or 0))
                 error_reward = float(np.exp(-float(definition.simple_freshness_decay) * float(age_steps)))
+
+        # Apply normalization to error_reward if configured
+        # This normalizes unbounded rewards (absolute, difference) while leaving
+        # bounded rewards (simple, simple_penalty) unchanged
+        if definition.normalizer is not None:
+            error_reward = definition.normalizer(error_reward)
 
         reward_value = float(error_reward - comm_penalty)
         components: Dict[str, float] = {
