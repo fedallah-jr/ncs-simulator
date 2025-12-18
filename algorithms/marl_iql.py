@@ -48,6 +48,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--activation", type=str, default="relu", choices=["relu", "tanh", "elu"], help="Activation.")
     parser.add_argument("--layer-norm", action="store_true", help="Enable LayerNorm in MLP.")
     parser.add_argument("--no-agent-id", action="store_true", help="Disable appending one-hot agent id.")
+    parser.add_argument(
+        "--independent-agents",
+        action="store_true",
+        help="Use independent per-agent networks (disable parameter sharing).",
+    )
 
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Torch device.")
     parser.add_argument("--log-interval", type=int, default=10, help="Print every N episodes.")
@@ -80,13 +85,27 @@ def main() -> None:
     n_actions = int(env.action_space.spaces["agent_0"].n)
     input_dim = obs_dim + (n_agents if use_agent_id else 0)
 
-    agent = MLPAgent(
-        input_dim=input_dim,
-        n_actions=n_actions,
-        hidden_dims=tuple(args.hidden_dims),
-        activation=args.activation,
-        layer_norm=args.layer_norm,
-    )
+    if args.independent_agents:
+        agent = torch.nn.ModuleList(
+            [
+                MLPAgent(
+                    input_dim=input_dim,
+                    n_actions=n_actions,
+                    hidden_dims=tuple(args.hidden_dims),
+                    activation=args.activation,
+                    layer_norm=args.layer_norm,
+                )
+                for _ in range(n_agents)
+            ]
+        )
+    else:
+        agent = MLPAgent(
+            input_dim=input_dim,
+            n_actions=n_actions,
+            hidden_dims=tuple(args.hidden_dims),
+            activation=args.activation,
+            layer_norm=args.layer_norm,
+        )
     learner = IQLLearner(
         agent=agent,
         n_agents=n_agents,
@@ -160,18 +179,23 @@ def main() -> None:
             if episode_reward_sum > best_reward:
                 best_reward = episode_reward_sum
                 best_path = run_dir / "best_model.pt"
+                ckpt: Dict[str, Any] = {
+                    "algorithm": "iql",
+                    "n_agents": n_agents,
+                    "obs_dim": obs_dim,
+                    "n_actions": n_actions,
+                    "use_agent_id": use_agent_id,
+                    "parameter_sharing": (not args.independent_agents),
+                    "agent_hidden_dims": list(args.hidden_dims),
+                    "agent_activation": args.activation,
+                    "agent_layer_norm": args.layer_norm,
+                }
+                if args.independent_agents:
+                    ckpt["agent_state_dicts"] = [net.state_dict() for net in learner.agent]  # type: ignore[union-attr]
+                else:
+                    ckpt["agent_state_dict"] = learner.agent.state_dict()  # type: ignore[union-attr]
                 torch.save(
-                    {
-                        "algorithm": "iql",
-                        "n_agents": n_agents,
-                        "obs_dim": obs_dim,
-                        "n_actions": n_actions,
-                        "use_agent_id": use_agent_id,
-                        "agent_hidden_dims": list(args.hidden_dims),
-                        "agent_activation": args.activation,
-                        "agent_layer_norm": args.layer_norm,
-                        "agent_state_dict": learner.agent.state_dict(),
-                    },
+                    ckpt,
                     best_path,
                 )
 
@@ -180,18 +204,23 @@ def main() -> None:
             episode += 1
 
     latest_path = run_dir / "latest_model.pt"
+    latest_ckpt: Dict[str, Any] = {
+        "algorithm": "iql",
+        "n_agents": n_agents,
+        "obs_dim": obs_dim,
+        "n_actions": n_actions,
+        "use_agent_id": use_agent_id,
+        "parameter_sharing": (not args.independent_agents),
+        "agent_hidden_dims": list(args.hidden_dims),
+        "agent_activation": args.activation,
+        "agent_layer_norm": args.layer_norm,
+    }
+    if args.independent_agents:
+        latest_ckpt["agent_state_dicts"] = [net.state_dict() for net in learner.agent]  # type: ignore[union-attr]
+    else:
+        latest_ckpt["agent_state_dict"] = learner.agent.state_dict()  # type: ignore[union-attr]
     torch.save(
-        {
-            "algorithm": "iql",
-            "n_agents": n_agents,
-            "obs_dim": obs_dim,
-            "n_actions": n_actions,
-            "use_agent_id": use_agent_id,
-            "agent_hidden_dims": list(args.hidden_dims),
-            "agent_activation": args.activation,
-            "agent_layer_norm": args.layer_norm,
-            "agent_state_dict": learner.agent.state_dict(),
-        },
+        latest_ckpt,
         latest_path,
     )
 
@@ -215,6 +244,7 @@ def main() -> None:
         "activation": args.activation,
         "layer_norm": args.layer_norm,
         "use_agent_id": use_agent_id,
+        "independent_agents": args.independent_agents,
         "device": str(device),
         "seed": args.seed,
     }

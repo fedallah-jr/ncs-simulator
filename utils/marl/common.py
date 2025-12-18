@@ -6,7 +6,7 @@ This module contains shared functions used across IQL, VDN, and QMIX implementat
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Sequence, Union
 
 import numpy as np
 import torch
@@ -40,7 +40,7 @@ def stack_obs(obs_dict: Dict[str, Any], n_agents: int) -> np.ndarray:
 
 @torch.no_grad()
 def select_actions(
-    agent: MLPAgent,
+    agent: Union[MLPAgent, Sequence[MLPAgent]],
     obs: np.ndarray,
     n_agents: int,
     n_actions: int,
@@ -68,7 +68,16 @@ def select_actions(
     obs_t = torch.as_tensor(obs, device=device, dtype=torch.float32).unsqueeze(0)
     if use_agent_id:
         obs_t = append_agent_id(obs_t, n_agents)
-    q = agent(obs_t.view(n_agents, -1))
+
+    if isinstance(agent, MLPAgent):
+        q = agent(obs_t.view(n_agents, -1))
+    else:
+        if len(agent) != n_agents:
+            raise ValueError("Independent agents sequence length must equal n_agents")
+        q_per_agent: list[torch.Tensor] = []
+        for agent_idx, agent_net in enumerate(agent):
+            q_per_agent.append(agent_net(obs_t[:, agent_idx, :]))
+        q = torch.cat(q_per_agent, dim=0)
     greedy = q.argmax(dim=-1).cpu().numpy().astype(np.int64)
     actions = greedy.copy()
     explore_mask = rng.random(n_agents) < float(epsilon)

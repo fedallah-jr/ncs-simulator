@@ -23,10 +23,45 @@ def _hard_update(target: nn.Module, source: nn.Module) -> None:
     target.load_state_dict(source.state_dict())
 
 
+def _q_values(agent: nn.Module, obs: torch.Tensor, n_agents: int, n_actions: int) -> torch.Tensor:
+    """
+    Compute per-agent Q-values for either:
+      - shared parameters: a single MLPAgent applied to all agents
+      - independent parameters: a ModuleList[MLPAgent] with one net per agent
+
+    Args:
+        agent: MLPAgent (shared) or nn.ModuleList (independent)
+        obs: Tensor of shape (batch, n_agents, input_dim)
+        n_agents: Number of agents
+        n_actions: Number of discrete actions
+
+    Returns:
+        Tensor of shape (batch, n_agents, n_actions)
+    """
+    if obs.ndim != 3:
+        raise ValueError("obs must have shape (batch, n_agents, input_dim)")
+    batch_size = obs.shape[0]
+
+    if isinstance(agent, MLPAgent):
+        obs_flat = obs.view(batch_size * n_agents, -1)
+        return agent(obs_flat).view(batch_size, n_agents, n_actions)
+
+    if isinstance(agent, nn.ModuleList):
+        if len(agent) != n_agents:
+            raise ValueError("Independent agents ModuleList length must equal n_agents")
+        q_per_agent: list[torch.Tensor] = []
+        for agent_idx in range(n_agents):
+            q_i = agent[agent_idx](obs[:, agent_idx, :]).unsqueeze(1)
+            q_per_agent.append(q_i)
+        return torch.cat(q_per_agent, dim=1)
+
+    raise TypeError("agent must be an MLPAgent (shared) or nn.ModuleList (independent)")
+
+
 class IQLLearner:
     def __init__(
         self,
-        agent: MLPAgent,
+        agent: nn.Module,
         n_agents: int,
         n_actions: int,
         gamma: float,
@@ -67,20 +102,17 @@ class IQLLearner:
         dones = batch.dones
 
         batch_size = obs.shape[0]
-        obs_flat = obs.view(batch_size * self.n_agents, -1)
-        next_obs_flat = next_obs.view(batch_size * self.n_agents, -1)
-
-        q_all = self.agent(obs_flat).view(batch_size, self.n_agents, self.n_actions)
+        q_all = _q_values(self.agent, obs, self.n_agents, self.n_actions)
         q_taken = q_all.gather(-1, actions.unsqueeze(-1)).squeeze(-1)
 
         with torch.no_grad():
             if self.double_q:
-                online_next_q = self.agent(next_obs_flat).view(batch_size, self.n_agents, self.n_actions)
+                online_next_q = _q_values(self.agent, next_obs, self.n_agents, self.n_actions)
                 next_actions = online_next_q.argmax(dim=-1, keepdim=True)
-                target_next_q = self.target_agent(next_obs_flat).view(batch_size, self.n_agents, self.n_actions)
+                target_next_q = _q_values(self.target_agent, next_obs, self.n_agents, self.n_actions)
                 next_q = target_next_q.gather(-1, next_actions).squeeze(-1)
             else:
-                target_next_q = self.target_agent(next_obs_flat).view(batch_size, self.n_agents, self.n_actions)
+                target_next_q = _q_values(self.target_agent, next_obs, self.n_agents, self.n_actions)
                 next_q = target_next_q.max(dim=-1).values
 
             not_done = (1.0 - dones).view(batch_size, 1)
@@ -106,7 +138,7 @@ class IQLLearner:
 class VDNLearner:
     def __init__(
         self,
-        agent: MLPAgent,
+        agent: nn.Module,
         n_agents: int,
         n_actions: int,
         gamma: float,
@@ -156,21 +188,18 @@ class VDNLearner:
         dones = batch.dones
 
         batch_size = obs.shape[0]
-        obs_flat = obs.view(batch_size * self.n_agents, -1)
-        next_obs_flat = next_obs.view(batch_size * self.n_agents, -1)
-
-        q_all = self.agent(obs_flat).view(batch_size, self.n_agents, self.n_actions)
+        q_all = _q_values(self.agent, obs, self.n_agents, self.n_actions)
         q_taken = q_all.gather(-1, actions.unsqueeze(-1)).squeeze(-1)
         q_tot = self.mixer(q_taken).squeeze(-1)
 
         with torch.no_grad():
             if self.double_q:
-                online_next_q = self.agent(next_obs_flat).view(batch_size, self.n_agents, self.n_actions)
+                online_next_q = _q_values(self.agent, next_obs, self.n_agents, self.n_actions)
                 next_actions = online_next_q.argmax(dim=-1, keepdim=True)
-                target_next_q = self.target_agent(next_obs_flat).view(batch_size, self.n_agents, self.n_actions)
+                target_next_q = _q_values(self.target_agent, next_obs, self.n_agents, self.n_actions)
                 next_q = target_next_q.gather(-1, next_actions).squeeze(-1)
             else:
-                target_next_q = self.target_agent(next_obs_flat).view(batch_size, self.n_agents, self.n_actions)
+                target_next_q = _q_values(self.target_agent, next_obs, self.n_agents, self.n_actions)
                 next_q = target_next_q.max(dim=-1).values
 
             next_q_tot = self.target_mixer(next_q).squeeze(-1)
@@ -198,7 +227,7 @@ class VDNLearner:
 class QMIXLearner:
     def __init__(
         self,
-        agent: MLPAgent,
+        agent: nn.Module,
         mixer: QMixer,
         n_agents: int,
         n_actions: int,
@@ -251,21 +280,18 @@ class QMIXLearner:
         next_states = batch.next_states
 
         batch_size = obs.shape[0]
-        obs_flat = obs.view(batch_size * self.n_agents, -1)
-        next_obs_flat = next_obs.view(batch_size * self.n_agents, -1)
-
-        q_all = self.agent(obs_flat).view(batch_size, self.n_agents, self.n_actions)
+        q_all = _q_values(self.agent, obs, self.n_agents, self.n_actions)
         q_taken = q_all.gather(-1, actions.unsqueeze(-1)).squeeze(-1)
         q_tot = self.mixer(q_taken, states).squeeze(-1)
 
         with torch.no_grad():
             if self.double_q:
-                online_next_q = self.agent(next_obs_flat).view(batch_size, self.n_agents, self.n_actions)
+                online_next_q = _q_values(self.agent, next_obs, self.n_agents, self.n_actions)
                 next_actions = online_next_q.argmax(dim=-1, keepdim=True)
-                target_next_q = self.target_agent(next_obs_flat).view(batch_size, self.n_agents, self.n_actions)
+                target_next_q = _q_values(self.target_agent, next_obs, self.n_agents, self.n_actions)
                 next_q = target_next_q.gather(-1, next_actions).squeeze(-1)
             else:
-                target_next_q = self.target_agent(next_obs_flat).view(batch_size, self.n_agents, self.n_actions)
+                target_next_q = _q_values(self.target_agent, next_obs, self.n_agents, self.n_actions)
                 next_q = target_next_q.max(dim=-1).values
 
             next_q_tot = self.target_mixer(next_q, next_states).squeeze(-1)

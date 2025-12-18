@@ -206,9 +206,17 @@ def load_marl_torch_policy(model_path: str, env: Any, marl_agent_index: int = 0)
     hidden_dims = tuple(int(x) for x in ckpt.get("agent_hidden_dims", [128, 128]))
     activation = str(ckpt.get("agent_activation", "relu"))
     layer_norm = bool(ckpt.get("agent_layer_norm", False))
-    state_dict = ckpt.get("agent_state_dict", None)
-    if state_dict is None:
-        raise ValueError("Checkpoint must include 'agent_state_dict'")
+    state_dicts = ckpt.get("agent_state_dicts", None)
+    if state_dicts is not None:
+        if not isinstance(state_dicts, (list, tuple)):
+            raise ValueError("Checkpoint 'agent_state_dicts' must be a list/tuple")
+        if len(state_dicts) != n_agents:
+            raise ValueError("Checkpoint 'agent_state_dicts' length must equal n_agents")
+        state_dict = state_dicts[marl_agent_index]
+    else:
+        state_dict = ckpt.get("agent_state_dict", None)
+        if state_dict is None:
+            raise ValueError("Checkpoint must include 'agent_state_dict' (shared) or 'agent_state_dicts' (independent)")
 
     agent = MLPAgent(
         input_dim=input_dim,
