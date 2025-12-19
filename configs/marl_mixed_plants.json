@@ -31,10 +31,10 @@
         { "state_error_reward": "absolute" }
       ],
       "scheduler": {
-        "type": "cosine",
+        "type": "linear",
         "start_value": 1.0,
         "end_value": 0.95,
-        "total_steps": 100000
+        "total_steps": 600000
       }
     }
   },
