@@ -6,7 +6,7 @@ This module contains shared functions used across IQL, VDN, and QMIX implementat
 
 from __future__ import annotations
 
-from typing import Any, Dict, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -84,3 +84,68 @@ def select_actions(
     if np.any(explore_mask):
         actions[explore_mask] = rng.integers(0, n_actions, size=int(explore_mask.sum()), endpoint=False, dtype=np.int64)
     return actions
+
+
+def run_evaluation(
+    env: Any,
+    agent: Union[MLPAgent, Sequence[MLPAgent]],
+    n_agents: int,
+    n_actions: int,
+    use_agent_id: bool,
+    device: torch.device,
+    n_episodes: int,
+    seed: Optional[int] = None,
+) -> Tuple[float, float, List[float]]:
+    """
+    Run deterministic evaluation episodes for MARL algorithms.
+
+    Args:
+        env: The evaluation environment (NCS_Env or similar multi-agent env)
+        agent: The agent network(s) - either shared MLPAgent or list of independent agents
+        n_agents: Number of agents
+        n_actions: Number of actions per agent
+        use_agent_id: Whether to append one-hot agent ID to observations
+        device: Torch device
+        n_episodes: Number of evaluation episodes to run
+        seed: Optional seed for reproducibility
+
+    Returns:
+        Tuple of (mean_reward, std_reward, episode_rewards)
+    """
+    episode_rewards: List[float] = []
+    dummy_rng = np.random.default_rng(0)  # Not used with epsilon=0
+
+    for ep in range(n_episodes):
+        episode_seed = None if seed is None else seed + ep
+        obs_dict, _info = env.reset(seed=episode_seed)
+        obs = stack_obs(obs_dict, n_agents)
+
+        episode_reward_sum = 0.0
+        done = False
+
+        while not done:
+            # Deterministic action selection (epsilon=0)
+            actions = select_actions(
+                agent=agent,
+                obs=obs,
+                n_agents=n_agents,
+                n_actions=n_actions,
+                epsilon=0.0,  # Deterministic evaluation
+                rng=dummy_rng,
+                device=device,
+                use_agent_id=use_agent_id,
+            )
+            action_dict = {f"agent_{i}": int(actions[i]) for i in range(n_agents)}
+            next_obs_dict, rewards_dict, terminated, truncated, _infos = env.step(action_dict)
+            next_obs = stack_obs(next_obs_dict, n_agents)
+            rewards = np.asarray([rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32)
+            done = any(terminated[f"agent_{i}"] or truncated[f"agent_{i}"] for i in range(n_agents))
+
+            episode_reward_sum += float(rewards.sum())
+            obs = next_obs
+
+        episode_rewards.append(episode_reward_sum)
+
+    mean_reward = float(np.mean(episode_rewards))
+    std_reward = float(np.std(episode_rewards))
+    return mean_reward, std_reward, episode_rewards

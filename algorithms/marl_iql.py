@@ -4,7 +4,7 @@ import argparse
 import csv
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from ncs_env.config import load_config
 from ncs_env.env import NCS_Env
-from utils.marl import MARLReplayBuffer, IQLLearner, MLPAgent
+from utils.marl import MARLReplayBuffer, IQLLearner, MLPAgent, run_evaluation
 from utils.marl.common import select_device, epsilon_by_step, stack_obs, select_actions
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
@@ -56,6 +56,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Torch device.")
     parser.add_argument("--log-interval", type=int, default=10, help="Print every N episodes.")
+
+    parser.add_argument("--eval-freq", type=int, default=2500, help="Evaluation frequency in env steps.")
+    parser.add_argument("--n-eval-episodes", type=int, default=5, help="Number of evaluation episodes.")
     return parser.parse_args()
 
 
@@ -71,14 +74,31 @@ def main() -> None:
     n_agents = int(system_cfg.get("n_agents", args.n_agents))
     use_agent_id = not args.no_agent_id
 
+    # Load evaluation reward config if present
+    eval_reward_override: Optional[Dict[str, Any]] = None
+    reward_cfg = cfg.get("reward", {})
+    eval_reward_cfg = reward_cfg.get("evaluation", None)
+    if isinstance(eval_reward_cfg, dict):
+        eval_reward_override = eval_reward_cfg
+
     run_dir, _metadata = prepare_run_directory("iql", args.config, args.output_root)
     rewards_csv_path = run_dir / "training_rewards.csv"
+    eval_csv_path = run_dir / "evaluation_rewards.csv"
 
     env = NCS_Env(
         n_agents=n_agents,
         episode_length=args.episode_length,
         config_path=config_path_str,
         seed=args.seed,
+    )
+
+    # Create evaluation environment with reward override
+    eval_env = NCS_Env(
+        n_agents=n_agents,
+        episode_length=args.episode_length,
+        config_path=config_path_str,
+        seed=args.seed,
+        reward_override=eval_reward_override,
     )
 
     obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
@@ -126,13 +146,37 @@ def main() -> None:
         rng=rng,
     )
 
-    best_reward = -float("inf")
+    best_eval_reward = -float("inf")
     global_step = 0
     episode = 0
+    last_eval_step = 0
 
-    with rewards_csv_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["episode", "reward_sum", "epsilon", "steps"])
+    # Helper function to save model checkpoint
+    def save_checkpoint(path: Path, is_best: bool = False) -> None:
+        ckpt: Dict[str, Any] = {
+            "algorithm": "iql",
+            "n_agents": n_agents,
+            "obs_dim": obs_dim,
+            "n_actions": n_actions,
+            "use_agent_id": use_agent_id,
+            "parameter_sharing": (not args.independent_agents),
+            "agent_hidden_dims": list(args.hidden_dims),
+            "agent_activation": args.activation,
+            "agent_layer_norm": args.layer_norm,
+        }
+        if args.independent_agents:
+            ckpt["agent_state_dicts"] = [net.state_dict() for net in learner.agent]  # type: ignore[union-attr]
+        else:
+            ckpt["agent_state_dict"] = learner.agent.state_dict()  # type: ignore[union-attr]
+        torch.save(ckpt, path)
+
+    # Open both CSV files for writing
+    with rewards_csv_path.open("w", newline="", encoding="utf-8") as train_f, \
+         eval_csv_path.open("w", newline="", encoding="utf-8") as eval_f:
+        train_writer = csv.writer(train_f)
+        train_writer.writerow(["episode", "reward_sum", "epsilon", "steps"])
+        eval_writer = csv.writer(eval_f)
+        eval_writer.writerow(["step", "mean_reward", "std_reward"])
 
         while global_step < args.total_timesteps:
             episode_seed = None if args.seed is None else args.seed + episode
@@ -175,54 +219,38 @@ def main() -> None:
                     batch = buffer.sample(args.batch_size)
                     learner.update(batch)
 
-            writer.writerow([episode, episode_reward_sum, epsilon, global_step])
-            if episode_reward_sum > best_reward:
-                best_reward = episode_reward_sum
-                best_path = run_dir / "best_model.pt"
-                ckpt: Dict[str, Any] = {
-                    "algorithm": "iql",
-                    "n_agents": n_agents,
-                    "obs_dim": obs_dim,
-                    "n_actions": n_actions,
-                    "use_agent_id": use_agent_id,
-                    "parameter_sharing": (not args.independent_agents),
-                    "agent_hidden_dims": list(args.hidden_dims),
-                    "agent_activation": args.activation,
-                    "agent_layer_norm": args.layer_norm,
-                }
-                if args.independent_agents:
-                    ckpt["agent_state_dicts"] = [net.state_dict() for net in learner.agent]  # type: ignore[union-attr]
-                else:
-                    ckpt["agent_state_dict"] = learner.agent.state_dict()  # type: ignore[union-attr]
-                torch.save(
-                    ckpt,
-                    best_path,
-                )
+                # Periodic evaluation
+                if global_step - last_eval_step >= args.eval_freq:
+                    mean_eval_reward, std_eval_reward, _ = run_evaluation(
+                        env=eval_env,
+                        agent=learner.agent,
+                        n_agents=n_agents,
+                        n_actions=n_actions,
+                        use_agent_id=use_agent_id,
+                        device=device,
+                        n_episodes=args.n_eval_episodes,
+                        seed=args.seed,
+                    )
+                    eval_writer.writerow([global_step, mean_eval_reward, std_eval_reward])
+                    eval_f.flush()
+
+                    # Save best model based on evaluation reward
+                    if mean_eval_reward > best_eval_reward:
+                        best_eval_reward = mean_eval_reward
+                        save_checkpoint(run_dir / "best_model.pt", is_best=True)
+
+                    print(f"[IQL] Eval at step {global_step}: mean_reward={mean_eval_reward:.3f} std={std_eval_reward:.3f}")
+                    last_eval_step = global_step
+
+            train_writer.writerow([episode, episode_reward_sum, epsilon, global_step])
+            train_f.flush()
 
             if episode % args.log_interval == 0:
                 print(f"[IQL] episode={episode} steps={global_step} reward_sum={episode_reward_sum:.3f} eps={epsilon:.3f}")
             episode += 1
 
     latest_path = run_dir / "latest_model.pt"
-    latest_ckpt: Dict[str, Any] = {
-        "algorithm": "iql",
-        "n_agents": n_agents,
-        "obs_dim": obs_dim,
-        "n_actions": n_actions,
-        "use_agent_id": use_agent_id,
-        "parameter_sharing": (not args.independent_agents),
-        "agent_hidden_dims": list(args.hidden_dims),
-        "agent_activation": args.activation,
-        "agent_layer_norm": args.layer_norm,
-    }
-    if args.independent_agents:
-        latest_ckpt["agent_state_dicts"] = [net.state_dict() for net in learner.agent]  # type: ignore[union-attr]
-    else:
-        latest_ckpt["agent_state_dict"] = learner.agent.state_dict()  # type: ignore[union-attr]
-    torch.save(
-        latest_ckpt,
-        latest_path,
-    )
+    save_checkpoint(latest_path)
 
     hyperparams: Dict[str, Any] = {
         "total_timesteps": args.total_timesteps,
@@ -245,6 +273,8 @@ def main() -> None:
         "layer_norm": args.layer_norm,
         "use_agent_id": use_agent_id,
         "independent_agents": args.independent_agents,
+        "eval_freq": args.eval_freq,
+        "n_eval_episodes": args.n_eval_episodes,
         "device": str(device),
         "seed": args.seed,
     }
@@ -254,9 +284,11 @@ def main() -> None:
     print(f"  - Latest model: {latest_path}")
     print(f"  - Best model: {run_dir / 'best_model.pt'}")
     print(f"  - Training rewards: {rewards_csv_path}")
+    print(f"  - Evaluation rewards: {eval_csv_path}")
     print(f"  - Config with hyperparameters: {run_dir / 'config.json'}")
 
     env.close()
+    eval_env.close()
 
 
 if __name__ == "__main__":
