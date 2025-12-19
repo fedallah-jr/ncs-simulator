@@ -36,6 +36,9 @@
         "end_value": 0.95,
         "total_steps": 600000
       }
+    },
+    "evaluation": {
+      "state_error_reward": "absolute"
     }
   },
   "observation": {
