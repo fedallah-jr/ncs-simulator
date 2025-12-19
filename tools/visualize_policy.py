@@ -17,6 +17,9 @@ Usage:
     # Visualize an IQL/VDN/QMIX PyTorch checkpoint (agent_0)
     python -m tools.visualize_policy --config configs/perfect_comm.json --policy path/to/latest_model.pt --policy-type marl_torch --n-agents 3
 
+    # True multi-agent visualization (all agents act from checkpoint)
+    python -m tools.visualize_policy --config configs/marl_mixed_plants.json --policy path/to/latest_model.pt --policy-type marl_torch --n-agents 3 --multi-agent --generate-video --per-agent-videos
+
     # Compare multiple policies
     python -m tools.visualize_policy --config configs/perfect_comm.json \
         --policies path/to/ppo.zip always_send send_every_5 \
@@ -24,8 +27,9 @@ Usage:
         --labels "PPO" "Always Send" "Send Every 5"
 """
 
+from __future__ import annotations
+
 import argparse
-import os
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
@@ -36,10 +40,10 @@ from matplotlib.axes import Axes
 from matplotlib.animation import FuncAnimation, FFMpegWriter
 import json
 from datetime import datetime
-import warnings
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from ncs_env.env import NCS_Env
 from ncs_env.config import load_config
@@ -62,8 +66,9 @@ def load_sb3_policy(model_path: str, env: Any):
         ImportError: If stable-baselines3 is not installed
         FileNotFoundError: If model file doesn't exist
     """
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model file not found: {model_path}")
+    model_path_p = Path(model_path)
+    if not model_path_p.exists():
+        raise FileNotFoundError(f"Model file not found: {model_path_p}")
 
     try:
         # Try to import stable-baselines3
@@ -77,8 +82,8 @@ def load_sb3_policy(model_path: str, env: Any):
     # Try to load with different algorithms
     for algorithm in [PPO, DQN, A2C, SAC, TD3]:
         try:
-            model = algorithm.load(model_path, env=env)
-            print(f"✓ Loaded {algorithm.__name__} model from {model_path}")
+            model = algorithm.load(str(model_path_p), env=env)
+            print(f"✓ Loaded {algorithm.__name__} model from {model_path_p}")
             return model
         except Exception:
             continue
@@ -97,11 +102,9 @@ def load_es_policy(model_path: str, env: Any):
     Returns:
         Policy object with predict() method
     """
-    if not os.path.exists(model_path):
-        if os.path.exists(model_path):
-            model_path = model_path
-        else:
-            raise FileNotFoundError(f"Model file not found: {model_path}")
+    model_path_p = Path(model_path)
+    if not model_path_p.exists():
+        raise FileNotFoundError(f"Model file not found: {model_path_p}")
 
     try:
         import jax
@@ -117,7 +120,7 @@ def load_es_policy(model_path: str, env: Any):
 
     # Load saved data including architecture info
     try:
-        data = np.load(model_path)
+        data = np.load(str(model_path_p))
         flat_params = data['flat_params']
         
         # Load architecture parameters with backward compatibility
@@ -126,7 +129,7 @@ def load_es_policy(model_path: str, env: Any):
         
         print(f"  Architecture: hidden_size={hidden_size}, use_layer_norm={use_layer_norm}")
     except Exception as e:
-        raise ValueError(f"Could not load numpy data from {model_path}: {e}")
+        raise ValueError(f"Could not load numpy data from {model_path_p}: {e}")
 
     # Reconstruct model structure to get reshaper
     # env is a SingleAgentWrapper, so env.action_space is Discrete(2)
@@ -176,8 +179,7 @@ def load_marl_torch_policy(model_path: str, env: Any, marl_agent_index: int = 0)
     Note: Visualization uses `SingleAgentWrapper`, so only the selected agent index is
     queried for actions while other agents are held at `SingleAgentWrapper(other_agent_action=...)`.
     """
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model file not found: {model_path}")
+    model_path_p = Path(model_path)
 
     try:
         import torch
@@ -185,15 +187,12 @@ def load_marl_torch_policy(model_path: str, env: Any, marl_agent_index: int = 0)
     except ImportError as e:
         raise ImportError("torch is required to load MARL torch checkpoints") from e
 
-    ckpt = torch.load(model_path, map_location="cpu")
-    if not isinstance(ckpt, dict):
-        raise ValueError("MARL torch checkpoint must be a dict")
+    from utils.marl.torch_policy import load_marl_torch_agents_from_checkpoint
 
-    n_agents = int(ckpt.get("n_agents", 1))
-    obs_dim = int(ckpt.get("obs_dim", 0))
-    n_actions = int(ckpt.get("n_actions", 0))
-    if obs_dim <= 0 or n_actions <= 0:
-        raise ValueError("Checkpoint must include positive 'obs_dim' and 'n_actions'")
+    agent_or_agents, meta = load_marl_torch_agents_from_checkpoint(model_path_p)
+    n_agents = meta.n_agents
+    obs_dim = meta.obs_dim
+    n_actions = meta.n_actions
     if marl_agent_index < 0 or marl_agent_index >= n_agents:
         raise ValueError("marl_agent_index must be within [0, n_agents)")
 
@@ -201,32 +200,10 @@ def load_marl_torch_policy(model_path: str, env: Any, marl_agent_index: int = 0)
     if env_obs_dim != obs_dim:
         raise ValueError(f"Env obs_dim={env_obs_dim} does not match checkpoint obs_dim={obs_dim}")
 
-    use_agent_id = bool(ckpt.get("use_agent_id", n_agents > 1))
-    input_dim = obs_dim + (n_agents if use_agent_id else 0)
-    hidden_dims = tuple(int(x) for x in ckpt.get("agent_hidden_dims", [128, 128]))
-    activation = str(ckpt.get("agent_activation", "relu"))
-    layer_norm = bool(ckpt.get("agent_layer_norm", False))
-    state_dicts = ckpt.get("agent_state_dicts", None)
-    if state_dicts is not None:
-        if not isinstance(state_dicts, (list, tuple)):
-            raise ValueError("Checkpoint 'agent_state_dicts' must be a list/tuple")
-        if len(state_dicts) != n_agents:
-            raise ValueError("Checkpoint 'agent_state_dicts' length must equal n_agents")
-        state_dict = state_dicts[marl_agent_index]
+    if isinstance(agent_or_agents, MLPAgent):
+        chosen_agent = agent_or_agents
     else:
-        state_dict = ckpt.get("agent_state_dict", None)
-        if state_dict is None:
-            raise ValueError("Checkpoint must include 'agent_state_dict' (shared) or 'agent_state_dicts' (independent)")
-
-    agent = MLPAgent(
-        input_dim=input_dim,
-        n_actions=n_actions,
-        hidden_dims=hidden_dims,
-        activation=activation,
-        layer_norm=layer_norm,
-    )
-    agent.load_state_dict(state_dict)
-    agent.eval()
+        chosen_agent = agent_or_agents[marl_agent_index]
 
     class MARLTorchPolicyWrapper:
         def __init__(self, agent, n_agents: int, use_agent_id: bool, marl_agent_index: int):
@@ -246,7 +223,32 @@ def load_marl_torch_policy(model_path: str, env: Any, marl_agent_index: int = 0)
             action = int(torch.argmax(q, dim=-1).item())
             return action, None
 
-    return MARLTorchPolicyWrapper(agent, n_agents=n_agents, use_agent_id=use_agent_id, marl_agent_index=marl_agent_index)
+    return MARLTorchPolicyWrapper(
+        chosen_agent,
+        n_agents=n_agents,
+        use_agent_id=meta.use_agent_id,
+        marl_agent_index=marl_agent_index,
+    )
+
+
+def load_marl_torch_multi_agent_policy(model_path: str, env: NCS_Env) -> MARLTorchMultiAgentPolicy:
+    from utils.marl.torch_policy import MARLTorchMultiAgentPolicy, load_marl_torch_agents_from_checkpoint
+
+    try:
+        import torch
+    except ImportError as e:
+        raise ImportError("torch is required to load MARL torch checkpoints") from e
+
+    agent_or_agents, meta = load_marl_torch_agents_from_checkpoint(Path(model_path))
+    if int(getattr(env, "n_agents", 0)) != meta.n_agents:
+        raise ValueError(
+            f"Env n_agents={getattr(env, 'n_agents', None)} does not match checkpoint n_agents={meta.n_agents}. "
+            "Pass the correct `--n-agents` for the checkpoint."
+        )
+    env_obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
+    if env_obs_dim != meta.obs_dim:
+        raise ValueError(f"Env obs_dim={env_obs_dim} does not match checkpoint obs_dim={meta.obs_dim}")
+    return MARLTorchMultiAgentPolicy(agent_or_agents, meta, device=torch.device("cpu"))
 
 
 def load_policy(
@@ -369,6 +371,221 @@ def run_episode(env: Any, policy: Any, episode_length: int, deterministic: bool 
         'state_errors': state_errors,
         'timesteps': np.arange(len(states)),
     }
+
+
+def _sanitize_filename(value: str) -> str:
+    keep = []
+    for ch in value:
+        if ch.isalnum() or ch in {"-", "_", "."}:
+            keep.append(ch)
+        else:
+            keep.append("_")
+    out = "".join(keep).strip("_.")
+    return out if out else "policy"
+
+
+def run_episode_multi_agent(
+    env: NCS_Env,
+    policy: Any,
+    episode_length: int,
+    *,
+    seed: Optional[int] = None,
+) -> Dict[str, np.ndarray]:
+    if hasattr(policy, "reset"):
+        policy.reset()
+
+    obs_dict, info = env.reset(seed=seed)
+    n_agents = int(env.n_agents)
+    state_dim = int(env.state_dim)
+
+    states = np.zeros((episode_length + 1, n_agents, state_dim), dtype=np.float32)
+    estimates = np.zeros((episode_length + 1, n_agents, state_dim), dtype=np.float32)
+    actions = np.zeros((episode_length, n_agents), dtype=np.int64)
+    rewards = np.zeros((episode_length, n_agents), dtype=np.float32)
+    state_errors = np.zeros((episode_length + 1, n_agents), dtype=np.float32)
+    throughputs = np.zeros(episode_length + 1, dtype=np.float32)
+    collided_packets = np.zeros(episode_length + 1, dtype=np.float32)
+    reward_mix_weight = np.zeros(episode_length + 1, dtype=np.float32)
+
+    states[0] = np.asarray(info.get("states", states[0]), dtype=np.float32)
+    estimates[0] = np.asarray(info.get("estimates", estimates[0]), dtype=np.float32)
+    state_errors[0] = np.linalg.norm(states[0], axis=1).astype(np.float32)
+    throughputs[0] = float(info.get("throughput_kbps", 0.0))
+    collided_packets[0] = float(info.get("collided_packets", 0.0))
+    reward_mix_weight[0] = float(info.get("reward_mix_weight", 0.0))
+
+    for t in range(episode_length):
+        action_dict = policy.act(obs_dict)
+        actions[t] = np.asarray([action_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.int64)
+        obs_dict, rewards_dict, terminated, truncated, info = env.step(action_dict)
+        rewards[t] = np.asarray([rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32)
+
+        states[t + 1] = np.asarray(info.get("states", states[t + 1]), dtype=np.float32)
+        estimates[t + 1] = np.asarray(info.get("estimates", estimates[t + 1]), dtype=np.float32)
+        state_errors[t + 1] = np.linalg.norm(states[t + 1], axis=1).astype(np.float32)
+        throughputs[t + 1] = float(info.get("throughput_kbps", 0.0))
+        collided_packets[t + 1] = float(info.get("collided_packets", 0.0))
+        reward_mix_weight[t + 1] = float(info.get("reward_mix_weight", 0.0))
+
+        done = any(bool(terminated[f"agent_{i}"]) or bool(truncated[f"agent_{i}"]) for i in range(n_agents))
+        if done:
+            end = t + 1
+            states = states[: end + 1]
+            estimates = estimates[: end + 1]
+            actions = actions[:end]
+            rewards = rewards[:end]
+            state_errors = state_errors[: end + 1]
+            throughputs = throughputs[: end + 1]
+            collided_packets = collided_packets[: end + 1]
+            reward_mix_weight = reward_mix_weight[: end + 1]
+            break
+
+    return {
+        "states": states,
+        "estimates": estimates,
+        "actions": actions,
+        "rewards": rewards,
+        "state_errors": state_errors,
+        "throughput_kbps": throughputs,
+        "collided_packets": collided_packets,
+        "reward_mix_weight": reward_mix_weight,
+        "timesteps": np.arange(states.shape[0]),
+    }
+
+
+def _slice_marl_agent_trajectory(traj: Dict[str, np.ndarray], agent_index: int) -> Dict[str, np.ndarray]:
+    states = traj["states"][:, agent_index, :]
+    estimates = traj["estimates"][:, agent_index, :]
+    actions = traj["actions"][:, agent_index]
+    rewards = traj["rewards"][:, agent_index]
+    state_errors = traj["state_errors"][:, agent_index]
+    controls = np.zeros((actions.shape[0], 1), dtype=np.float32)
+    return {
+        "states": states,
+        "estimates": estimates,
+        "actions": actions,
+        "rewards": rewards,
+        "controls": controls,
+        "state_errors": state_errors,
+        "timesteps": np.arange(states.shape[0]),
+    }
+
+
+def plot_marl_action_raster(
+    traj: Dict[str, np.ndarray],
+    label: str,
+    save_path: Path,
+    title: str = "Coordination (Actions)",
+) -> None:
+    actions = np.asarray(traj["actions"], dtype=np.int64)
+    n_steps, n_agents = actions.shape
+
+    fig, ax = plt.subplots(1, 1, figsize=(14, 3 + 0.3 * n_agents))
+    im = ax.imshow(actions.T, aspect="auto", interpolation="nearest", cmap="Greys", vmin=0, vmax=1)
+    ax.set_xlabel("Timestep", fontsize=12)
+    ax.set_ylabel("Agent", fontsize=12)
+    ax.set_yticks(np.arange(n_agents))
+    ax.set_yticklabels([f"agent_{i}" for i in range(n_agents)])
+    ax.set_title(f"{title} - {label}", fontsize=14, fontweight="bold")
+    fig.colorbar(im, ax=ax, fraction=0.02, pad=0.02, ticks=[0, 1], label="Action (0/1)")
+    ax.grid(False)
+    plt.tight_layout()
+    plt.savefig(str(save_path), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"✓ Saved action raster to {save_path}")
+
+
+def plot_marl_state_space_2d(
+    traj: Dict[str, np.ndarray],
+    label: str,
+    save_path: Path,
+    title: str = "Multi-Agent State Space (2D)",
+    show_estimates: bool = True,
+) -> None:
+    states = np.asarray(traj["states"], dtype=np.float32)
+    estimates = np.asarray(traj["estimates"], dtype=np.float32)
+    n_steps, n_agents, state_dim = states.shape
+    if state_dim < 2:
+        raise ValueError("2D state space plot requires state_dim >= 2")
+
+    colors = plt.cm.tab10(np.linspace(0, 1, n_agents))
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+    for agent_idx in range(n_agents):
+        ax.plot(
+            states[:, agent_idx, 0],
+            states[:, agent_idx, 1],
+            "-",
+            color=colors[agent_idx],
+            linewidth=2,
+            alpha=0.8,
+            label=f"agent_{agent_idx} (state)",
+        )
+        ax.plot(
+            states[0, agent_idx, 0],
+            states[0, agent_idx, 1],
+            "o",
+            color=colors[agent_idx],
+            markersize=8,
+            alpha=0.9,
+        )
+        if show_estimates:
+            ax.plot(
+                estimates[:, agent_idx, 0],
+                estimates[:, agent_idx, 1],
+                "--",
+                color=colors[agent_idx],
+                linewidth=1.5,
+                alpha=0.5,
+                label=f"agent_{agent_idx} (est.)",
+            )
+
+    ax.plot(0, 0, "r*", markersize=18, label="Target (origin)")
+    ax.set_xlabel("State Dimension 1", fontsize=12)
+    ax.set_ylabel("State Dimension 2", fontsize=12)
+    ax.set_title(f"{title} - {label}", fontsize=14, fontweight="bold")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=9, loc="best")
+    ax.axis("equal")
+    plt.tight_layout()
+    plt.savefig(str(save_path), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"✓ Saved multi-agent state space plot to {save_path}")
+
+
+def plot_marl_comparison_summary(
+    trajectories: List[Dict[str, np.ndarray]],
+    labels: List[str],
+    save_path: Path,
+    title: str = "MARL Summary",
+) -> None:
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+    colors = plt.cm.tab10(np.linspace(0, 1, len(trajectories)))
+
+    ax1: Axes = axes[0]
+    ax2: Axes = axes[1]
+    for idx, (traj, label) in enumerate(zip(trajectories, labels)):
+        state_errors = np.asarray(traj["state_errors"], dtype=np.float32)
+        timesteps = np.asarray(traj["timesteps"], dtype=np.int64)
+        mean_error = state_errors.mean(axis=1)
+        ax1.plot(timesteps, mean_error, color=colors[idx], linewidth=2, label=label)
+
+        actions = np.asarray(traj["actions"], dtype=np.float32)
+        mean_action_rate = actions.mean(axis=1)
+        ax2.plot(np.arange(mean_action_rate.shape[0]), mean_action_rate, color=colors[idx], linewidth=2, label=label)
+
+    ax1.set_ylabel("Mean ||x|| across agents", fontsize=12)
+    ax1.set_title(title, fontsize=14, fontweight="bold")
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(fontsize=10, loc="best")
+
+    ax2.set_xlabel("Timestep", fontsize=12)
+    ax2.set_ylabel("Mean action rate", fontsize=12)
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(str(save_path), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"✓ Saved MARL summary plot to {save_path}")
 
 
 def plot_state_evolution_2d(
@@ -717,6 +934,225 @@ def create_state_evolution_animation(
         plt.close(fig)
 
 
+def create_marl_state_evolution_animation(
+    traj: Dict[str, np.ndarray],
+    label: str,
+    save_path: Path,
+    title: str = "MARL State Evolution (All Agents)",
+    fps: int = 30,
+    speedup: int = 1,
+    show_estimates: bool = True,
+) -> None:
+    states = np.asarray(traj["states"], dtype=np.float32)
+    estimates = np.asarray(traj["estimates"], dtype=np.float32)
+    actions = np.asarray(traj["actions"], dtype=np.int64)
+    n_steps, n_agents, state_dim = states.shape
+    if state_dim < 2:
+        raise ValueError("MARL animation requires state_dim >= 2")
+
+    colors = plt.cm.tab10(np.linspace(0, 1, n_agents))
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+
+    all_points = states.reshape(-1, state_dim)
+    if show_estimates:
+        all_points = np.vstack([all_points, estimates.reshape(-1, state_dim)])
+    x_min, x_max = float(all_points[:, 0].min()), float(all_points[:, 0].max())
+    y_min, y_max = float(all_points[:, 1].min()), float(all_points[:, 1].max())
+    x_range = max(0.1, x_max - x_min)
+    y_range = max(0.1, y_max - y_min)
+    margin = 0.15
+    x_center = (x_min + x_max) / 2
+    y_center = (y_min + y_max) / 2
+    max_range = max(x_range, y_range) * (1 + 2 * margin)
+    ax.set_xlim(x_center - max_range / 2, x_center + max_range / 2)
+    ax.set_ylim(y_center - max_range / 2, y_center + max_range / 2)
+
+    state_lines: List[Any] = []
+    state_points: List[Any] = []
+    estimate_lines: List[Any] = []
+    estimate_points: List[Any] = []
+
+    for agent_idx in range(n_agents):
+        line, = ax.plot([], [], "-", color=colors[agent_idx], linewidth=2.5, alpha=0.85, label=f"agent_{agent_idx}")
+        point, = ax.plot([], [], "o", color=colors[agent_idx], markersize=10, zorder=5)
+        state_lines.append(line)
+        state_points.append(point)
+        if show_estimates:
+            est_line, = ax.plot([], [], "--", color=colors[agent_idx], linewidth=2, alpha=0.5)
+            est_point, = ax.plot([], [], "s", color=colors[agent_idx], markersize=8, alpha=0.7, zorder=5)
+            estimate_lines.append(est_line)
+            estimate_points.append(est_point)
+
+    ax.plot(0, 0, "r*", markersize=18, label="Target", zorder=10)
+    ax.set_xlabel("State Dimension 1", fontsize=14, fontweight="bold")
+    ax.set_ylabel("State Dimension 2", fontsize=14, fontweight="bold")
+    ax.set_title(f"{title} - {label}", fontsize=16, fontweight="bold", pad=16)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=11, loc="best", framealpha=0.9)
+    ax.set_aspect("equal", adjustable="box")
+
+    time_text = ax.text(
+        0.02,
+        0.98,
+        "",
+        transform=ax.transAxes,
+        fontsize=12,
+        verticalalignment="top",
+        fontweight="bold",
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.9),
+    )
+
+    def init():
+        for line in state_lines + estimate_lines:
+            line.set_data([], [])
+        for point in state_points + estimate_points:
+            point.set_data([], [])
+        time_text.set_text("")
+        return state_lines + estimate_lines + state_points + estimate_points + [time_text]
+
+    def animate(frame: int):
+        idx = min(frame * speedup, n_steps - 1)
+        if idx < actions.shape[0]:
+            sending = [str(i) for i in np.flatnonzero(actions[idx] > 0)]
+        else:
+            sending = []
+        time_text.set_text(f"Timestep: {idx} | sending: [{', '.join(sending)}]")
+
+        for agent_idx in range(n_agents):
+            state_lines[agent_idx].set_data(states[: idx + 1, agent_idx, 0], states[: idx + 1, agent_idx, 1])
+            state_points[agent_idx].set_data([states[idx, agent_idx, 0]], [states[idx, agent_idx, 1]])
+            if show_estimates:
+                estimate_lines[agent_idx].set_data(
+                    estimates[: idx + 1, agent_idx, 0], estimates[: idx + 1, agent_idx, 1]
+                )
+                estimate_points[agent_idx].set_data([estimates[idx, agent_idx, 0]], [estimates[idx, agent_idx, 1]])
+
+        artists: List[Any] = []
+        artists.extend(state_lines)
+        artists.extend(state_points)
+        if show_estimates:
+            artists.extend(estimate_lines)
+            artists.extend(estimate_points)
+        artists.append(time_text)
+        return artists
+
+    num_frames = (n_steps - 1) // speedup + 1
+    anim = FuncAnimation(fig, animate, init_func=init, frames=num_frames, interval=1000 / fps, blit=True, repeat=True)
+
+    try:
+        writer = FFMpegWriter(fps=fps, bitrate=2400, codec="libx264")
+        anim.save(str(save_path), writer=writer)
+        print(f"  ✓ Saved MARL animation to {save_path}")
+    except Exception as e:
+        print(f"  ✗ Error saving MARL animation: {e}")
+        print(f"  Make sure FFmpeg is installed:")
+        print(f"    - Linux: sudo apt-get install ffmpeg")
+        print(f"    - Mac: brew install ffmpeg")
+    finally:
+        plt.close(fig)
+
+
+def create_marl_agent_state_evolution_animation(
+    traj: Dict[str, np.ndarray],
+    label: str,
+    agent_index: int,
+    save_path: Path,
+    title: str = "Agent State Evolution",
+    fps: int = 30,
+    speedup: int = 1,
+    show_estimates: bool = True,
+) -> None:
+    sliced = _slice_marl_agent_trajectory(traj, agent_index)
+    states = np.asarray(sliced["states"], dtype=np.float32)
+    estimates = np.asarray(sliced["estimates"], dtype=np.float32)
+    actions = np.asarray(sliced["actions"], dtype=np.int64)
+    n_steps, state_dim = states.shape
+    if state_dim < 2:
+        raise ValueError("Agent animation requires state_dim >= 2")
+
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+    all_points = states
+    if show_estimates:
+        all_points = np.vstack([all_points, estimates])
+    x_min, x_max = float(all_points[:, 0].min()), float(all_points[:, 0].max())
+    y_min, y_max = float(all_points[:, 1].min()), float(all_points[:, 1].max())
+    x_range = max(0.1, x_max - x_min)
+    y_range = max(0.1, y_max - y_min)
+    margin = 0.15
+    x_center = (x_min + x_max) / 2
+    y_center = (y_min + y_max) / 2
+    max_range = max(x_range, y_range) * (1 + 2 * margin)
+    ax.set_xlim(x_center - max_range / 2, x_center + max_range / 2)
+    ax.set_ylim(y_center - max_range / 2, y_center + max_range / 2)
+
+    state_line, = ax.plot([], [], "-", color="tab:blue", linewidth=2.5, alpha=0.85, label="state")
+    state_point, = ax.plot([], [], "o", color="tab:blue", markersize=10, zorder=5)
+    if show_estimates:
+        est_line, = ax.plot([], [], "--", color="tab:orange", linewidth=2, alpha=0.6, label="estimate")
+        est_point, = ax.plot([], [], "s", color="tab:orange", markersize=8, alpha=0.7, zorder=5)
+    else:
+        est_line, est_point = None, None
+
+    ax.plot(0, 0, "r*", markersize=18, label="Target", zorder=10)
+    ax.set_xlabel("State Dimension 1", fontsize=14, fontweight="bold")
+    ax.set_ylabel("State Dimension 2", fontsize=14, fontweight="bold")
+    ax.set_title(f"{title} - {label} - agent_{agent_index}", fontsize=16, fontweight="bold", pad=16)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=11, loc="best", framealpha=0.9)
+    ax.set_aspect("equal", adjustable="box")
+
+    time_text = ax.text(
+        0.02,
+        0.98,
+        "",
+        transform=ax.transAxes,
+        fontsize=12,
+        verticalalignment="top",
+        fontweight="bold",
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.9),
+    )
+
+    def init():
+        state_line.set_data([], [])
+        state_point.set_data([], [])
+        if show_estimates and est_line is not None and est_point is not None:
+            est_line.set_data([], [])
+            est_point.set_data([], [])
+        time_text.set_text("")
+        artists: List[Any] = [state_line, state_point, time_text]
+        if show_estimates and est_line is not None and est_point is not None:
+            artists.extend([est_line, est_point])
+        return artists
+
+    def animate(frame: int):
+        idx = min(frame * speedup, n_steps - 1)
+        action_val = int(actions[idx]) if idx < actions.shape[0] else 0
+        time_text.set_text(f"Timestep: {idx} | action: {action_val}")
+        state_line.set_data(states[: idx + 1, 0], states[: idx + 1, 1])
+        state_point.set_data([states[idx, 0]], [states[idx, 1]])
+        artists: List[Any] = [state_line, state_point, time_text]
+        if show_estimates and est_line is not None and est_point is not None:
+            est_line.set_data(estimates[: idx + 1, 0], estimates[: idx + 1, 1])
+            est_point.set_data([estimates[idx, 0]], [estimates[idx, 1]])
+            artists.extend([est_line, est_point])
+        return artists
+
+    num_frames = (n_steps - 1) // speedup + 1
+    anim = FuncAnimation(fig, animate, init_func=init, frames=num_frames, interval=1000 / fps, blit=True, repeat=True)
+
+    try:
+        writer = FFMpegWriter(fps=fps, bitrate=2400, codec="libx264")
+        anim.save(str(save_path), writer=writer)
+        print(f"  ✓ Saved agent animation to {save_path}")
+    except Exception as e:
+        print(f"  ✗ Error saving agent animation: {e}")
+        print(f"  Make sure FFmpeg is installed:")
+        print(f"    - Linux: sudo apt-get install ffmpeg")
+        print(f"    - Mac: brew install ffmpeg")
+    finally:
+        plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Visualize policy state evolution in NCS simulator",
@@ -766,6 +1202,16 @@ def main():
         help='Agent index for marl_torch checkpoints (default: 0)'
     )
     parser.add_argument(
+        '--multi-agent',
+        action='store_true',
+        help='For marl_torch: run a true multi-agent rollout (all agents act from the checkpoint)'
+    )
+    parser.add_argument(
+        '--per-agent-videos',
+        action='store_true',
+        help='In --multi-agent mode with --generate-video, also write one MP4 per agent'
+    )
+    parser.add_argument(
         '--labels',
         type=str,
         nargs='+',
@@ -789,7 +1235,7 @@ def main():
         '--n-agents',
         type=int,
         default=1,
-        help='Number of agents in the environment (default: 1; visualization controls agent_0, others fixed to 0)'
+        help='Number of agents in the environment (default: 1; in --multi-agent mode must match checkpoint n_agents)'
     )
 
     # Visualization parameters
@@ -876,7 +1322,8 @@ def main():
         parser.error("--labels must have the same length as number of policies")
 
     # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Generate output prefix if not provided
     if not args.output_prefix:
@@ -904,14 +1351,16 @@ def main():
         )
 
     print(f"Creating environment...")
-    env = SingleAgentWrapper(make_env)
-
-    # Get state_dim from a temporary instance
-    temp_env = make_env()
-    state_dim = temp_env.state_dim
-    temp_env.close()
-
-    print(f"✓ Environment created (state_dim={state_dim}, episode_length={args.episode_length})\n")
+    if args.multi_agent:
+        env: Any = make_env()
+        state_dim = int(env.state_dim)
+        print(f"✓ Environment created (multi-agent, state_dim={state_dim}, episode_length={args.episode_length})\n")
+    else:
+        env = SingleAgentWrapper(make_env)
+        temp_env = make_env()
+        state_dim = int(temp_env.state_dim)
+        temp_env.close()
+        print(f"✓ Environment created (state_dim={state_dim}, episode_length={args.episode_length})\n")
 
     # Load policies and run episodes
     trajectories = []
@@ -922,35 +1371,42 @@ def main():
         print(f"  Type: {policy_type}")
         print(f"  Path/Name: {policy_path}")
 
-        # Reset environment to ensure same initial conditions and process noise for fair comparison
-        # This ensures all policies are evaluated on identical random seeds
-        obs, info = env.reset(seed=args.seed)
-
-        # Load policy
-        try:
-            policy = load_policy(
-                policy_path,
-                policy_type,
-                env,
-                n_agents=args.n_agents,
-                seed=args.seed,
-                marl_agent_index=int(args.marl_agent_index),
-            )
-        except Exception as e:
-            print(f"  ✗ Error loading policy: {e}\n")
-            continue
-
-        # Run episode
-        print(f"  Running episode...")
-        traj = run_episode(env, policy, args.episode_length, deterministic=True)
+        if args.multi_agent:
+            if policy_type.lower() not in {"marl_torch", "marl", "torch_marl"}:
+                print("  ✗ Error: --multi-agent only supports --policy-type marl_torch\n")
+                continue
+            try:
+                policy = load_marl_torch_multi_agent_policy(policy_path, env)
+            except Exception as e:
+                print(f"  ✗ Error loading policy: {e}\n")
+                continue
+            print(f"  Running multi-agent episode...")
+            traj = run_episode_multi_agent(env, policy, args.episode_length, seed=args.seed)
+        else:
+            obs, info = env.reset(seed=args.seed)
+            try:
+                policy = load_policy(
+                    policy_path,
+                    policy_type,
+                    env,
+                    n_agents=args.n_agents,
+                    seed=args.seed,
+                    marl_agent_index=int(args.marl_agent_index),
+                )
+            except Exception as e:
+                print(f"  ✗ Error loading policy: {e}\n")
+                continue
+            print(f"  Running episode...")
+            traj = run_episode(env, policy, args.episode_length, deterministic=True)
 
         # Print summary statistics
-        total_reward = np.sum(traj['rewards'])
-        tx_count = np.sum(traj['actions'])
-        final_error = traj['state_errors'][-1]
+        total_reward = float(np.sum(traj["rewards"]))
+        tx_count = float(np.sum(traj["actions"]))
+        final_error = float(np.mean(traj["state_errors"][-1])) if args.multi_agent else float(traj["state_errors"][-1])
         print(f"  ✓ Episode complete")
         print(f"    - Total reward: {total_reward:.2f}")
-        print(f"    - Transmissions: {int(tx_count)}/{args.episode_length}")
+        denom = args.episode_length * (args.n_agents if args.multi_agent else 1)
+        print(f"    - Transmissions: {int(tx_count)}/{denom}")
         print(f"    - Final state error: {final_error:.4f}\n")
 
         trajectories.append(traj)
@@ -962,41 +1418,89 @@ def main():
     # Generate plots
     print(f"Generating visualizations...\n")
 
-    # Plot 1: State evolution 2D
-    plot1_path = os.path.join(args.output_dir, f"{output_prefix}_state_evolution.png")
-    plot_state_evolution_2d(
-        trajectories,
-        policy_labels[:len(trajectories)],
-        plot1_path,
-        title="State Evolution in 2D State Space",
-        show_estimates=args.show_estimates
-    )
+    if args.multi_agent:
+        summary_plot_path = output_dir / f"{output_prefix}_marl_summary.png"
+        plot_marl_comparison_summary(
+            trajectories,
+            policy_labels[:len(trajectories)],
+            summary_plot_path,
+            title="MARL Summary (Mean state error + mean action rate)",
+        )
 
-    # Plot 2: Detailed analysis
-    plot2_path = os.path.join(args.output_dir, f"{output_prefix}_detailed_analysis.png")
-    plot_detailed_analysis(
-        trajectories,
-        policy_labels[:len(trajectories)],
-        plot2_path,
-        title="Detailed Policy Analysis"
-    )
+        for idx, (label, traj) in enumerate(zip(policy_labels[:len(trajectories)], trajectories)):
+            tag = f"p{idx+1}_{_sanitize_filename(label)}"
+            raster_path = output_dir / f"{output_prefix}_{tag}_actions.png"
+            plot_marl_action_raster(traj, label=label, save_path=raster_path)
+            if state_dim >= 2:
+                state_space_path = output_dir / f"{output_prefix}_{tag}_state_space.png"
+                plot_marl_state_space_2d(
+                    traj,
+                    label=label,
+                    save_path=state_space_path,
+                    show_estimates=args.show_estimates,
+                )
+    else:
+        plot1_path = output_dir / f"{output_prefix}_state_evolution.png"
+        plot_state_evolution_2d(
+            trajectories,
+            policy_labels[:len(trajectories)],
+            str(plot1_path),
+            title="State Evolution in 2D State Space",
+            show_estimates=args.show_estimates,
+        )
+
+        plot2_path = output_dir / f"{output_prefix}_detailed_analysis.png"
+        plot_detailed_analysis(
+            trajectories,
+            policy_labels[:len(trajectories)],
+            str(plot2_path),
+            title="Detailed Policy Analysis",
+        )
 
     # Generate video animation if requested
     if args.generate_video:
         print(f"\nGenerating animation...\n")
-        video_path = os.path.join(args.output_dir, f"{output_prefix}_animation.mp4")
-        create_state_evolution_animation(
-            trajectories,
-            policy_labels[:len(trajectories)],
-            video_path,
-            title="State Evolution Animation",
-            fps=args.video_fps,
-            speedup=args.video_speedup,
-            show_estimates=args.show_estimates
-        )
+        if args.multi_agent:
+            for idx, (label, traj) in enumerate(zip(policy_labels[:len(trajectories)], trajectories)):
+                tag = f"p{idx+1}_{_sanitize_filename(label)}"
+                video_path = output_dir / f"{output_prefix}_{tag}_animation.mp4"
+                create_marl_state_evolution_animation(
+                    traj,
+                    label=label,
+                    save_path=video_path,
+                    title="MARL State Evolution (All Agents)",
+                    fps=args.video_fps,
+                    speedup=args.video_speedup,
+                    show_estimates=args.show_estimates,
+                )
+                if args.per_agent_videos:
+                    n_agents = int(traj["states"].shape[1])
+                    for agent_idx in range(n_agents):
+                        agent_video_path = output_dir / f"{output_prefix}_{tag}_agent_{agent_idx}.mp4"
+                        create_marl_agent_state_evolution_animation(
+                            traj,
+                            label=label,
+                            agent_index=agent_idx,
+                            save_path=agent_video_path,
+                            title="Agent State Evolution",
+                            fps=args.video_fps,
+                            speedup=args.video_speedup,
+                            show_estimates=args.show_estimates,
+                        )
+        else:
+            video_path = output_dir / f"{output_prefix}_animation.mp4"
+            create_state_evolution_animation(
+                trajectories,
+                policy_labels[:len(trajectories)],
+                str(video_path),
+                title="State Evolution Animation",
+                fps=args.video_fps,
+                speedup=args.video_speedup,
+                show_estimates=args.show_estimates,
+            )
 
     # Save summary statistics to JSON
-    summary_path = os.path.join(args.output_dir, f"{output_prefix}_summary.json")
+    summary_path = output_dir / f"{output_prefix}_summary.json"
     summary = {
         'config': args.config,
         'episode_length': args.episode_length,
@@ -1005,25 +1509,44 @@ def main():
     }
 
     for label, traj in zip(policy_labels[:len(trajectories)], trajectories):
-        policy_summary = {
-            'label': label,
-            'total_reward': float(np.sum(traj['rewards'])),
-            'avg_reward': float(np.mean(traj['rewards'])),
-            'transmission_count': int(np.sum(traj['actions'])),
-            'transmission_rate': float(np.mean(traj['actions'])),
-            'initial_state_error': float(traj['state_errors'][0]),
-            'final_state_error': float(traj['state_errors'][-1]),
-            'avg_state_error': float(np.mean(traj['state_errors'])),
-        }
+        rewards = np.asarray(traj["rewards"], dtype=np.float32)
+        actions = np.asarray(traj["actions"], dtype=np.float32)
+        state_errors = np.asarray(traj["state_errors"], dtype=np.float32)
+
+        if args.multi_agent:
+            policy_summary = {
+                "label": label,
+                "n_agents": int(state_errors.shape[1]),
+                "total_reward": float(rewards.sum()),
+                "avg_reward_per_agent_step": float(rewards.mean()),
+                "transmission_count": int(actions.sum()),
+                "transmission_rate_per_agent_step": float(actions.mean()),
+                "initial_state_error_mean": float(state_errors[0].mean()),
+                "final_state_error_mean": float(state_errors[-1].mean()),
+                "avg_state_error_mean": float(state_errors.mean(axis=1).mean()),
+                "initial_state_error_per_agent": [float(x) for x in state_errors[0]],
+                "final_state_error_per_agent": [float(x) for x in state_errors[-1]],
+            }
+        else:
+            policy_summary = {
+                "label": label,
+                "total_reward": float(rewards.sum()),
+                "avg_reward": float(rewards.mean()),
+                "transmission_count": int(actions.sum()),
+                "transmission_rate": float(actions.mean()),
+                "initial_state_error": float(state_errors[0]),
+                "final_state_error": float(state_errors[-1]),
+                "avg_state_error": float(state_errors.mean()),
+            }
         summary['policies'].append(policy_summary)
 
-    with open(summary_path, 'w') as f:
+    with summary_path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     print(f"✓ Saved summary statistics to {summary_path}")
 
     print(f"\n{'='*60}")
     print(f"Visualization complete!")
-    print(f"Output files saved to: {args.output_dir}/")
+    print(f"Output files saved to: {output_dir}/")
     print(f"{'='*60}\n")
 
 
