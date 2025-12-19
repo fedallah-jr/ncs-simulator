@@ -49,24 +49,31 @@ else
   exit 1
 fi
 
-base_config="configs/marl_mixed_plants.json"
-if [[ ! -f "${base_config}" ]]; then
-  echo "Config not found: ${base_config}" >&2
-  exit 1
-fi
-
-common_args=(
-  --config "${base_config}"
-  --output-root "${run_root}"
-  --seed "${SEED}"
-  --total-timesteps "${TOTAL_TIMESTEPS}"
-  --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+configs=(
+  "configs/marl_mixed_plants.json"
+  "configs/marl_absolute_plants.json"
 )
 
+for config_path in "${configs[@]}"; do
+  if [[ ! -f "${config_path}" ]]; then
+    echo "Config not found: ${config_path}" >&2
+    exit 1
+  fi
+done
+
 run_one() {
-  local algo_module="$1"
-  local label="$2"
-  shift 2
+  local config_path="$1"
+  local algo_module="$2"
+  local label="$3"
+  shift 3
+
+  local common_args=(
+    --config "${config_path}"
+    --output-root "${run_root}"
+    --seed "${SEED}"
+    --total-timesteps "${TOTAL_TIMESTEPS}"
+    --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+  )
 
   local log_path="${run_root}/logs/${label}.log"
   echo "=== ${label} ==="
@@ -74,15 +81,19 @@ run_one() {
   PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m "${algo_module}" "${common_args[@]}" "$@" 2>&1 | tee "${log_path}"
 }
 
-# Shared params + agent-id (default)
-run_one "algorithms.marl_iql"  "iql_shared_agentid"
-run_one "algorithms.marl_vdn"  "vdn_shared_agentid"
-run_one "algorithms.marl_qmix" "qmix_shared_agentid"
+for config_path in "${configs[@]}"; do
+  config_name=$(basename "${config_path}" .json)
 
-# Independent params + no agent-id
-run_one "algorithms.marl_iql"  "iql_independent_noagentid"  --independent-agents --no-agent-id
-run_one "algorithms.marl_vdn"  "vdn_independent_noagentid"  --independent-agents --no-agent-id
-run_one "algorithms.marl_qmix" "qmix_independent_noagentid" --independent-agents --no-agent-id
+  # Shared params + agent-id (default)
+  run_one "${config_path}" "algorithms.marl_iql"  "iql_shared_agentid_${config_name}"
+  run_one "${config_path}" "algorithms.marl_vdn"  "vdn_shared_agentid_${config_name}"
+  run_one "${config_path}" "algorithms.marl_qmix" "qmix_shared_agentid_${config_name}"
+
+  # Independent params + no agent-id
+  run_one "${config_path}" "algorithms.marl_iql"  "iql_independent_noagentid_${config_name}"  --independent-agents --no-agent-id
+  run_one "${config_path}" "algorithms.marl_vdn"  "vdn_independent_noagentid_${config_name}"  --independent-agents --no-agent-id
+  run_one "${config_path}" "algorithms.marl_qmix" "qmix_independent_noagentid_${config_name}" --independent-agents --no-agent-id
+done
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then

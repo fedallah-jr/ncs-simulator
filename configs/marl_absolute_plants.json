@@ -19,6 +19,7 @@
     "R": [[0.1]]
   },
   "reward": {
+    "state_error_reward": "absolute",
     "state_cost_matrix": [[1.0, 0.0], [0.0, 1.0]],
     "comm_recent_window": 10,
     "comm_throughput_window": 200,
@@ -27,14 +28,14 @@
     "reward_mixing": {
       "enabled": true,
       "rewards": [
-        { "state_error_reward": "simple_penalty", "simple_comm_penalty_alpha": 0.0 },
+        { "state_error_reward": "absolute" },
         { "state_error_reward": "absolute" }
       ],
       "scheduler": {
         "type": "linear",
-        "start_value": 1.0,
-        "end_value": 0.95,
-        "total_steps": 600000
+        "start_value": 0.0,
+        "end_value": 0.0,
+        "total_steps": 1
       }
     },
     "evaluation": {
