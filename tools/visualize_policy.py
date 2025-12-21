@@ -126,8 +126,16 @@ def load_es_policy(model_path: str, env: Any):
         # Load architecture parameters with backward compatibility
         hidden_size = int(data['hidden_size']) if 'hidden_size' in data else 64
         use_layer_norm = bool(data['use_layer_norm']) if 'use_layer_norm' in data else False
-        
-        print(f"  Architecture: hidden_size={hidden_size}, use_layer_norm={use_layer_norm}")
+
+        saved_n_agents = int(data['n_agents']) if 'n_agents' in data else None
+        use_agent_id = bool(data['use_agent_id']) if 'use_agent_id' in data else False
+        saved_obs_dim = int(data['obs_dim']) if 'obs_dim' in data else None
+
+        print(
+            "  Architecture: "
+            f"hidden_size={hidden_size}, use_layer_norm={use_layer_norm}, "
+            f"use_agent_id={use_agent_id}"
+        )
     except Exception as e:
         raise ValueError(f"Could not load numpy data from {model_path_p}: {e}")
 
@@ -143,32 +151,47 @@ def load_es_policy(model_path: str, env: Any):
         obs_dim = env.observation_space.shape[0]
     else:
         raise ValueError("Environment must have a valid observation space.")
+    env_n_agents = int(getattr(env, "n_agents", getattr(env, "_n_agents", 1)))
+    n_agents = int(saved_n_agents) if saved_n_agents is not None else env_n_agents
+
+    if saved_n_agents is not None and env_n_agents != n_agents:
+        raise ValueError(f"Env n_agents={env_n_agents} does not match checkpoint n_agents={n_agents}")
+    if saved_obs_dim is not None and obs_dim != saved_obs_dim:
+        raise ValueError(f"Env obs_dim={obs_dim} does not match checkpoint obs_dim={saved_obs_dim}")
+    input_dim = obs_dim + (n_agents if use_agent_id else 0)
 
     # Create model with correct architecture
     model = create_policy_net(action_dim=action_dim, hidden_size=hidden_size, use_layer_norm=use_layer_norm)
 
     # Initialize dummy to get structure
     rng = jax.random.PRNGKey(0)
-    dummy_obs = jnp.zeros((1, obs_dim))
+    dummy_obs = jnp.zeros((1, input_dim))
     dummy_params = model.init(rng, dummy_obs)
 
     _, unravel_fn = flatten_util.ravel_pytree(dummy_params)
     params = unravel_fn(flat_params)
 
     class ESPolicyWrapper:
-        def __init__(self, model, params):
+        def __init__(self, model, params, n_agents: int, use_agent_id: bool):
             self.model = model
             self.params = params
+            self.n_agents = int(n_agents)
+            self.use_agent_id = bool(use_agent_id)
 
         def predict(self, observation, deterministic=True):
             # Observation is (obs_dim,) numpy array
             # Add batch dim and convert to JAX array
-            obs = jnp.array(observation[np.newaxis, :])
+            obs = np.asarray(observation, dtype=np.float32)
+            if self.use_agent_id:
+                onehot = np.zeros(self.n_agents, dtype=obs.dtype)
+                onehot[0] = 1.0
+                obs = np.concatenate([obs, onehot], axis=0)
+            obs = jnp.array(obs[np.newaxis, :])
             logits = self.model.apply(self.params, obs)
             action = jnp.argmax(logits).item()
             return action, None
 
-    return ESPolicyWrapper(model, params)
+    return ESPolicyWrapper(model, params, n_agents=n_agents, use_agent_id=use_agent_id)
 
 
 def load_marl_torch_policy(model_path: str, env: Any, marl_agent_index: int = 0):

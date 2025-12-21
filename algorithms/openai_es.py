@@ -31,7 +31,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ncs_env.env import NCS_Env
-from utils import SingleAgentWrapper
+from ncs_env.config import load_config
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
 # -----------------------------------------------------------------------------
@@ -45,6 +45,21 @@ _worker_model: Any = None
 _worker_params: Any = None
 _worker_config_path: Optional[str] = None
 _worker_episode_length: int = 500
+_worker_n_agents: int = 1
+_worker_use_agent_id: bool = False
+_worker_agent_id_eye: Optional[np.ndarray] = None
+
+
+def _build_obs_batch(obs_dict: Dict[str, np.ndarray]) -> np.ndarray:
+    obs_batch = np.stack(
+        [np.asarray(obs_dict[f"agent_{i}"], dtype=np.float32) for i in range(_worker_n_agents)],
+        axis=0,
+    )
+    if _worker_use_agent_id:
+        if _worker_agent_id_eye is None:
+            raise RuntimeError("Agent id eye matrix not initialized.")
+        obs_batch = np.concatenate([obs_batch, _worker_agent_id_eye], axis=1)
+    return obs_batch
 
 
 def create_policy_net(action_dim: int, hidden_size: int = 64, use_layer_norm: bool = False):
@@ -87,11 +102,14 @@ def _init_worker(
     seed: Optional[int],
     action_dim: int,
     obs_dim: int,
+    n_agents: int,
+    use_agent_id: bool,
     hidden_size: int = 64,
     use_layer_norm: bool = False
 ):
     """Initialize the environment and model in the worker process."""
     global _worker_env, _worker_model, _worker_params, _worker_config_path, _worker_episode_length
+    global _worker_n_agents, _worker_use_agent_id, _worker_agent_id_eye
     
     # Set JAX to use CPU BEFORE importing JAX
     os.environ["JAX_PLATFORMS"] = "cpu"
@@ -103,26 +121,27 @@ def _init_worker(
     
     _worker_config_path = config_path
     _worker_episode_length = episode_length
+    _worker_n_agents = int(n_agents)
+    _worker_use_agent_id = bool(use_agent_id)
+    _worker_agent_id_eye = np.eye(_worker_n_agents, dtype=np.float32) if _worker_use_agent_id else None
     
-    def factory():
-        return NCS_Env(
-            n_agents=1,
-            episode_length=episode_length,
-            config_path=config_path,
-            seed=seed,
-        )
-    
-    _worker_env = SingleAgentWrapper(factory)
+    _worker_env = NCS_Env(
+        n_agents=_worker_n_agents,
+        episode_length=episode_length,
+        config_path=config_path,
+        seed=seed,
+    )
     _worker_model = create_policy_net(action_dim, hidden_size=hidden_size, use_layer_norm=use_layer_norm)
     
     rng = jax.random.PRNGKey(0)
-    dummy_obs = jnp.zeros((1, obs_dim))
+    input_dim = obs_dim + (_worker_n_agents if _worker_use_agent_id else 0)
+    dummy_obs = jnp.zeros((1, input_dim))
     _worker_params = _worker_model.init(rng, dummy_obs)
 
 
 def _run_single_episode(flat_params: np.ndarray, episode_seed: int) -> float:
     """Run one episode with the given flattened parameters and seed."""
-    global _worker_env, _worker_model, _worker_params
+    global _worker_env, _worker_model, _worker_params, _worker_n_agents
     
     import jax.numpy as jnp
     from jax import flatten_util
@@ -130,18 +149,21 @@ def _run_single_episode(flat_params: np.ndarray, episode_seed: int) -> float:
     _, unravel_fn = flatten_util.ravel_pytree(_worker_params)
     params = unravel_fn(flat_params)
     
-    obs, _ = _worker_env.reset(seed=episode_seed)
+    obs_dict, _ = _worker_env.reset(seed=episode_seed)
     total_reward = 0.0
-    truncated = False
-    terminated = False
-    
-    while not (truncated or terminated):
-        obs_jax = jnp.array(obs[np.newaxis, :])
+    done = False
+
+    while not done:
+        obs_batch = _build_obs_batch(obs_dict)
+        obs_jax = jnp.asarray(obs_batch)
         logits = _worker_model.apply(params, obs_jax)
-        action = int(jnp.argmax(logits))
-        
-        obs, reward, terminated, truncated, _ = _worker_env.step(action)
-        total_reward += reward
+        actions = np.asarray(jnp.argmax(logits, axis=1))
+        action_dict = {f"agent_{i}": int(actions[i]) for i in range(_worker_n_agents)}
+
+        obs_dict, rewards, terminated, truncated, _ = _worker_env.step(action_dict)
+        step_reward = float(np.sum([rewards[f"agent_{i}"] for i in range(_worker_n_agents)]))
+        total_reward += step_reward
+        done = any(terminated[f"agent_{i}"] or truncated[f"agent_{i}"] for i in range(_worker_n_agents))
         
     return total_reward
 
@@ -208,14 +230,21 @@ def train(args):
     if args.pbt_interval < 1:
         raise ValueError("pbt_interval must be at least 1.")
 
-    # 1. Setup Dummy Environment to get shapes
     config_path_str = str(args.config) if args.config is not None else None
-    dummy_env = NCS_Env(n_agents=1, config_path=config_path_str)
+    cfg = load_config(config_path_str)
+    system_cfg = cfg.get("system", {})
+    n_agents = int(system_cfg.get("n_agents", 1))
+    use_agent_id = n_agents > 1
+
+    # 1. Setup Dummy Environment to get shapes
+    dummy_env = NCS_Env(n_agents=n_agents, config_path=config_path_str)
     obs_dim = dummy_env.observation_space["agent_0"].shape[0]
     action_dim = dummy_env.action_space["agent_0"].n
     dummy_env.close()
+    input_dim = obs_dim + (n_agents if use_agent_id else 0)
     
-    print(f"Observation Dim: {obs_dim}, Action Dim: {action_dim}")
+    print(f"Observation Dim: {obs_dim}, Input Dim: {input_dim}, Action Dim: {action_dim}")
+    print(f"N Agents: {n_agents}, Use Agent Id: {use_agent_id}")
     print(f"Hidden Size: {args.hidden_size}, Layer Norm: {args.use_layer_norm}")
     print(f"Evaluation episodes per individual: {args.eval_episodes}")
     print(f"Fitness shaping: {args.fitness_shaping} (evosax built-in)")
@@ -241,7 +270,7 @@ def train(args):
     # 2. Setup Flax Model & Initial Params
     master_rng = jax.random.PRNGKey(args.seed if args.seed is not None else 0)
     model = create_policy_net(action_dim, hidden_size=args.hidden_size, use_layer_norm=args.use_layer_norm)
-    dummy_obs = jnp.zeros((1, obs_dim))
+    dummy_obs = jnp.zeros((1, input_dim))
     master_rng, template_rng = jax.random.split(master_rng)
     params_template = model.init(template_rng, dummy_obs)
     
@@ -311,8 +340,17 @@ def train(args):
         pool = ctx.Pool(
             processes=args.n_workers,
             initializer=_init_worker,
-            initargs=(config_path_str, args.episode_length, args.seed, action_dim, obs_dim,
-                      args.hidden_size, args.use_layer_norm)
+            initargs=(
+                config_path_str,
+                args.episode_length,
+                args.seed,
+                action_dim,
+                obs_dim,
+                n_agents,
+                use_agent_id,
+                args.hidden_size,
+                args.use_layer_norm,
+            ),
         )
         map_fn = pool.map
     else:
@@ -324,6 +362,8 @@ def train(args):
             args.seed,
             action_dim,
             obs_dim,
+            n_agents,
+            use_agent_id,
             args.hidden_size,
             args.use_layer_norm,
         )
@@ -395,6 +435,9 @@ def train(args):
                     flat_params=population_flat[best_idx],
                     hidden_size=args.hidden_size,
                     use_layer_norm=args.use_layer_norm,
+                    n_agents=n_agents,
+                    obs_dim=obs_dim,
+                    use_agent_id=use_agent_id,
                 )
 
         all_fitness_array = jnp.array(all_fitness_values)
@@ -425,6 +468,9 @@ def train(args):
             flat_params=np.array(best_strategy_state.mean),
             hidden_size=args.hidden_size,
             use_layer_norm=args.use_layer_norm,
+            n_agents=n_agents,
+            obs_dim=obs_dim,
+            use_agent_id=use_agent_id,
         )
 
         if gen % args.checkpoint_freq == 0:
@@ -433,6 +479,9 @@ def train(args):
                 flat_params=np.array(best_strategy_state.mean),
                 hidden_size=args.hidden_size,
                 use_layer_norm=args.use_layer_norm,
+                n_agents=n_agents,
+                obs_dim=obs_dim,
+                use_agent_id=use_agent_id,
             )
 
         if args.meta_population_size > 1 and args.truncation_percentage > 0.0 and gen % args.pbt_interval == 0:
@@ -480,6 +529,8 @@ def train(args):
         "sigma_decay": args.sigma_decay,
         "seed": args.seed,
         "n_workers": args.n_workers,
+        "n_agents": n_agents,
+        "use_agent_id": use_agent_id,
         "checkpoint_freq": args.checkpoint_freq,
         "meta_population_size": args.meta_population_size,
         "truncation_percentage": args.truncation_percentage,
