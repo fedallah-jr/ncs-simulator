@@ -5,12 +5,12 @@ set -euo pipefail
 #
 # Experiments:
 #   - Algorithms: IQL, VDN, QMIX
-#   - Variant: shared params + agent-id (default)
+#   - Variants: with and without Double Q
 #
 # Training:
 #   - timesteps: 1_000_000
 #   - epsilon decay steps: 800_000
-#   - config: configs/marl_absolute_plants.json (absolute reward only)
+#   - configs: absolute vs mixed rewards (same env settings)
 #
 # Usage:
 #   ./run_marl_experiments.sh
@@ -45,7 +45,10 @@ else
   exit 1
 fi
 
-configs=("configs/marl_absolute_plants.json")
+configs=(
+  "configs/marl_mixed_plants.json"
+  "configs/marl_absolute_plants.json"
+)
 
 for config_path in "${configs[@]}"; do
   if [[ ! -f "${config_path}" ]]; then
@@ -66,6 +69,7 @@ run_one() {
     --seed "${SEED}"
     --total-timesteps "${TOTAL_TIMESTEPS}"
     --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+    --n-eval-episodes 10
   )
 
   local log_path="${run_root}/logs/${label}.log"
@@ -77,9 +81,12 @@ run_one() {
 for config_path in "${configs[@]}"; do
   config_name=$(basename "${config_path}" .json)
 
-  run_one "${config_path}" "algorithms.marl_iql"  "iql_shared_agentid_${config_name}"
-  run_one "${config_path}" "algorithms.marl_vdn"  "vdn_shared_agentid_${config_name}"
-  run_one "${config_path}" "algorithms.marl_qmix" "qmix_shared_agentid_${config_name}"
+  run_one "${config_path}" "algorithms.marl_iql"  "iql_shared_agentid_${config_name}_nodoubleq"
+  run_one "${config_path}" "algorithms.marl_iql"  "iql_shared_agentid_${config_name}_doubleq" --double-q
+  run_one "${config_path}" "algorithms.marl_vdn"  "vdn_shared_agentid_${config_name}_nodoubleq"
+  run_one "${config_path}" "algorithms.marl_vdn"  "vdn_shared_agentid_${config_name}_doubleq" --double-q
+  run_one "${config_path}" "algorithms.marl_qmix" "qmix_shared_agentid_${config_name}_nodoubleq"
+  run_one "${config_path}" "algorithms.marl_qmix" "qmix_shared_agentid_${config_name}_doubleq" --double-q
 done
 
 zip_path="${run_root}.zip"
