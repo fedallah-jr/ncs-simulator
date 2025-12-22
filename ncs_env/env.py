@@ -834,6 +834,8 @@ class NCS_Env(gym.Env):
         but ONLY for rewards where normalization is enabled (unbounded rewards).
         Simple/simple_penalty rewards are NOT normalized as they are already bounded.
         """
+        saved_total_steps = self.total_env_steps
+        saved_last_mix_weight = self.last_mix_weight
         for idx, definition in enumerate(self.reward_definitions):
             if not _should_normalize_reward(definition):
                 # Skip normalization for this reward (e.g., simple_penalty)
@@ -847,6 +849,8 @@ class NCS_Env(gym.Env):
             definition.normalizer = temp_normalizer
 
             print(f"    → Normalizer: mean={temp_normalizer.mean:.3f}, std={temp_normalizer.std:.3f}")
+        self.total_env_steps = saved_total_steps
+        self.last_mix_weight = saved_last_mix_weight
 
     def _compute_normalizer_for_definition(
         self,
@@ -874,6 +878,7 @@ class NCS_Env(gym.Env):
         for ep in range(episodes):
             # Reset environment
             self.reset(seed=int(rng.integers(0, 1_000_000)))
+            prev_errors = [float(x) for x in self.last_errors]
 
             for step in range(self.episode_length):
                 # Random actions for all agents
@@ -898,15 +903,14 @@ class NCS_Env(gym.Env):
                     if definition.mode == "absolute":
                         error_reward = -curr_error
                     elif definition.mode == "difference":
-                        # For difference, we need previous error
-                        prev_error = self.last_errors[i]
-                        error_reward = prev_error - curr_error
+                        error_reward = prev_errors[i] - curr_error
                     else:
                         # Simple rewards - shouldn't reach here but handle it
                         # Just use the actual reward value
                         error_reward = rewards[f"agent_{i}"]
 
                     collected_rewards.append(error_reward)
+                    prev_errors[i] = curr_error
 
                 if all(terminated.values()) or all(truncated.values()):
                     break
