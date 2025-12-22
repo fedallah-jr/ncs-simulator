@@ -1,20 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs a small MARL experiment grid and zips the resulting outputs.
+# Runs MARL experiments (shared params + agent-id) and zips outputs.
 #
 # Experiments:
 #   - Algorithms: IQL, VDN, QMIX
-#   - Variants:
-#       1) shared params + agent-id (default)
-#       2) independent params + no agent-id (--independent-agents --no-agent-id)
+#   - Variant: shared params + agent-id (default)
 #
 # Training:
 #   - timesteps: 1_000_000
 #   - epsilon decay steps: 800_000
-#   - config: configs/marl_mixed_plants.json, but reward_mixing scheduler:
-#       - type: linear
-#       - total_steps: 600_000
+#   - config: configs/marl_absolute_plants.json (absolute reward only)
 #
 # Usage:
 #   ./run_marl_experiments.sh
@@ -49,10 +45,7 @@ else
   exit 1
 fi
 
-configs=(
-  "configs/marl_mixed_plants.json"
-  "configs/marl_absolute_plants.json"
-)
+configs=("configs/marl_absolute_plants.json")
 
 for config_path in "${configs[@]}"; do
   if [[ ! -f "${config_path}" ]]; then
@@ -84,15 +77,9 @@ run_one() {
 for config_path in "${configs[@]}"; do
   config_name=$(basename "${config_path}" .json)
 
-  # Shared params + agent-id (default)
   run_one "${config_path}" "algorithms.marl_iql"  "iql_shared_agentid_${config_name}"
   run_one "${config_path}" "algorithms.marl_vdn"  "vdn_shared_agentid_${config_name}"
   run_one "${config_path}" "algorithms.marl_qmix" "qmix_shared_agentid_${config_name}"
-
-  # Independent params + no agent-id
-  run_one "${config_path}" "algorithms.marl_iql"  "iql_independent_noagentid_${config_name}"  --independent-agents --no-agent-id
-  run_one "${config_path}" "algorithms.marl_vdn"  "vdn_independent_noagentid_${config_name}"  --independent-agents --no-agent-id
-  run_one "${config_path}" "algorithms.marl_qmix" "qmix_independent_noagentid_${config_name}" --independent-agents --no-agent-id
 done
 
 zip_path="${run_root}.zip"

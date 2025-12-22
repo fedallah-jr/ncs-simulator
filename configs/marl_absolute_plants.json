@@ -23,12 +23,14 @@
     "state_cost_matrix": [[1.0, 0.0], [0.0, 1.0]],
     "comm_recent_window": 10,
     "comm_throughput_window": 200,
-    "comm_penalty_alpha": 0.01,
-    "comm_throughput_floor": 0.001,
+    "comm_penalty_alpha": 0.0,
+    "comm_throughput_floor": 0.0,
     "normalize": true,
     "normalization_type": "running",
     "evaluation": {
       "state_error_reward": "absolute",
+      "comm_penalty_alpha": 0.0,
+      "simple_comm_penalty_alpha": 0.0,
       "normalize": false,
       "reward_mixing": {
         "enabled": false
