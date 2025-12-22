@@ -895,6 +895,7 @@ class NCS_Env(gym.Env):
 
                 # Collect error rewards for each agent
                 for i in range(self.n_agents):
+                    action = actions[f"agent_{i}"]
                     # Get current state error
                     x = self.plants[i].x  # Plant state is stored in .x attribute
                     curr_error = self._compute_state_error(x)
@@ -909,7 +910,19 @@ class NCS_Env(gym.Env):
                         # Just use the actual reward value
                         error_reward = rewards[f"agent_{i}"]
 
-                    collected_rewards.append(error_reward)
+                    comm_penalty = 0.0
+                    if not self.perfect_communication and action == 1:
+                        penalty_alpha = (
+                            definition.comm_penalty_alpha
+                            if definition.mode not in {"simple", "simple_penalty"}
+                            else definition.simple_comm_penalty_alpha
+                        )
+                        if penalty_alpha > 0:
+                            recent_tx = self._recent_transmission_count(i)
+                            throughput_estimate = self._compute_agent_throughput(i)
+                            comm_penalty = penalty_alpha * (recent_tx / throughput_estimate)
+
+                    collected_rewards.append(error_reward - comm_penalty)
                     prev_errors[i] = curr_error
 
                 if all(terminated.values()) or all(truncated.values()):
@@ -934,17 +947,17 @@ class NCS_Env(gym.Env):
         self,
         definition_idx: int,
         agent_idx: int,
-        error_reward: float,
+        reward_value: float,
     ) -> float:
         if self._running_reward_returns is None:
-            return error_reward
+            return reward_value
         returns = self._running_reward_returns[definition_idx]
-        returns[agent_idx] = self.reward_normalization_gamma * returns[agent_idx] + error_reward
+        returns[agent_idx] = self.reward_normalization_gamma * returns[agent_idx] + reward_value
         normalizer = self.reward_definitions[definition_idx].normalizer
         if isinstance(normalizer, RunningRewardNormalizer):
             normalizer.update(returns[agent_idx])
-            return normalizer(error_reward)
-        return error_reward
+            return normalizer(reward_value)
+        return reward_value
 
     def _compute_reward_for_definition(
         self,
@@ -987,15 +1000,13 @@ class NCS_Env(gym.Env):
                 age_steps = max(0, int(message_age_steps or 0))
                 error_reward = float(np.exp(-float(definition.simple_freshness_decay) * float(age_steps)))
 
-        # Apply normalization to error_reward if configured
-        # This normalizes unbounded rewards (absolute, difference) while leaving
-        # bounded rewards (simple, simple_penalty) unchanged
-        if isinstance(definition.normalizer, RunningRewardNormalizer):
-            error_reward = self._apply_running_normalization(definition_idx, agent_idx, error_reward)
-        elif definition.normalizer is not None:
-            error_reward = definition.normalizer(error_reward)
-
         reward_value = float(error_reward - comm_penalty)
+
+        # Apply normalization to full reward if configured
+        if isinstance(definition.normalizer, RunningRewardNormalizer):
+            reward_value = self._apply_running_normalization(definition_idx, agent_idx, reward_value)
+        elif definition.normalizer is not None:
+            reward_value = definition.normalizer(reward_value)
         components: Dict[str, float] = {
             "prev_error": float(prev_error),
             "curr_error": float(curr_error),
