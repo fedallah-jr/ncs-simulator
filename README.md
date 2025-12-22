@@ -28,8 +28,12 @@ The configuration file is divided into sections; each key controls a specific as
 - `comm_penalty_alpha`: Scalar multiplier (`α`) used in the communication penalty `R_{a,\text{comm}} = -α * N_\text{recent}/T`, applied only when `action=1` and the network is not set to `perfect_communication`.
 - `simple_comm_penalty_alpha`: Optional override for `"simple"` and `"simple_penalty"` reward modes. Set to `0` to keep no comm penalty in those modes; otherwise the same penalty formula applies.
 - `simple_freshness_decay`: Exponential freshness decay rate for `"simple"` reward mode (default `0.0`). When a measurement is delivered, the base reward becomes `exp(-simple_freshness_decay * age_steps)`, where `age_steps` is the measurement staleness in environment steps.
+- `normalize`: Optional flag for reward normalization in multi-agent runs. For standalone rewards (no mixing), this controls whether the base error reward is normalized.
+- `normalization_type`: `"fixed"` (default) or `"running"` for multi-agent reward normalization. Fixed computes stats from random rollouts; running updates stats online (VecNormalize-like).
+- `normalization_episodes`: Episode count for fixed normalization statistics (default `30`).
+- `normalization_gamma`: Discount factor for running normalization returns (default `0.99`).
 - `comm_throughput_floor`: Small positive value to keep the throughput estimate from collapsing to zero when no ACKs have been observed recently.
-- `reward_mixing`: Optional curriculum block (default disabled). Provide two reward configs under `rewards` (each accepts `state_error_reward`, `comm_penalty_alpha`, `simple_comm_penalty_alpha`, `simple_freshness_decay`) and a `scheduler` (`type`: `"linear"`, `"cosine"`, or `"constant"`, plus `start_value`, `end_value`, `total_steps`). The environment mixes rewards as `(1-w)*r0 + w*r1`, where `w` follows the scheduler built in `utils/schedulers.py` and advances with the per-environment step counter (it persists across episodes for that env instance).
+- `reward_mixing`: Optional curriculum block (default disabled). Provide two reward configs under `rewards` (each accepts `state_error_reward`, `comm_penalty_alpha`, `simple_comm_penalty_alpha`, `simple_freshness_decay`, `normalize`) and a `scheduler` (`type`: `"linear"`, `"cosine"`, or `"constant"`, plus `start_value`, `end_value`, `total_steps`). The environment mixes rewards as `(1-w)*r0 + w*r1`, where `w` follows the scheduler built in `utils/schedulers.py` and advances with the per-environment step counter (it persists across episodes for that env instance).
   - Example:
     ```json
     "reward": {

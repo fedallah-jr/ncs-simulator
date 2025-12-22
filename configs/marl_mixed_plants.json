@@ -24,11 +24,12 @@
     "comm_throughput_window": 200,
     "comm_penalty_alpha": 0.01,
     "comm_throughput_floor": 0.001,
+    "normalization_type": "running",
     "reward_mixing": {
       "enabled": true,
       "rewards": [
         { "state_error_reward": "simple_penalty", "simple_comm_penalty_alpha": 0.0 },
-        { "state_error_reward": "absolute" }
+        { "state_error_reward": "absolute", "normalize": true }
       ],
       "scheduler": {
         "type": "linear",

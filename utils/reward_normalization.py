@@ -25,6 +25,31 @@ class ZScoreRewardNormalizer:
         return self.scale * (reward - self.mean) / denom
 
 
+# VecNormalize-like running normalization (tracks return variance, scales reward).
+@dataclass
+class RunningRewardNormalizer:
+    mean: float = 0.0
+    m2: float = 0.0
+    count: int = 0
+    eps: float = 1e-8
+
+    def update(self, value: float) -> None:
+        self.count += 1
+        delta = value - self.mean
+        self.mean += delta / self.count
+        delta2 = value - self.mean
+        self.m2 += delta * delta2
+
+    @property
+    def std(self) -> float:
+        if self.count < 2:
+            return 1.0
+        return max(float(np.sqrt(self.m2 / self.count)), self.eps)
+
+    def __call__(self, reward: float) -> float:
+        return reward / self.std
+
+
 # Backward-compatible alias
 RewardNormalizer = ZScoreRewardNormalizer
 
@@ -45,7 +70,7 @@ def _sample_random_action(action_space: spaces.Space, rng: np.random.Generator):
 def compute_reward_normalizer(
     make_env: Callable[[], Any],
     *,
-    episodes: int = 10,
+    episodes: int = 30,
     max_steps: Optional[int] = None,
     seed: Optional[int] = None,
 ) -> ZScoreRewardNormalizer:
