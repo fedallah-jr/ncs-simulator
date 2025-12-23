@@ -58,6 +58,15 @@ def _q_values(agent: nn.Module, obs: torch.Tensor, n_agents: int, n_actions: int
     raise TypeError("agent must be an MLPAgent (shared) or nn.ModuleList (independent)")
 
 
+def _make_optimizer(
+    params, lr: float, optimizer_type: str = "adam", rmsprop_alpha: float = 0.99, rmsprop_eps: float = 1e-5
+) -> torch.optim.Optimizer:
+    """Create optimizer based on type. RMSprop uses PyMARL defaults."""
+    if optimizer_type == "rmsprop":
+        return torch.optim.RMSprop(params, lr=lr, alpha=rmsprop_alpha, eps=rmsprop_eps)
+    return torch.optim.Adam(params, lr=lr)
+
+
 class IQLLearner:
     def __init__(
         self,
@@ -71,6 +80,7 @@ class IQLLearner:
         use_agent_id: bool = True,
         double_q: bool = True,
         device: Optional[torch.device] = None,
+        optimizer_type: str = "adam",
     ) -> None:
         self.agent = agent
         self.target_agent = copy.deepcopy(agent)
@@ -87,7 +97,7 @@ class IQLLearner:
         self.agent.to(self.device)
         self.target_agent.to(self.device)
 
-        self.optimizer = torch.optim.Adam(self.agent.parameters(), lr=float(lr))
+        self.optimizer = _make_optimizer(self.agent.parameters(), lr=float(lr), optimizer_type=optimizer_type)
         self.train_steps = 0
 
     def _maybe_append_id(self, obs: torch.Tensor) -> torch.Tensor:
@@ -148,7 +158,7 @@ class VDNLearner:
         use_agent_id: bool = True,
         double_q: bool = True,
         device: Optional[torch.device] = None,
-        team_reward: str = "sum",
+        optimizer_type: str = "adam",
     ) -> None:
         self.agent = agent
         self.target_agent = copy.deepcopy(agent)
@@ -163,9 +173,6 @@ class VDNLearner:
         self.grad_clip_norm = grad_clip_norm
         self.use_agent_id = bool(use_agent_id)
         self.double_q = bool(double_q)
-        if team_reward not in {"sum", "mean"}:
-            raise ValueError("team_reward must be 'sum' or 'mean'")
-        self.team_reward = team_reward
 
         self.device = device if device is not None else torch.device("cpu")
         self.agent.to(self.device)
@@ -173,7 +180,7 @@ class VDNLearner:
         self.mixer.to(self.device)
         self.target_mixer.to(self.device)
 
-        self.optimizer = torch.optim.Adam(self.agent.parameters(), lr=float(lr))
+        self.optimizer = _make_optimizer(self.agent.parameters(), lr=float(lr), optimizer_type=optimizer_type)
         self.train_steps = 0
 
     def _maybe_append_id(self, obs: torch.Tensor) -> torch.Tensor:
@@ -203,7 +210,7 @@ class VDNLearner:
                 next_q = target_next_q.max(dim=-1).values
 
             next_q_tot = self.target_mixer(next_q).squeeze(-1)
-            r_tot = rewards.sum(dim=1) if self.team_reward == "sum" else rewards.mean(dim=1)
+            r_tot = rewards.sum(dim=1)  # VDN always sums rewards (Q_tot = sum of Q_i)
             not_done = (1.0 - dones)
             targets = r_tot + self.gamma * not_done * next_q_tot
 
@@ -238,7 +245,7 @@ class QMIXLearner:
         use_agent_id: bool = True,
         double_q: bool = True,
         device: Optional[torch.device] = None,
-        team_reward: str = "sum",
+        optimizer_type: str = "rmsprop",  # RMSprop default matches PyMARL
     ) -> None:
         self.agent = agent
         self.target_agent = copy.deepcopy(agent)
@@ -253,9 +260,6 @@ class QMIXLearner:
         self.grad_clip_norm = grad_clip_norm
         self.use_agent_id = bool(use_agent_id)
         self.double_q = bool(double_q)
-        if team_reward not in {"sum", "mean"}:
-            raise ValueError("team_reward must be 'sum' or 'mean'")
-        self.team_reward = team_reward
 
         self.device = device if device is not None else torch.device("cpu")
         self.agent.to(self.device)
@@ -263,7 +267,8 @@ class QMIXLearner:
         self.mixer.to(self.device)
         self.target_mixer.to(self.device)
 
-        self.optimizer = torch.optim.Adam(list(self.agent.parameters()) + list(self.mixer.parameters()), lr=float(lr))
+        params = list(self.agent.parameters()) + list(self.mixer.parameters())
+        self.optimizer = _make_optimizer(params, lr=float(lr), optimizer_type=optimizer_type)
         self.train_steps = 0
 
     def _maybe_append_id(self, obs: torch.Tensor) -> torch.Tensor:
@@ -295,7 +300,7 @@ class QMIXLearner:
                 next_q = target_next_q.max(dim=-1).values
 
             next_q_tot = self.target_mixer(next_q, next_states).squeeze(-1)
-            r_tot = rewards.sum(dim=1) if self.team_reward == "sum" else rewards.mean(dim=1)
+            r_tot = rewards.sum(dim=1)  # QMIX uses team reward sum
             not_done = (1.0 - dones)
             targets = r_tot + self.gamma * not_done * next_q_tot
 

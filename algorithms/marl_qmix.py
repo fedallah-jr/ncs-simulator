@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-update-interval", type=int, default=500, help="Hard target update interval (steps).")
     parser.add_argument("--grad-clip-norm", type=float, default=10.0, help="Gradient clipping L2 norm.")
     parser.add_argument("--double-q", action="store_true", help="Use Double DQN targets.")
-    parser.add_argument("--team-reward", type=str, default="sum", choices=["sum", "mean"], help="Team reward aggregation.")
+    parser.add_argument("--optimizer", type=str, default="rmsprop", choices=["adam", "rmsprop"], help="Optimizer (rmsprop matches PyMARL).")
 
     parser.add_argument("--epsilon-start", type=float, default=1.0, help="Initial epsilon.")
     parser.add_argument("--epsilon-end", type=float, default=0.05, help="Final epsilon.")
@@ -149,7 +149,7 @@ def main() -> None:
         use_agent_id=use_agent_id,
         double_q=args.double_q,
         device=device,
-        team_reward=args.team_reward,
+        optimizer_type=args.optimizer,
     )
     buffer = MARLReplayBuffer(
         capacity=args.buffer_size,
@@ -177,7 +177,6 @@ def main() -> None:
             "agent_hidden_dims": list(args.hidden_dims),
             "agent_activation": args.activation,
             "agent_layer_norm": args.layer_norm,
-            "team_reward": args.team_reward,
             "mixer_hidden_dim": args.mixer_hidden_dim,
             "hypernet_hidden_dim": args.hypernet_hidden_dim,
             "mixer_state_dict": learner.mixer.state_dict(),
@@ -219,14 +218,18 @@ def main() -> None:
                 next_obs_dict, rewards_dict, terminated, truncated, _infos = env.step(action_dict)
                 next_obs = stack_obs(next_obs_dict, n_agents)
                 rewards = np.asarray([rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32)
-                done = any(terminated[f"agent_{i}"] or truncated[f"agent_{i}"] for i in range(n_agents))
+                # Distinguish termination (true end) from truncation (time limit)
+                # Only terminated should zero out bootstrap; truncated should still bootstrap
+                term = any(terminated[f"agent_{i}"] for i in range(n_agents))
+                trunc = any(truncated[f"agent_{i}"] for i in range(n_agents))
+                done = term or trunc  # For episode reset logic
 
                 buffer.add(
                     obs=obs,
                     actions=actions.astype(np.int64),
                     rewards=rewards,
                     next_obs=next_obs,
-                    done=done,
+                    done=term,  # Store only terminated for correct bootstrapping
                 )
 
                 episode_reward_sum += float(rewards.sum())
@@ -283,7 +286,7 @@ def main() -> None:
         "target_update_interval": args.target_update_interval,
         "grad_clip_norm": args.grad_clip_norm,
         "double_q": args.double_q,
-        "team_reward": args.team_reward,
+        "optimizer": args.optimizer,
         "epsilon_start": args.epsilon_start,
         "epsilon_end": args.epsilon_end,
         "epsilon_decay_steps": args.epsilon_decay_steps,
