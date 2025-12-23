@@ -60,8 +60,5 @@
     "ack_packet_size": 2,
     "max_queue_size": 1,
     "perfect_communication": false
-  },
-  "controller": {
-    "use_kalman_filter": true
   }
 }

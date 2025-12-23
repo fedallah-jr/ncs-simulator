@@ -166,9 +166,6 @@ class NCS_Env(gym.Env):
         # (For finite-horizon, this will be the list of gains; for infinite-horizon, a single matrix)
         self.K = self.K_list[0]
 
-        controller_cfg = self.config.get("controller", {})
-        self.use_kalman_filter = bool(controller_cfg.get("use_kalman_filter", True))
-
         base_reward_cfg = self.config.get("reward", {})
         reward_cfg = self._merge_reward_override(base_reward_cfg, self.reward_override)
         self.reward_normalization_type = str(reward_cfg.get("normalization_type", "fixed")).lower()
@@ -344,9 +341,8 @@ class NCS_Env(gym.Env):
 
         # Store prior for each controller at current state index
         # This enables delayed measurement handling in network mode
-        if self.use_kalman_filter:
-            for i in range(self.n_agents):
-                self.controllers[i].store_prior(state_index)
+        for i in range(self.n_agents):
+            self.controllers[i].store_prior(state_index)
 
         # Kalman filter measurement update (conditionally, based on packet delivery)
         # Note: predict() is called AFTER plant update to maintain correct timing
@@ -359,8 +355,7 @@ class NCS_Env(gym.Env):
                 if action == 1:
                     state = self.plants[i].get_state()
                     measurement = state + self._sample_measurement_noise()
-                    if self.use_kalman_filter:
-                        self.controllers[i].update(measurement)
+                    self.controllers[i].update(measurement)
                     self.last_measurements[i] = measurement
                     self._record_decision(i, status=1)
                     # Use state_index for consistency (though _log_successful_comm
@@ -403,8 +398,7 @@ class NCS_Env(gym.Env):
                     measurement_timestamp = packet.payload["timestamp"]
                     age_steps = max(0, int(state_index - int(measurement_timestamp)))
 
-                    if self.use_kalman_filter:
-                        self.controllers[controller_id].delayed_update(measurement, measurement_timestamp)
+                    self.controllers[controller_id].delayed_update(measurement, measurement_timestamp)
                     self.last_measurements[controller_id] = measurement
                     delivered_controller_ids.add(controller_id)
                     existing_age = delivered_message_ages.get(controller_id)
@@ -437,18 +431,14 @@ class NCS_Env(gym.Env):
 
         # Compute control and update plants
         for i in range(self.n_agents):
-            if self.use_kalman_filter:
-                u = self.controllers[i].compute_control()
-            else:
-                u = -self.K_list[i] @ self.last_measurements[i]
+            u = self.controllers[i].compute_control()
             self.plants[i].step(u)
 
         # Kalman filter time update (predict) - done AFTER plant update
         # This propagates estimates forward using dynamics and the control just applied
         # Prepares x_hat[k|k-1] for the next timestep's measurement update
-        if self.use_kalman_filter:
-            for i in range(self.n_agents):
-                self.controllers[i].predict()
+        for i in range(self.n_agents):
+            self.controllers[i].predict()
 
         mix_weight = self._current_mix_weight()
         rewards = {}
@@ -1074,10 +1064,7 @@ class NCS_Env(gym.Env):
             "timestep": self.timestep,
             "channel_state": "PERFECT" if self.perfect_communication else self.network.channel_state.name,
             "states": [plant.get_state() for plant in self.plants],
-            "estimates": [
-                controller.x_hat.copy() if self.use_kalman_filter else self.last_measurements[idx].copy()
-                for idx, controller in enumerate(self.controllers)
-            ],
+            "estimates": [controller.x_hat.copy() for controller in self.controllers],
             "throughput_kbps": 0.0 if self.perfect_communication else self._compute_throughput(),
             "collided_packets": 0 if self.perfect_communication else self.network.total_collided_packets,
             "reward_components": {k: v.copy() for k, v in self.last_reward_components.items()},
