@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 
-from utils.marl.networks import MLPAgent, append_agent_id
+from utils.marl.networks import MLPAgent, DuelingMLPAgent, append_agent_id
 
 
 def select_device(device_str: str) -> torch.device:
@@ -40,7 +40,7 @@ def stack_obs(obs_dict: Dict[str, Any], n_agents: int) -> np.ndarray:
 
 @torch.no_grad()
 def select_actions(
-    agent: Union[MLPAgent, Sequence[MLPAgent]],
+    agent: Union[MLPAgent, DuelingMLPAgent, Sequence[Union[MLPAgent, DuelingMLPAgent]]],
     obs: np.ndarray,
     n_agents: int,
     n_actions: int,
@@ -69,7 +69,7 @@ def select_actions(
     if use_agent_id:
         obs_t = append_agent_id(obs_t, n_agents)
 
-    if isinstance(agent, MLPAgent):
+    if isinstance(agent, (MLPAgent, DuelingMLPAgent)):
         q = agent(obs_t.view(n_agents, -1))
     else:
         if len(agent) != n_agents:

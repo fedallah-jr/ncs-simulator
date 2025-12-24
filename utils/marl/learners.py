@@ -9,7 +9,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from utils.marl.buffer import MARLBatch
-from utils.marl.networks import MLPAgent, QMixer, VDNMixer, append_agent_id
+from utils.marl.networks import MLPAgent, DuelingMLPAgent, QMixer, VDNMixer, append_agent_id
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,7 @@ def _q_values(agent: nn.Module, obs: torch.Tensor, n_agents: int, n_actions: int
         raise ValueError("obs must have shape (batch, n_agents, input_dim)")
     batch_size = obs.shape[0]
 
-    if isinstance(agent, MLPAgent):
+    if isinstance(agent, (MLPAgent, DuelingMLPAgent)):
         obs_flat = obs.view(batch_size * n_agents, -1)
         return agent(obs_flat).view(batch_size, n_agents, n_actions)
 
@@ -55,7 +55,7 @@ def _q_values(agent: nn.Module, obs: torch.Tensor, n_agents: int, n_actions: int
             q_per_agent.append(q_i)
         return torch.cat(q_per_agent, dim=1)
 
-    raise TypeError("agent must be an MLPAgent (shared) or nn.ModuleList (independent)")
+    raise TypeError("agent must be an MLPAgent/DuelingMLPAgent (shared) or nn.ModuleList (independent)")
 
 
 def _make_optimizer(

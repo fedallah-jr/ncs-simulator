@@ -86,6 +86,13 @@ Learning-based baselines live under `algorithms/`:
 - VDN (multi-agent, PyTorch): `python -m algorithms.marl_vdn --config configs/marl_mixed_plants.json --total-timesteps 200000`
 - QMIX (multi-agent, PyTorch): `python -m algorithms.marl_qmix --config configs/marl_mixed_plants.json --total-timesteps 200000`
 
+All MARL Q-learning algorithms (IQL, VDN, QMIX) support these architectural enhancements:
+- `--double-q`: Enable Double DQN (use online network to select actions, target network to evaluate).
+- `--dueling`: Enable Dueling DQN architecture (separate value and advantage streams).
+- `--stream-hidden-dim`: Hidden dimension for dueling streams (default: 64).
+
+Example with all enhancements: `python -m algorithms.marl_qmix --config configs/marl_mixed_plants.json --dueling --double-q --total-timesteps 200000`
+
 SB3 baselines automatically honor `reward.reward_mixing` (curriculum reward blending) when enabled in the config; the OpenAI-ES baseline can continue to use the single reward definition.
 
 CLI flags let you change environment parameters. Use `--output-root` (defaults to `outputs/`) to control where training artifacts land. Each run calls `utils.run_utils.prepare_run_directory(...)`, which creates a uniquely named folder that encodes the algorithm and key config values (noise level, initial-state scale, reward mode, etc.) plus an incrementing `run#` suffix. That directory always contains:

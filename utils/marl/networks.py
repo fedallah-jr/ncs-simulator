@@ -67,6 +67,76 @@ class MLPAgent(nn.Module):
         return self.net(obs)
 
 
+class DuelingMLPAgent(nn.Module):
+    """
+    Dueling DQN architecture that separates Q-values into value and advantage streams.
+
+    Q(s,a) = V(s) + (A(s,a) - mean(A(s,:)))
+
+    References:
+        Wang et al., "Dueling Network Architectures for Deep Reinforcement Learning"
+        https://arxiv.org/abs/1511.06581
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        n_actions: int,
+        hidden_dims: Sequence[int] = (128, 128),
+        stream_hidden_dim: int = 64,
+        activation: str = "relu",
+        layer_norm: bool = False,
+    ) -> None:
+        super().__init__()
+        if input_dim <= 0 or n_actions <= 0:
+            raise ValueError("input_dim and n_actions must be positive")
+        if not hidden_dims:
+            raise ValueError("hidden_dims must be non-empty")
+
+        act_fn: type[nn.Module]
+        if activation == "relu":
+            act_fn = nn.ReLU
+        elif activation == "tanh":
+            act_fn = nn.Tanh
+        elif activation == "elu":
+            act_fn = nn.ELU
+        else:
+            raise ValueError("activation must be one of: relu, tanh, elu")
+
+        # Shared feature extractor
+        feature_layers: list[nn.Module] = []
+        last_dim = input_dim
+        for hidden_dim in hidden_dims:
+            feature_layers.append(nn.Linear(last_dim, int(hidden_dim)))
+            if layer_norm:
+                feature_layers.append(nn.LayerNorm(int(hidden_dim)))
+            feature_layers.append(act_fn())
+            last_dim = int(hidden_dim)
+        self.features = nn.Sequential(*feature_layers)
+
+        # Value stream: outputs V(s) scalar
+        self.value_stream = nn.Sequential(
+            nn.Linear(last_dim, stream_hidden_dim),
+            act_fn(),
+            nn.Linear(stream_hidden_dim, 1),
+        )
+
+        # Advantage stream: outputs A(s,a) for each action
+        self.advantage_stream = nn.Sequential(
+            nn.Linear(last_dim, stream_hidden_dim),
+            act_fn(),
+            nn.Linear(stream_hidden_dim, n_actions),
+        )
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        features = self.features(obs)
+        value = self.value_stream(features)  # [batch, 1]
+        advantage = self.advantage_stream(features)  # [batch, n_actions]
+        # Combine with mean subtraction for identifiability
+        q = value + (advantage - advantage.mean(dim=-1, keepdim=True))
+        return q
+
+
 class VDNMixer(nn.Module):
     def __init__(self) -> None:
         super().__init__()

@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from ncs_env.config import load_config
 from ncs_env.env import NCS_Env
-from utils.marl import MARLReplayBuffer, IQLLearner, MLPAgent, run_evaluation
+from utils.marl import MARLReplayBuffer, IQLLearner, MLPAgent, DuelingMLPAgent, run_evaluation
 from utils.marl.common import select_device, epsilon_by_step, stack_obs, select_actions
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
@@ -48,6 +48,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[128, 128], help="MLP hidden dims.")
     parser.add_argument("--activation", type=str, default="relu", choices=["relu", "tanh", "elu"], help="Activation.")
     parser.add_argument("--layer-norm", action="store_true", help="Enable LayerNorm in MLP.")
+    parser.add_argument("--dueling", action="store_true", help="Use Dueling DQN architecture (separate V and A streams).")
+    parser.add_argument("--stream-hidden-dim", type=int, default=64, help="Hidden dim for dueling value/advantage streams.")
     parser.add_argument("--no-agent-id", action="store_true", help="Disable appending one-hot agent id.")
     parser.add_argument(
         "--independent-agents",
@@ -106,27 +108,22 @@ def main() -> None:
     n_actions = int(env.action_space.spaces["agent_0"].n)
     input_dim = obs_dim + (n_agents if use_agent_id else 0)
 
+    # Select network class based on --dueling flag
+    AgentClass = DuelingMLPAgent if args.dueling else MLPAgent
+    agent_kwargs = {
+        "input_dim": input_dim,
+        "n_actions": n_actions,
+        "hidden_dims": tuple(args.hidden_dims),
+        "activation": args.activation,
+        "layer_norm": args.layer_norm,
+    }
+    if args.dueling:
+        agent_kwargs["stream_hidden_dim"] = args.stream_hidden_dim
+
     if args.independent_agents:
-        agent = torch.nn.ModuleList(
-            [
-                MLPAgent(
-                    input_dim=input_dim,
-                    n_actions=n_actions,
-                    hidden_dims=tuple(args.hidden_dims),
-                    activation=args.activation,
-                    layer_norm=args.layer_norm,
-                )
-                for _ in range(n_agents)
-            ]
-        )
+        agent = torch.nn.ModuleList([AgentClass(**agent_kwargs) for _ in range(n_agents)])
     else:
-        agent = MLPAgent(
-            input_dim=input_dim,
-            n_actions=n_actions,
-            hidden_dims=tuple(args.hidden_dims),
-            activation=args.activation,
-            layer_norm=args.layer_norm,
-        )
+        agent = AgentClass(**agent_kwargs)
     learner = IQLLearner(
         agent=agent,
         n_agents=n_agents,
@@ -165,6 +162,8 @@ def main() -> None:
             "agent_hidden_dims": list(args.hidden_dims),
             "agent_activation": args.activation,
             "agent_layer_norm": args.layer_norm,
+            "dueling": args.dueling,
+            "stream_hidden_dim": args.stream_hidden_dim if args.dueling else None,
         }
         if args.independent_agents:
             ckpt["agent_state_dicts"] = [net.state_dict() for net in learner.agent]  # type: ignore[union-attr]
@@ -278,6 +277,8 @@ def main() -> None:
         "hidden_dims": list(args.hidden_dims),
         "activation": args.activation,
         "layer_norm": args.layer_norm,
+        "dueling": args.dueling,
+        "stream_hidden_dim": args.stream_hidden_dim,
         "use_agent_id": use_agent_id,
         "independent_agents": args.independent_agents,
         "eval_freq": args.eval_freq,
