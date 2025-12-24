@@ -84,7 +84,7 @@ def main() -> None:
         except Exception:
             eval_reward_override = None
 
-    run_dir, metadata = prepare_run_directory("ppo", args.config, args.output_root)
+    run_dir = prepare_run_directory("ppo", args.config, args.output_root)
 
     def env_fn():
         env = make_ncs_single_env(config_path_str, args.episode_length, args.seed)

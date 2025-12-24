@@ -87,7 +87,7 @@ def main() -> None:
     if isinstance(eval_reward_cfg, dict):
         eval_reward_override = eval_reward_cfg
 
-    run_dir, _metadata = prepare_run_directory("qmix", args.config, args.output_root)
+    run_dir = prepare_run_directory("qmix", args.config, args.output_root)
     rewards_csv_path = run_dir / "training_rewards.csv"
     eval_csv_path = run_dir / "evaluation_rewards.csv"
 

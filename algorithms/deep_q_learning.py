@@ -82,7 +82,7 @@ def main() -> None:
         except Exception:
             eval_reward_override = None
 
-    run_dir, metadata = prepare_run_directory("dqn", args.config, args.output_root)
+    run_dir = prepare_run_directory("dqn", args.config, args.output_root)
 
     def env_builder():
         def factory():

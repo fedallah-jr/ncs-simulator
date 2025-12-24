@@ -95,7 +95,7 @@ Example with all enhancements: `python -m algorithms.marl_qmix --config configs/
 
 SB3 baselines automatically honor `reward.reward_mixing` (curriculum reward blending) when enabled in the config; the OpenAI-ES baseline can continue to use the single reward definition.
 
-CLI flags let you change environment parameters. Use `--output-root` (defaults to `outputs/`) to control where training artifacts land. Each run calls `utils.run_utils.prepare_run_directory(...)`, which creates a uniquely named folder that encodes the algorithm and key config values (noise level, initial-state scale, reward mode, etc.) plus an incrementing `run#` suffix. That directory always contains:
+CLI flags let you change environment parameters. Use `--output-root` (defaults to `outputs/`) to control where training artifacts land. Each run calls `utils.run_utils.prepare_run_directory(...)`, which creates a sequentially numbered folder for the algorithm (e.g., `iql_0`, `iql_1`, `vdn_0`, etc.). All training details are preserved in the saved config file. That directory always contains:
 
 - **Model Checkpoints:**
   - For SB3 (PPO/DQN): `best_model.zip`, `latest_model.zip`, and `evaluations.npz` (from `EvalCallback`).
@@ -136,14 +136,20 @@ The `config.json` file saved in each run directory preserves the complete enviro
       "learning_rate": 0.001,
       "gamma": 0.99,
       "batch_size": 64,
+      "double_q": false,
+      "dueling": false,
+      "optimizer": "adam",
       ...
     }
   }
 }
 ```
 
+**Important:** Input config files (e.g., `configs/marl_mixed_plants.json`) contain only environment settings (`system`, `lqr`, `reward`, etc.). Training hyperparameters like `double_q`, `learning_rate`, `optimizer` are specified via CLI arguments and saved to the output `config.json` for record-keeping. The `training_run` section is not read from input configs.
+
 This format allows you to:
-- Reproduce the exact run by loading `config.json`
+- Reproduce the exact run by inspecting the saved `config.json`
 - Pass it directly to visualization or analysis tools
 - Track which config file was used as the base
 - Compare hyperparameters across different runs programmatically
+- Distinguish between experiments (e.g., `iql_0` vs `iql_1`) by checking their saved hyperparameters

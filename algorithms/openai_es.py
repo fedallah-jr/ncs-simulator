@@ -369,7 +369,7 @@ def train(args):
         )
 
     # 5. Logging Setup
-    run_dir, _metadata = prepare_run_directory("openai_es", args.config, args.output_root)
+    run_dir = prepare_run_directory("openai_es", args.config, args.output_root)
     (run_dir / "checkpoints").mkdir(exist_ok=True)
     
     rewards_file = run_dir / "training_rewards.csv"

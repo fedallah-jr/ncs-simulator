@@ -303,7 +303,7 @@ def train_once(
     repeat_index: int,
 ) -> Dict[str, object]:
     """Train a single run with sampled hyperparameters."""
-    run_dir, _ = prepare_run_directory(algo, config_path, args.output_root)
+    run_dir = prepare_run_directory(algo, config_path, args.output_root)
     cfg_path_str = str(config_path)
 
     train_env, eval_env = build_envs(cfg_path_str, args.episode_length, run_seed, args.normalize_reward)
