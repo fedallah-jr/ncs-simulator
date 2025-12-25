@@ -50,7 +50,8 @@
   },
   "termination": {
     "enabled": true,
-    "state_error_max": 100.0
+    "state_error_max": 1000.0,
+    "penalty": -5000.0
   },
   "observation": {
     "history_window": 10,

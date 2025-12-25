@@ -54,7 +54,9 @@ With these fields the environment discourages bursts of transmissions in congest
 ### `termination`
 - `enabled`: End the episode early when any agent exceeds `state_error_max`.
 - `state_error_max`: Threshold on `x^T Q x` using `reward.state_cost_matrix`. Any agent crossing it terminates the episode for all agents (use larger values when `Q` scales the error more aggressively).
+- `penalty`: Extra reward added when early termination is triggered by `state_error_max` or non-finite errors (default `0.0`; use a negative value to discourage failures).
 - Non-finite state errors always terminate to avoid NaNs/infs.
+- The `info` dict includes `termination_reasons`, `termination_agents`, and `bad_termination` for logging/analysis.
 
 ### `observation`
 - `history_window`: Number of past steps included for statuses and throughput history.

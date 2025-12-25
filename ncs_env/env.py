@@ -207,6 +207,7 @@ class NCS_Env(gym.Env):
             if self.termination_error_max is None:
                 raise ValueError("termination.enabled requires termination.state_error_max")
             self.termination_error_max = float(self.termination_error_max)
+        self.termination_penalty = float(termination_cfg.get("penalty", 0.0))
 
         self.plants: List[Plant] = []
         for i in range(self.n_agents):
@@ -307,6 +308,9 @@ class NCS_Env(gym.Env):
             for i in range(self.n_agents)
         }
         self.last_errors: List[float] = [0.0 for _ in range(self.n_agents)]
+        self.last_termination_reasons: List[str] = []
+        self.last_termination_agents: List[int] = []
+        self.last_bad_termination = False
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None):
         """Reset environment to initial state."""
@@ -460,6 +464,8 @@ class NCS_Env(gym.Env):
         mix_weight = self._current_mix_weight()
         rewards = {}
         termination_triggered = False
+        termination_reasons: List[str] = []
+        termination_agents: List[int] = []
         termination_error_max = self.termination_error_max if self.termination_enabled else None
         for i in range(self.n_agents):
             x = self.plants[i].get_state()
@@ -469,6 +475,8 @@ class NCS_Env(gym.Env):
             curr_error = raw_error
             if not np.isfinite(raw_error):
                 termination_triggered = True
+                termination_reasons.append("non_finite")
+                termination_agents.append(i)
                 curr_error = (
                     float(termination_error_max)
                     if termination_error_max is not None
@@ -476,6 +484,8 @@ class NCS_Env(gym.Env):
                 )
             elif termination_error_max is not None and raw_error >= termination_error_max:
                 termination_triggered = True
+                termination_reasons.append("state_error_max")
+                termination_agents.append(i)
                 curr_error = float(termination_error_max)
             info_arrived = i in delivered_controller_ids
             message_age_steps = delivered_message_ages.get(i) if info_arrived else None
@@ -527,6 +537,14 @@ class NCS_Env(gym.Env):
             stats["count"] += 1
             self.last_errors[i] = curr_error
 
+        if termination_triggered and self.termination_penalty != 0.0:
+            for i in range(self.n_agents):
+                agent_key = f"agent_{i}"
+                rewards[agent_key] += self.termination_penalty
+                self.last_reward_components[agent_key]["termination_penalty"] = float(
+                    self.termination_penalty
+                )
+
         self.last_mix_weight = mix_weight
         self.total_env_steps += 1
 
@@ -540,6 +558,22 @@ class NCS_Env(gym.Env):
             f"agent_{i}": time_limit_reached and not (termination_triggered or finite_horizon_terminal)
             for i in range(self.n_agents)
         }
+        if termination_triggered:
+            self.last_termination_reasons = sorted(set(termination_reasons))
+            self.last_termination_agents = sorted(set(termination_agents))
+            self.last_bad_termination = True
+        elif finite_horizon_terminal:
+            self.last_termination_reasons = ["finite_horizon"]
+            self.last_termination_agents = list(range(self.n_agents))
+            self.last_bad_termination = False
+        elif time_limit_reached:
+            self.last_termination_reasons = ["time_limit"]
+            self.last_termination_agents = list(range(self.n_agents))
+            self.last_bad_termination = False
+        else:
+            self.last_termination_reasons = []
+            self.last_termination_agents = []
+            self.last_bad_termination = False
         if self._running_reward_returns is not None:
             for i in range(self.n_agents):
                 agent_key = f"agent_{i}"
@@ -1117,6 +1151,9 @@ class NCS_Env(gym.Env):
             },
             "reward_components": {k: v.copy() for k, v in self.last_reward_components.items()},
             "reward_mix_weight": float(self.last_mix_weight) if self.reward_mixing_enabled else 0.0,
+            "termination_reasons": list(self.last_termination_reasons),
+            "termination_agents": list(self.last_termination_agents),
+            "bad_termination": bool(self.last_bad_termination),
         }
 
     def render(self):
