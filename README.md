@@ -51,6 +51,11 @@ The configuration file is divided into sections; each key controls a specific as
 
 With these fields the environment discourages bursts of transmissions in congested conditions: if an agent spams the channel (large `N_recent_tx`) while the measured throughput is low, the penalty grows rapidly; skipping a send (`action=0`) adds no communication cost. When `perfect_communication=true`, the penalty logic is bypassed entirely.
 
+### `termination`
+- `enabled`: End the episode early when any agent exceeds `state_error_max`.
+- `state_error_max`: Threshold on `x^T Q x` using `reward.state_cost_matrix`. Any agent crossing it terminates the episode for all agents (use larger values when `Q` scales the error more aggressively).
+- Non-finite state errors always terminate to avoid NaNs/infs.
+
 ### `observation`
 - `history_window`: Number of past steps included for statuses and throughput history.
 - `state_history_window`: Number of past states appended to the observation (defaults to `history_window` if omitted).

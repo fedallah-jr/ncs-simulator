@@ -147,9 +147,9 @@ class NCS_Env(gym.Env):
         lqr_R = np.array(lqr_cfg.get("R", np.eye(self.control_dim)))
 
         # Check if finite-horizon LQR is enabled (default: True)
-        use_finite_horizon = bool(lqr_cfg.get("finite_horizon", True))
+        self.finite_horizon_enabled = bool(lqr_cfg.get("finite_horizon", True))
 
-        if use_finite_horizon:
+        if self.finite_horizon_enabled:
             # Compute time-varying gains for finite horizon (uses self.episode_length)
             self.K_list: List[Union[np.ndarray, List[np.ndarray]]] = [
                 compute_finite_horizon_lqr_gains(A_i, B_i, lqr_Q, lqr_R, self.episode_length)
@@ -202,6 +202,14 @@ class NCS_Env(gym.Env):
         self.total_env_steps = 0
         self.last_mix_weight = self._current_mix_weight()
         self._running_reward_returns: Optional[List[List[float]]] = None
+        termination_cfg = self.config.get("termination", {})
+        self.termination_enabled = bool(termination_cfg.get("enabled", False))
+        self.termination_error_max = None
+        if self.termination_enabled:
+            self.termination_error_max = termination_cfg.get("state_error_max", None)
+            if self.termination_error_max is None:
+                raise ValueError("termination.enabled requires termination.state_error_max")
+            self.termination_error_max = float(self.termination_error_max)
 
         self.plants: List[Plant] = []
         for i in range(self.n_agents):
@@ -454,11 +462,24 @@ class NCS_Env(gym.Env):
 
         mix_weight = self._current_mix_weight()
         rewards = {}
+        termination_triggered = False
+        termination_error_max = self.termination_error_max if self.termination_enabled else None
         for i in range(self.n_agents):
             x = self.plants[i].get_state()
             action = actions[f"agent_{i}"]
             prev_error = self.last_errors[i]
-            curr_error = self._compute_state_error(x)
+            raw_error = self._compute_state_error(x)
+            curr_error = raw_error
+            if not np.isfinite(raw_error):
+                termination_triggered = True
+                curr_error = (
+                    float(termination_error_max)
+                    if termination_error_max is not None
+                    else float(prev_error)
+                )
+            elif termination_error_max is not None and raw_error >= termination_error_max:
+                termination_triggered = True
+                curr_error = float(termination_error_max)
             info_arrived = i in delivered_controller_ids
             message_age_steps = delivered_message_ages.get(i) if info_arrived else None
 
@@ -512,9 +533,15 @@ class NCS_Env(gym.Env):
         self.last_mix_weight = mix_weight
         self.total_env_steps += 1
 
-        terminated = {f"agent_{i}": False for i in range(self.n_agents)}
+        time_limit_reached = self.timestep >= self.episode_length
+        finite_horizon_terminal = self.finite_horizon_enabled and time_limit_reached
+        terminated = {
+            f"agent_{i}": termination_triggered or finite_horizon_terminal
+            for i in range(self.n_agents)
+        }
         truncated = {
-            f"agent_{i}": self.timestep >= self.episode_length for i in range(self.n_agents)
+            f"agent_{i}": time_limit_reached and not (termination_triggered or finite_horizon_terminal)
+            for i in range(self.n_agents)
         }
         if self._running_reward_returns is not None:
             for i in range(self.n_agents):

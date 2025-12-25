@@ -37,6 +37,10 @@
       }
     }
   },
+  "termination": {
+    "enabled": true,
+    "state_error_max": 100.0
+  },
   "observation": {
     "history_window": 10,
     "state_history_window": 10,
