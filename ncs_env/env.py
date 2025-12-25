@@ -192,9 +192,6 @@ class NCS_Env(gym.Env):
             base_simple_freshness_decay,
         )
         self.reward_mixing_enabled = bool(reward_mixing_cfg.get("enabled", False)) and len(self.reward_definitions) == 2
-        self.error_reward_mode = self.reward_definitions[0].mode
-        self.comm_penalty_alpha = self.reward_definitions[0].comm_penalty_alpha
-        self.simple_comm_penalty_alpha = self.reward_definitions[0].simple_comm_penalty_alpha
         self.comm_throughput_floor = float(reward_cfg.get("comm_throughput_floor", 1e-3))
         self.reward_scheduler: Optional[Callable[[int], float]] = self._build_reward_scheduler(
             reward_mixing_cfg
