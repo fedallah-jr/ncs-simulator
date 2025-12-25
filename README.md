@@ -111,7 +111,7 @@ Configuration presets live under `configs/`. `configs/perfect_comm.json` mirrors
 Post-training visualization lives in `tools/visualize_policy.py`.
 
 - Single-agent (SB3 / ES / heuristics) visualization: `python -m tools.visualize_policy --config configs/perfect_comm.json --policy outputs/.../best_model.zip --policy-type sb3`
-- True MARL visualization (all agents act): `python -m tools.visualize_policy --config configs/marl_mixed_plants.json --policy outputs/.../best_model.pt --policy-type marl_torch --n-agents 3 --multi-agent --generate-video --per-agent-videos`
+- True MARL visualization (all agents act): `python -m tools.visualize_policy --config configs/marl_mixed_plants.json --policy outputs/.../best_model.pt --policy-type marl_torch --n-agents 3 --generate-video --per-agent-videos`
   - Outputs include a coordination action raster, a combined state-space plot, a summary plot, and optional combined/per-agent MP4s (FFmpeg required).
 
 ### Saved Configuration Format

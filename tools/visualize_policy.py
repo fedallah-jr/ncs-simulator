@@ -14,11 +14,15 @@ Usage:
     # Visualize a heuristic policy
     python -m tools.visualize_policy --config configs/perfect_comm.json --policy always_send --policy-type heuristic
 
-    # Visualize an IQL/VDN/QMIX PyTorch checkpoint (agent_0)
-    python -m tools.visualize_policy --config configs/perfect_comm.json --policy path/to/latest_model.pt --policy-type marl_torch --n-agents 3
+    # Visualize an IQL/VDN/QMIX PyTorch checkpoint (all agents act)
+    python -m tools.visualize_policy --config configs/marl_mixed_plants.json --policy path/to/latest_model.pt --policy-type marl_torch --n-agents 3 --generate-video --per-agent-videos
 
-    # True multi-agent visualization (all agents act from checkpoint)
-    python -m tools.visualize_policy --config configs/marl_mixed_plants.json --policy path/to/latest_model.pt --policy-type marl_torch --n-agents 3 --multi-agent --generate-video --per-agent-videos
+    # Compare MARL vs. always_send (multi-agent)
+    python -m tools.visualize_policy --config configs/marl_mixed_plants.json \
+        --policies path/to/latest_model.pt always_send \
+        --policy-types marl_torch heuristic \
+        --labels "MARL" "Always Send" \
+        --n-agents 3 --generate-video --per-agent-videos
 
     # Compare multiple policies
     python -m tools.visualize_policy --config configs/perfect_comm.json \
@@ -49,6 +53,29 @@ from ncs_env.env import NCS_Env
 from ncs_env.config import load_config
 from utils.wrapper import SingleAgentWrapper
 from tools.heuristic_policies import get_heuristic_policy, HEURISTIC_POLICIES
+
+
+class MultiAgentHeuristicPolicy:
+    def __init__(self, policy_name: str, n_agents: int, seed: Optional[int]) -> None:
+        self.policy_name = policy_name
+        self.n_agents = int(n_agents)
+        self._policies = []
+        for idx in range(self.n_agents):
+            agent_seed = None if seed is None else int(seed) + idx
+            self._policies.append(get_heuristic_policy(policy_name, n_agents=1, seed=agent_seed))
+
+    def reset(self) -> None:
+        for policy in self._policies:
+            if hasattr(policy, "reset"):
+                policy.reset()
+
+    def act(self, obs_dict: Dict[str, np.ndarray]) -> Dict[str, int]:
+        actions: Dict[str, int] = {}
+        for idx in range(self.n_agents):
+            obs = obs_dict[f"agent_{idx}"]
+            action, _ = self._policies[idx].predict(obs, deterministic=True)
+            actions[f"agent_{idx}"] = int(action)
+        return actions
 
 
 def load_sb3_policy(model_path: str, env: Any):
@@ -194,66 +221,6 @@ def load_es_policy(model_path: str, env: Any):
     return ESPolicyWrapper(model, params, n_agents=n_agents, use_agent_id=use_agent_id)
 
 
-def load_marl_torch_policy(model_path: str, env: Any, marl_agent_index: int = 0):
-    """
-    Load a PyTorch MARL (IQL/VDN/QMIX) policy checkpoint saved by `algorithms/marl_*.py`.
-
-    Returns a lightweight wrapper with a `predict(obs, deterministic=True)` method.
-    Note: Visualization uses `SingleAgentWrapper`, so only the selected agent index is
-    queried for actions while other agents are held at `SingleAgentWrapper(other_agent_action=...)`.
-    """
-    model_path_p = Path(model_path)
-
-    try:
-        import torch
-        from utils.marl.networks import MLPAgent, DuelingMLPAgent
-    except ImportError as e:
-        raise ImportError("torch is required to load MARL torch checkpoints") from e
-
-    from utils.marl.torch_policy import load_marl_torch_agents_from_checkpoint
-
-    agent_or_agents, meta = load_marl_torch_agents_from_checkpoint(model_path_p)
-    n_agents = meta.n_agents
-    obs_dim = meta.obs_dim
-    n_actions = meta.n_actions
-    if marl_agent_index < 0 or marl_agent_index >= n_agents:
-        raise ValueError("marl_agent_index must be within [0, n_agents)")
-
-    env_obs_dim = int(getattr(env.observation_space, "shape", (0,))[0])
-    if env_obs_dim != obs_dim:
-        raise ValueError(f"Env obs_dim={env_obs_dim} does not match checkpoint obs_dim={obs_dim}")
-
-    if isinstance(agent_or_agents, (MLPAgent, DuelingMLPAgent)):
-        chosen_agent = agent_or_agents
-    else:
-        chosen_agent = agent_or_agents[marl_agent_index]
-
-    class MARLTorchPolicyWrapper:
-        def __init__(self, agent, n_agents: int, use_agent_id: bool, marl_agent_index: int):
-            self.agent = agent
-            self.n_agents = n_agents
-            self.use_agent_id = use_agent_id
-            self.marl_agent_index = marl_agent_index
-
-        def predict(self, observation, deterministic=True):
-            obs = np.asarray(observation, dtype=np.float32)
-            obs_t = torch.from_numpy(obs).float()
-            if self.use_agent_id:
-                onehot = torch.zeros(self.n_agents, dtype=torch.float32)
-                onehot[self.marl_agent_index] = 1.0
-                obs_t = torch.cat([obs_t, onehot], dim=0)
-            q = self.agent(obs_t.unsqueeze(0))
-            action = int(torch.argmax(q, dim=-1).item())
-            return action, None
-
-    return MARLTorchPolicyWrapper(
-        chosen_agent,
-        n_agents=n_agents,
-        use_agent_id=meta.use_agent_id,
-        marl_agent_index=marl_agent_index,
-    )
-
-
 def load_marl_torch_multi_agent_policy(model_path: str, env: NCS_Env) -> MARLTorchMultiAgentPolicy:
     from utils.marl.torch_policy import MARLTorchMultiAgentPolicy, load_marl_torch_agents_from_checkpoint
 
@@ -274,13 +241,26 @@ def load_marl_torch_multi_agent_policy(model_path: str, env: NCS_Env) -> MARLTor
     return MARLTorchMultiAgentPolicy(agent_or_agents, meta, device=torch.device("cpu"))
 
 
+def load_multi_agent_policy(
+    policy_path: str,
+    policy_type: str,
+    env: NCS_Env,
+    n_agents: int,
+    seed: Optional[int],
+):
+    if policy_type == "marl_torch":
+        return load_marl_torch_multi_agent_policy(policy_path, env)
+    if policy_type == "heuristic":
+        return MultiAgentHeuristicPolicy(policy_path, n_agents=n_agents, seed=seed)
+    raise ValueError("Multi-agent visualization supports only 'marl_torch' and 'heuristic' policies.")
+
+
 def load_policy(
     policy_path: str,
     policy_type: str,
     env: Any,
     n_agents: int = 1,
     seed: Optional[int] = None,
-    marl_agent_index: int = 0,
 ):
     """
     Load a policy (SB3, ES, or heuristic).
@@ -301,10 +281,8 @@ def load_policy(
         return load_es_policy(policy_path, env)
     elif policy_type.lower() == 'heuristic':
         return get_heuristic_policy(policy_path, n_agents=n_agents, seed=seed)
-    elif policy_type.lower() in {'marl_torch', 'marl', 'torch_marl'}:
-        return load_marl_torch_policy(policy_path, env, marl_agent_index=marl_agent_index)
     else:
-        raise ValueError(f"Unknown policy type: {policy_type}. Use 'sb3', 'es', 'heuristic', or 'marl_torch'")
+        raise ValueError(f"Unknown policy type: {policy_type}. Use 'sb3', 'es', or 'heuristic'")
 
 
 def run_episode(env: Any, policy: Any, episode_length: int, deterministic: bool = True) -> Dict[str, np.ndarray]:
@@ -429,6 +407,13 @@ def run_episode_multi_agent(
     throughputs = np.zeros(episode_length + 1, dtype=np.float32)
     collided_packets = np.zeros(episode_length + 1, dtype=np.float32)
     reward_mix_weight = np.zeros(episode_length + 1, dtype=np.float32)
+    network_stats: Dict[str, List[int]] = {
+        "tx_attempts": [0 for _ in range(n_agents)],
+        "tx_acked": [0 for _ in range(n_agents)],
+        "tx_dropped": [0 for _ in range(n_agents)],
+        "tx_rewrites": [0 for _ in range(n_agents)],
+        "tx_collisions": [0 for _ in range(n_agents)],
+    }
 
     states[0] = np.asarray(info.get("states", states[0]), dtype=np.float32)
     estimates[0] = np.asarray(info.get("estimates", estimates[0]), dtype=np.float32)
@@ -436,6 +421,8 @@ def run_episode_multi_agent(
     throughputs[0] = float(info.get("throughput_kbps", 0.0))
     collided_packets[0] = float(info.get("collided_packets", 0.0))
     reward_mix_weight[0] = float(info.get("reward_mix_weight", 0.0))
+    if "network_stats" in info:
+        network_stats = {k: [int(x) for x in v] for k, v in info["network_stats"].items()}
 
     for t in range(episode_length):
         action_dict = policy.act(obs_dict)
@@ -449,6 +436,8 @@ def run_episode_multi_agent(
         throughputs[t + 1] = float(info.get("throughput_kbps", 0.0))
         collided_packets[t + 1] = float(info.get("collided_packets", 0.0))
         reward_mix_weight[t + 1] = float(info.get("reward_mix_weight", 0.0))
+        if "network_stats" in info:
+            network_stats = {k: [int(x) for x in v] for k, v in info["network_stats"].items()}
 
         done = any(bool(terminated[f"agent_{i}"]) or bool(truncated[f"agent_{i}"]) for i in range(n_agents))
         if done:
@@ -472,6 +461,7 @@ def run_episode_multi_agent(
         "throughput_kbps": throughputs,
         "collided_packets": collided_packets,
         "reward_mix_weight": reward_mix_weight,
+        "network_stats": network_stats,
         "timesteps": np.arange(states.shape[0]),
     }
 
@@ -1219,20 +1209,9 @@ def main():
         help='List of policy types corresponding to --policies'
     )
     parser.add_argument(
-        '--marl-agent-index',
-        type=int,
-        default=0,
-        help='Agent index for marl_torch checkpoints (default: 0)'
-    )
-    parser.add_argument(
-        '--multi-agent',
-        action='store_true',
-        help='For marl_torch: run a true multi-agent rollout (all agents act from the checkpoint)'
-    )
-    parser.add_argument(
         '--per-agent-videos',
         action='store_true',
-        help='In --multi-agent mode with --generate-video, also write one MP4 per agent'
+        help='With --generate-video for multi-agent policies, also write one MP4 per agent'
     )
     parser.add_argument(
         '--labels',
@@ -1258,7 +1237,7 @@ def main():
         '--n-agents',
         type=int,
         default=1,
-        help='Number of agents in the environment (default: 1; in --multi-agent mode must match checkpoint n_agents)'
+        help='Number of agents in the environment (default: 1; for marl_torch must match checkpoint n_agents)'
     )
 
     # Visualization parameters
@@ -1344,6 +1323,20 @@ def main():
     if len(policy_labels) != len(policies_to_load):
         parser.error("--labels must have the same length as number of policies")
 
+    policy_types_norm = [policy_type.lower() for policy_type in policy_types]
+    multi_agent_types = {"marl_torch", "heuristic"}
+    any_marl = any(policy_type == "marl_torch" for policy_type in policy_types_norm)
+    use_multi_agent = any_marl or (args.n_agents > 1 and all(
+        policy_type in multi_agent_types for policy_type in policy_types_norm
+    ))
+    if use_multi_agent:
+        if not all(policy_type in multi_agent_types for policy_type in policy_types_norm):
+            parser.error("Multi-agent visualization supports only marl_torch and heuristic policies in one run")
+        if args.n_agents < 1:
+            parser.error("--n-agents must be >= 1 for multi-agent policies")
+    if args.per_agent_videos and not use_multi_agent:
+        parser.error("--per-agent-videos is only supported for multi-agent policies")
+
     # Create output directory
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1374,15 +1367,12 @@ def main():
         )
 
     print(f"Creating environment...")
-    if args.multi_agent:
-        env: Any = make_env()
-        state_dim = int(env.state_dim)
+    temp_env = make_env()
+    state_dim = int(temp_env.state_dim)
+    temp_env.close()
+    if use_multi_agent:
         print(f"✓ Environment created (multi-agent, state_dim={state_dim}, episode_length={args.episode_length})\n")
     else:
-        env = SingleAgentWrapper(make_env)
-        temp_env = make_env()
-        state_dim = int(temp_env.state_dim)
-        temp_env.close()
         print(f"✓ Environment created (state_dim={state_dim}, episode_length={args.episode_length})\n")
 
     # Load policies and run episodes
@@ -1394,19 +1384,24 @@ def main():
         print(f"  Type: {policy_type}")
         print(f"  Path/Name: {policy_path}")
 
-        if args.multi_agent:
-            if policy_type.lower() not in {"marl_torch", "marl", "torch_marl"}:
-                print("  ✗ Error: --multi-agent only supports --policy-type marl_torch\n")
-                continue
+        env: Any = make_env() if use_multi_agent else SingleAgentWrapper(make_env)
+        if use_multi_agent:
             try:
-                policy = load_marl_torch_multi_agent_policy(policy_path, env)
+                policy = load_multi_agent_policy(
+                    policy_path,
+                    policy_type.lower(),
+                    env,
+                    n_agents=args.n_agents,
+                    seed=args.seed,
+                )
             except Exception as e:
+                env.close()
                 print(f"  ✗ Error loading policy: {e}\n")
                 continue
             print(f"  Running multi-agent episode...")
             traj = run_episode_multi_agent(env, policy, args.episode_length, seed=args.seed)
+            env.close()
         else:
-            obs, info = env.reset(seed=args.seed)
             try:
                 policy = load_policy(
                     policy_path,
@@ -1414,21 +1409,22 @@ def main():
                     env,
                     n_agents=args.n_agents,
                     seed=args.seed,
-                    marl_agent_index=int(args.marl_agent_index),
                 )
             except Exception as e:
+                env.close()
                 print(f"  ✗ Error loading policy: {e}\n")
                 continue
             print(f"  Running episode...")
             traj = run_episode(env, policy, args.episode_length, deterministic=True)
+            env.close()
 
         # Print summary statistics
         total_reward = float(np.sum(traj["rewards"]))
         tx_count = float(np.sum(traj["actions"]))
-        final_error = float(np.mean(traj["state_errors"][-1])) if args.multi_agent else float(traj["state_errors"][-1])
+        final_error = float(np.mean(traj["state_errors"][-1])) if use_multi_agent else float(traj["state_errors"][-1])
         print(f"  ✓ Episode complete")
         print(f"    - Total reward: {total_reward:.2f}")
-        denom = args.episode_length * (args.n_agents if args.multi_agent else 1)
+        denom = args.episode_length * (args.n_agents if use_multi_agent else 1)
         print(f"    - Transmissions: {int(tx_count)}/{denom}")
         print(f"    - Final state error: {final_error:.4f}\n")
 
@@ -1441,7 +1437,7 @@ def main():
     # Generate plots
     print(f"Generating visualizations...\n")
 
-    if args.multi_agent:
+    if use_multi_agent:
         summary_plot_path = output_dir / f"{output_prefix}_marl_summary.png"
         plot_marl_comparison_summary(
             trajectories,
@@ -1483,7 +1479,7 @@ def main():
     # Generate video animation if requested
     if args.generate_video:
         print(f"\nGenerating animation...\n")
-        if args.multi_agent:
+        if use_multi_agent:
             for idx, (label, traj) in enumerate(zip(policy_labels[:len(trajectories)], trajectories)):
                 tag = f"p{idx+1}_{_sanitize_filename(label)}"
                 video_path = output_dir / f"{output_prefix}_{tag}_animation.mp4"
@@ -1536,7 +1532,13 @@ def main():
         actions = np.asarray(traj["actions"], dtype=np.float32)
         state_errors = np.asarray(traj["state_errors"], dtype=np.float32)
 
-        if args.multi_agent:
+        if use_multi_agent:
+            network_stats = traj.get("network_stats", {})
+            tx_attempts = network_stats.get("tx_attempts", [])
+            tx_acked = network_stats.get("tx_acked", [])
+            tx_dropped = network_stats.get("tx_dropped", [])
+            tx_rewrites = network_stats.get("tx_rewrites", [])
+            tx_collisions = network_stats.get("tx_collisions", [])
             policy_summary = {
                 "label": label,
                 "n_agents": int(state_errors.shape[1]),
@@ -1544,6 +1546,18 @@ def main():
                 "avg_reward_per_agent_step": float(rewards.mean()),
                 "transmission_count": int(actions.sum()),
                 "transmission_rate_per_agent_step": float(actions.mean()),
+                "network_stats": {
+                    "tx_attempts": [int(x) for x in tx_attempts],
+                    "tx_acked": [int(x) for x in tx_acked],
+                    "tx_dropped": [int(x) for x in tx_dropped],
+                    "tx_rewrites": [int(x) for x in tx_rewrites],
+                    "tx_collisions": [int(x) for x in tx_collisions],
+                    "tx_attempts_total": int(np.sum(tx_attempts)) if tx_attempts else 0,
+                    "tx_acked_total": int(np.sum(tx_acked)) if tx_acked else 0,
+                    "tx_dropped_total": int(np.sum(tx_dropped)) if tx_dropped else 0,
+                    "tx_rewrites_total": int(np.sum(tx_rewrites)) if tx_rewrites else 0,
+                    "tx_collisions_total": int(np.sum(tx_collisions)) if tx_collisions else 0,
+                },
                 "initial_state_error_mean": float(state_errors[0].mean()),
                 "final_state_error_mean": float(state_errors[-1].mean()),
                 "avg_state_error_mean": float(state_errors.mean(axis=1).mean()),

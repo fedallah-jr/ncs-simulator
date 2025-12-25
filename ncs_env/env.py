@@ -269,6 +269,10 @@ class NCS_Env(gym.Env):
         self.pending_transmissions: List[Dict[int, Dict[str, int]]] = [
             {} for _ in range(self.n_agents)
         ]
+        self.net_tx_attempts = np.zeros(self.n_agents, dtype=np.int64)
+        self.net_tx_acks = np.zeros(self.n_agents, dtype=np.int64)
+        self.net_tx_drops = np.zeros(self.n_agents, dtype=np.int64)
+        self.net_tx_rewrites = np.zeros(self.n_agents, dtype=np.int64)
         self.throughput_records: deque = deque()
         self.comm_success_records: List[deque] = [deque() for _ in range(self.n_agents)]
         self.last_measurements: List[np.ndarray] = [
@@ -353,6 +357,8 @@ class NCS_Env(gym.Env):
             for i in range(self.n_agents):
                 action = actions[f"agent_{i}"]
                 if action == 1:
+                    self.net_tx_attempts[i] += 1
+                    self.net_tx_acks[i] += 1
                     state = self.plants[i].get_state()
                     measurement = state + self._sample_measurement_noise()
                     self.controllers[i].update(measurement)
@@ -370,6 +376,7 @@ class NCS_Env(gym.Env):
             for i in range(self.n_agents):
                 action = actions[f"agent_{i}"]
                 if action == 1:
+                    self.net_tx_attempts[i] += 1
                     state = self.plants[i].get_state()
                     measurement = state + self._sample_measurement_noise()
                     # Use state_index as the measurement timestamp
@@ -378,6 +385,7 @@ class NCS_Env(gym.Env):
                     overwritten = self.network.queue_data_packet(i, measurement, measurement_timestamp)
                     # Handle queue overwrite: mark the dropped packet as failed (status=3)
                     if overwritten is not None and overwritten.packet_type == "data":
+                        self.net_tx_rewrites[i] += 1
                         dropped_timestamp = overwritten.payload.get("timestamp")
                         dropped_entry = self.pending_transmissions[i].pop(dropped_timestamp, None)
                         if dropped_entry is not None:
@@ -410,6 +418,8 @@ class NCS_Env(gym.Env):
                     measurement_timestamp = mac_ack.get("measurement_timestamp")
                     if sensor_id is None or measurement_timestamp is None:
                         continue
+                    if 0 <= int(sensor_id) < self.n_agents:
+                        self.net_tx_acks[int(sensor_id)] += 1
                     entry = self.pending_transmissions[sensor_id].pop(measurement_timestamp, None)
                     if entry is not None:
                         entry["status"] = 1
@@ -424,6 +434,8 @@ class NCS_Env(gym.Env):
                 for packet in network_result["dropped_packets"]:
                     if packet.packet_type == "data":
                         sensor_id = packet.source_id
+                        if 0 <= int(sensor_id) < self.n_agents:
+                            self.net_tx_drops[int(sensor_id)] += 1
                         measurement_timestamp = packet.payload.get("timestamp")
                         entry = self.pending_transmissions[sensor_id].pop(measurement_timestamp, None)
                         if entry is not None:
@@ -1060,6 +1072,11 @@ class NCS_Env(gym.Env):
 
     def _get_info(self) -> Dict[str, Any]:
         """Return auxiliary information."""
+        collisions = (
+            [0 for _ in range(self.n_agents)]
+            if self.perfect_communication
+            else [int(x) for x in self.network.collisions_per_agent]
+        )
         return {
             "timestep": self.timestep,
             "channel_state": "PERFECT" if self.perfect_communication else self.network.channel_state.name,
@@ -1067,6 +1084,13 @@ class NCS_Env(gym.Env):
             "estimates": [controller.x_hat.copy() for controller in self.controllers],
             "throughput_kbps": 0.0 if self.perfect_communication else self._compute_throughput(),
             "collided_packets": 0 if self.perfect_communication else self.network.total_collided_packets,
+            "network_stats": {
+                "tx_attempts": [int(x) for x in self.net_tx_attempts],
+                "tx_acked": [int(x) for x in self.net_tx_acks],
+                "tx_dropped": [int(x) for x in self.net_tx_drops],
+                "tx_rewrites": [int(x) for x in self.net_tx_rewrites],
+                "tx_collisions": collisions,
+            },
             "reward_components": {k: v.copy() for k, v in self.last_reward_components.items()},
             "reward_mix_weight": float(self.last_mix_weight) if self.reward_mixing_enabled else 0.0,
         }

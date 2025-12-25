@@ -107,6 +107,7 @@ class NetworkModel:
         self.current_slot = 0
         self.delivered_mac_acks: List[Dict[str, int]] = []
         self.total_collided_packets = 0
+        self.collisions_per_agent: List[int] = [0 for _ in range(n_agents)]
 
         self.entities: List[NetworkEntity] = []
         for i in range(n_agents):
@@ -213,6 +214,7 @@ class NetworkModel:
         self.current_slot = 0
         self.delivered_mac_acks = []
         self.total_collided_packets = 0
+        self.collisions_per_agent = [0 for _ in range(self.n_agents)]
 
         for entity in self.entities:
             entity.state = EntityState.IDLE
@@ -342,8 +344,15 @@ class NetworkModel:
             for tx in new_transmissions:
                 tx.collided = True
 
-        collided_count = sum(1 for tx in new_transmissions if tx.collided and not tx.is_mac_ack)
-        self.total_collided_packets += collided_count
+        collided_data = [
+            tx for tx in new_transmissions
+            if tx.collided and not tx.is_mac_ack and tx.packet.packet_type == "data"
+        ]
+        self.total_collided_packets += len(collided_data)
+        for tx in collided_data:
+            sensor_id = int(tx.packet.source_id)
+            if 0 <= sensor_id < self.n_agents:
+                self.collisions_per_agent[sensor_id] += 1
 
         self.active_transmissions.extend(new_transmissions)
         self.channel_state = ChannelState.BUSY
