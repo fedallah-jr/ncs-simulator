@@ -57,12 +57,9 @@ run_one() {
   PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m "${algo_module}" "${common_args[@]}" "$@" 2>&1 | tee "${log_path}"
 }
 
-run_one "algorithms.marl_iql"  "iql_shared_agentid_marl_absolute_plants_nodoubleq"
-run_one "algorithms.marl_iql"  "iql_shared_agentid_marl_absolute_plants_doubleq" --double-q
-run_one "algorithms.marl_vdn"  "vdn_shared_agentid_marl_absolute_plants_nodoubleq"
-run_one "algorithms.marl_vdn"  "vdn_shared_agentid_marl_absolute_plants_doubleq" --double-q
-run_one "algorithms.marl_qmix" "qmix_shared_agentid_marl_absolute_plants_nodoubleq"
-run_one "algorithms.marl_qmix" "qmix_shared_agentid_marl_absolute_plants_doubleq" --double-q
+run_one "algorithms.marl_iql"  "iql_shared_agentid_marl_absolute_plants_dueling" --dueling --double-q
+run_one "algorithms.marl_vdn"  "vdn_shared_agentid_marl_absolute_plants_dueling" --dueling --double-q
+run_one "algorithms.marl_qmix" "qmix_shared_agentid_marl_absolute_plants_dueling" --dueling --double-q
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then

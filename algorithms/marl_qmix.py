@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epsilon-decay-steps", type=int, default=100_000, help="Linear decay steps.")
 
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[128, 128], help="MLP hidden dims.")
-    parser.add_argument("--activation", type=str, default="relu", choices=["relu", "tanh", "elu"], help="Activation.")
+    parser.add_argument("--activation", type=str, default="tanh", choices=["relu", "tanh", "elu"], help="Activation.")
     parser.add_argument("--layer-norm", action="store_true", help="Enable LayerNorm in MLP.")
     parser.add_argument("--dueling", action="store_true", help="Use Dueling DQN architecture (separate V and A streams).")
     parser.add_argument("--stream-hidden-dim", type=int, default=64, help="Hidden dim for dueling value/advantage streams.")

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiments for mixed reward config (shared params + agent-id).
+# MARL experiments for absolute reward config with fixed normalization (shared params + agent-id).
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -13,7 +13,7 @@ TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-1000000}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-800000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/marl_grid_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/marl_grid_fixed_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -31,7 +31,7 @@ else
   exit 1
 fi
 
-config_path="configs/marl_mixed_plants.json"
+config_path="configs/marl_absolute_fixed_plants.json"
 if [[ ! -f "${config_path}" ]]; then
   echo "Config not found: ${config_path}" >&2
   exit 1
@@ -57,12 +57,9 @@ run_one() {
   PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m "${algo_module}" "${common_args[@]}" "$@" 2>&1 | tee "${log_path}"
 }
 
-run_one "algorithms.marl_iql"  "iql_shared_agentid_marl_mixed_plants_nodoubleq"
-run_one "algorithms.marl_iql"  "iql_shared_agentid_marl_mixed_plants_doubleq" --double-q
-run_one "algorithms.marl_vdn"  "vdn_shared_agentid_marl_mixed_plants_nodoubleq"
-run_one "algorithms.marl_vdn"  "vdn_shared_agentid_marl_mixed_plants_doubleq" --double-q
-run_one "algorithms.marl_qmix" "qmix_shared_agentid_marl_mixed_plants_nodoubleq"
-run_one "algorithms.marl_qmix" "qmix_shared_agentid_marl_mixed_plants_doubleq" --double-q
+run_one "algorithms.marl_iql"  "iql_shared_agentid_marl_absolute_fixed_dueling" --dueling --double-q
+run_one "algorithms.marl_vdn"  "vdn_shared_agentid_marl_absolute_fixed_dueling" --dueling --double-q
+run_one "algorithms.marl_qmix" "qmix_shared_agentid_marl_absolute_fixed_dueling" --dueling --double-q
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then

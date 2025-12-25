@@ -39,14 +39,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-update-interval", type=int, default=500, help="Hard target update interval (steps).")
     parser.add_argument("--grad-clip-norm", type=float, default=10.0, help="Gradient clipping L2 norm.")
     parser.add_argument("--double-q", action="store_true", help="Use Double DQN targets.")
-    parser.add_argument("--optimizer", type=str, default="adam", choices=["adam", "rmsprop"], help="Optimizer type.")
+    parser.add_argument("--optimizer", type=str, default="rmsprop", choices=["adam", "rmsprop"], help="Optimizer type.")
 
     parser.add_argument("--epsilon-start", type=float, default=1.0, help="Initial epsilon.")
     parser.add_argument("--epsilon-end", type=float, default=0.05, help="Final epsilon.")
     parser.add_argument("--epsilon-decay-steps", type=int, default=100_000, help="Linear decay steps.")
 
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[128, 128], help="MLP hidden dims.")
-    parser.add_argument("--activation", type=str, default="relu", choices=["relu", "tanh", "elu"], help="Activation.")
+    parser.add_argument("--activation", type=str, default="tanh", choices=["relu", "tanh", "elu"], help="Activation.")
     parser.add_argument("--layer-norm", action="store_true", help="Enable LayerNorm in MLP.")
     parser.add_argument("--dueling", action="store_true", help="Use Dueling DQN architecture (separate V and A streams).")
     parser.add_argument("--stream-hidden-dim", type=int, default=64, help="Hidden dim for dueling value/advantage streams.")
