@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiments for absolute reward config with fixed normalization (shared params + agent-id).
+# MARL experiments for absolute reward config with running normalization (shared params + agent-id).
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -13,7 +13,7 @@ TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-1000000}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-800000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/marl_grid_fixed_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/marl_absolute_running_ablation_base_double_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -31,7 +31,7 @@ else
   exit 1
 fi
 
-config_path="configs/marl_absolute_fixed_plants.json"
+config_path="configs/marl_absolute_plants.json"
 if [[ ! -f "${config_path}" ]]; then
   echo "Config not found: ${config_path}" >&2
   exit 1
@@ -57,9 +57,29 @@ run_one() {
   PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m "${algo_module}" "${common_args[@]}" "$@" 2>&1 | tee "${log_path}"
 }
 
-run_one "algorithms.marl_iql"  "iql_shared_agentid_marl_absolute_fixed_dueling" --dueling --double-q
-run_one "algorithms.marl_vdn"  "vdn_shared_agentid_marl_absolute_fixed_dueling" --dueling --double-q
-run_one "algorithms.marl_qmix" "qmix_shared_agentid_marl_absolute_fixed_dueling" --dueling --double-q
+algos=(
+  "algorithms.marl_iql:iql"
+  "algorithms.marl_vdn:vdn"
+  "algorithms.marl_qmix:qmix"
+)
+
+ablations=(
+  "base:"
+  "double:--double-q"
+)
+
+for algo_entry in "${algos[@]}"; do
+  IFS=":" read -r algo_module algo_label <<<"${algo_entry}"
+  for ablation_entry in "${ablations[@]}"; do
+    IFS=":" read -r ablation_label ablation_args <<<"${ablation_entry}"
+    label="${algo_label}_absolute_running_${ablation_label}"
+    if [[ -n "${ablation_args}" ]]; then
+      run_one "${algo_module}" "${label}" ${ablation_args}
+    else
+      run_one "${algo_module}" "${label}"
+    fi
+  done
+done
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then
