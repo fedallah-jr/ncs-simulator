@@ -42,7 +42,7 @@
     "state_error_max": 2500.0,
     "penalty": -500.0,
     "evaluation": {
-      "penalty": 1000000.0
+      "penalty": -1000000.0
     }
   },
   "observation": {
