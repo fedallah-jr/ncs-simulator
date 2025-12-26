@@ -32,6 +32,7 @@ def make_ncs_single_env(
     episode_length: int,
     seed: Optional[int],
     reward_override: Optional[Dict[str, Any]] = None,
+    termination_override: Optional[Dict[str, Any]] = None,
 ) -> SingleAgentWrapper:
     def factory():
         return NCS_Env(
@@ -40,6 +41,7 @@ def make_ncs_single_env(
             config_path=config_path,
             seed=seed,
             reward_override=reward_override,
+            termination_override=termination_override,
         )
 
     return SingleAgentWrapper(factory)
@@ -74,6 +76,7 @@ def main() -> None:
 
     config_path_str = str(args.config) if args.config is not None else None
     eval_reward_override: Optional[Dict[str, Any]] = None
+    eval_termination_override: Optional[Dict[str, Any]] = None
     if config_path_str is not None:
         try:
             cfg = load_config(config_path_str)
@@ -81,8 +84,13 @@ def main() -> None:
             eval_reward_cfg = reward_cfg.get("evaluation", None)
             if isinstance(eval_reward_cfg, dict):
                 eval_reward_override = eval_reward_cfg
+            termination_cfg = cfg.get("termination", {})
+            eval_termination_cfg = termination_cfg.get("evaluation", None)
+            if isinstance(eval_termination_cfg, dict):
+                eval_termination_override = eval_termination_cfg
         except Exception:
             eval_reward_override = None
+            eval_termination_override = None
 
     run_dir = prepare_run_directory("ppo", args.config, args.output_root)
 
@@ -96,6 +104,7 @@ def main() -> None:
             args.episode_length,
             args.seed,
             reward_override=eval_reward_override,
+            termination_override=eval_termination_override,
         )
         return Monitor(env)
 

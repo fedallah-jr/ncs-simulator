@@ -83,6 +83,11 @@ def main() -> None:
     eval_reward_cfg = reward_cfg.get("evaluation", None)
     if isinstance(eval_reward_cfg, dict):
         eval_reward_override = eval_reward_cfg
+    eval_termination_override: Optional[Dict[str, Any]] = None
+    termination_cfg = cfg.get("termination", {})
+    eval_termination_cfg = termination_cfg.get("evaluation", None)
+    if isinstance(eval_termination_cfg, dict):
+        eval_termination_override = eval_termination_cfg
 
     run_dir = prepare_run_directory("vdn", args.config, args.output_root)
     rewards_csv_path = run_dir / "training_rewards.csv"
@@ -102,6 +107,7 @@ def main() -> None:
         config_path=config_path_str,
         seed=args.seed,
         reward_override=eval_reward_override,
+        termination_override=eval_termination_override,
     )
 
     obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])

@@ -73,12 +73,14 @@ class NCS_Env(gym.Env):
         config_path: Optional[str] = None,
         seed: Optional[int] = None,
         reward_override: Optional[Dict[str, Any]] = None,
+        termination_override: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
         self.n_agents = n_agents
         self.episode_length = episode_length
         self.comm_cost = comm_cost
         self.reward_override = reward_override
+        self.termination_override = termination_override
 
         self.config = load_config(config_path)
         self.system_cfg = self.config.get("system", {})
@@ -199,7 +201,8 @@ class NCS_Env(gym.Env):
         self.total_env_steps = 0
         self.last_mix_weight = self._current_mix_weight()
         self._running_reward_returns: Optional[List[List[float]]] = None
-        termination_cfg = self.config.get("termination", {})
+        base_termination_cfg = self.config.get("termination", {})
+        termination_cfg = self._merge_termination_override(base_termination_cfg, self.termination_override)
         self.termination_enabled = bool(termination_cfg.get("enabled", False))
         self.termination_error_max = None
         if self.termination_enabled:
@@ -694,6 +697,18 @@ class NCS_Env(gym.Env):
             return dict(base_reward_cfg)
         merged = dict(base_reward_cfg)
         merged.update(reward_override)
+        return merged
+
+    @staticmethod
+    def _merge_termination_override(
+        base_termination_cfg: Dict[str, Any],
+        termination_override: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Merge termination override dict onto the base termination config."""
+        if termination_override is None:
+            return dict(base_termination_cfg)
+        merged = dict(base_termination_cfg)
+        merged.update(termination_override)
         return merged
 
     @staticmethod

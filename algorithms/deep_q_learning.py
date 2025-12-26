@@ -29,6 +29,7 @@ def make_env_fn(
     episode_length: int,
     seed: Optional[int],
     reward_override: Optional[Dict[str, Any]] = None,
+    termination_override: Optional[Dict[str, Any]] = None,
 ) -> Callable[[], gym.Env]:
     def factory():
         def env_factory():
@@ -38,6 +39,7 @@ def make_env_fn(
                 config_path=config_path,
                 seed=seed,
                 reward_override=reward_override,
+                termination_override=termination_override,
             )
         return SingleAgentWrapper(env_factory)
 
@@ -72,6 +74,7 @@ def main() -> None:
     args = parse_args()
     config_path_str = str(args.config) if args.config is not None else None
     eval_reward_override: Optional[Dict[str, Any]] = None
+    eval_termination_override: Optional[Dict[str, Any]] = None
     if config_path_str is not None:
         try:
             cfg = load_config(config_path_str)
@@ -79,8 +82,13 @@ def main() -> None:
             eval_reward_cfg = reward_cfg.get("evaluation", None)
             if isinstance(eval_reward_cfg, dict):
                 eval_reward_override = eval_reward_cfg
+            termination_cfg = cfg.get("termination", {})
+            eval_termination_cfg = termination_cfg.get("evaluation", None)
+            if isinstance(eval_termination_cfg, dict):
+                eval_termination_override = eval_termination_cfg
         except Exception:
             eval_reward_override = None
+            eval_termination_override = None
 
     run_dir = prepare_run_directory("dqn", args.config, args.output_root)
 
@@ -102,6 +110,7 @@ def main() -> None:
                 config_path=config_path_str,
                 seed=args.seed,
                 reward_override=eval_reward_override,
+                termination_override=eval_termination_override,
             )
         return SingleAgentWrapper(factory)
 

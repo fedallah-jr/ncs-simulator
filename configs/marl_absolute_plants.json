@@ -40,7 +40,10 @@
   "termination": {
     "enabled": true,
     "state_error_max": 2500.0,
-    "penalty": -500.0
+    "penalty": -500.0,
+    "evaluation": {
+      "penalty": 1000000.0
+    }
   },
   "observation": {
     "history_window": 10,

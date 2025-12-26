@@ -127,6 +127,7 @@ python -m tools.visualize_policy --list-heuristics
 
 - **`always_send`**: Always transmit measurements at every timestep
 - **`never_send`**: Never transmit measurements
+- **`zero_wait`**: Transmit only when the previous packet is ACKed or dropped (no overlapping sends)
 
 #### Periodic Policies
 

@@ -6,14 +6,17 @@ comparison with learned policies. All policies follow the same interface
 as stable-baselines3 policies for easy integration with the visualization tool.
 """
 
+from __future__ import annotations
+
+from typing import Dict, Tuple, Optional, Any, List
+
 import numpy as np
-from typing import Dict, Tuple, Optional, Any
 
 
 class BaseHeuristicPolicy:
     """Base class for heuristic policies."""
 
-    def __init__(self, n_agents: int = 1):
+    def __init__(self, n_agents: int = 1) -> None:
         """
         Initialize heuristic policy.
 
@@ -36,7 +39,7 @@ class BaseHeuristicPolicy:
         """
         raise NotImplementedError
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset policy state. Override in subclasses if needed."""
         pass
 
@@ -80,7 +83,7 @@ class NeverSendPolicy(BaseHeuristicPolicy):
 class SendEveryNPolicy(BaseHeuristicPolicy):
     """Policy that sends every N timesteps."""
 
-    def __init__(self, n: int = 5, n_agents: int = 1):
+    def __init__(self, n: int = 5, n_agents: int = 1) -> None:
         """
         Initialize send-every-N policy.
 
@@ -92,7 +95,7 @@ class SendEveryNPolicy(BaseHeuristicPolicy):
         self.n = n
         self.timestep = 0
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset timestep counter."""
         self.timestep = 0
 
@@ -116,7 +119,7 @@ class SendEveryNPolicy(BaseHeuristicPolicy):
 class RandomSendPolicy(BaseHeuristicPolicy):
     """Policy that sends with a fixed probability."""
 
-    def __init__(self, prob: float = 0.5, n_agents: int = 1, seed: Optional[int] = None):
+    def __init__(self, prob: float = 0.5, n_agents: int = 1, seed: Optional[int] = None) -> None:
         """
         Initialize random send policy.
 
@@ -150,7 +153,7 @@ class RandomSendPolicy(BaseHeuristicPolicy):
 class ThresholdPolicy(BaseHeuristicPolicy):
     """Policy that sends when state magnitude exceeds a threshold."""
 
-    def __init__(self, threshold: float = 1.0, n_agents: int = 1):
+    def __init__(self, threshold: float = 1.0, n_agents: int = 1) -> None:
         """
         Initialize threshold policy.
 
@@ -185,7 +188,7 @@ class ThresholdPolicy(BaseHeuristicPolicy):
 class AdaptiveThresholdPolicy(BaseHeuristicPolicy):
     """Policy that adapts sending frequency based on state magnitude and recent throughput."""
 
-    def __init__(self, base_threshold: float = 1.0, throughput_weight: float = 0.1, n_agents: int = 1):
+    def __init__(self, base_threshold: float = 1.0, throughput_weight: float = 0.1, n_agents: int = 1) -> None:
         """
         Initialize adaptive threshold policy.
 
@@ -236,10 +239,11 @@ HEURISTIC_POLICIES = {
     'threshold_2.0': lambda n_agents=1: ThresholdPolicy(threshold=2.0, n_agents=n_agents),
     'threshold_0.5': lambda n_agents=1: ThresholdPolicy(threshold=0.5, n_agents=n_agents),
     'adaptive': lambda n_agents=1: AdaptiveThresholdPolicy(base_threshold=1.0, throughput_weight=0.1, n_agents=n_agents),
+    'zero_wait': lambda n_agents=1: ZeroWaitPolicy(n_agents=n_agents),
 }
 
 
-def get_heuristic_policy(policy_name: str, n_agents: int = 1, seed: Optional[int] = None):
+def get_heuristic_policy(policy_name: str, n_agents: int = 1, seed: Optional[int] = None) -> BaseHeuristicPolicy:
     """
     Get a heuristic policy by name.
 
@@ -265,3 +269,49 @@ def get_heuristic_policy(policy_name: str, n_agents: int = 1, seed: Optional[int
         return policy_factory(n_agents=n_agents, seed=seed)
     else:
         return policy_factory(n_agents=n_agents)
+class ZeroWaitPolicy(BaseHeuristicPolicy):
+    """Policy that waits for ACK/drop before sending again."""
+
+    def __init__(self, n_agents: int = 1, history_window: Optional[int] = None) -> None:
+        super().__init__(n_agents)
+        self.history_window = history_window
+        self._cached_history_window: Optional[int] = history_window
+
+    def reset(self) -> None:
+        """Reset cached history metadata between episodes."""
+        self._cached_history_window = self.history_window
+
+    def predict(self, observation: np.ndarray, deterministic: bool = True) -> Tuple[int, None]:
+        """
+        Send only when no transmission is pending.
+
+        Args:
+            observation: Current observation vector
+            deterministic: Whether to use deterministic policy (unused)
+
+        Returns:
+            action: 1 if no pending packet, else 0
+            state: None
+        """
+        status_values = self._extract_status_history(observation)
+        pending = any(value == 2 for value in status_values)
+        return (0 if pending else 1), None
+
+    def _extract_status_history(self, observation: np.ndarray) -> List[int]:
+        obs = np.asarray(observation, dtype=float).ravel()
+        window = self._resolve_history_window(obs)
+        if window <= 0 or obs.size < window * 2:
+            return []
+        status_slice = obs[-2 * window : -window]
+        return [int(round(value)) for value in status_slice]
+
+    def _resolve_history_window(self, observation: np.ndarray) -> int:
+        if self._cached_history_window is not None:
+            return self._cached_history_window
+        obs_len = int(observation.size)
+        remainder = obs_len - 3
+        if remainder > 0 and remainder % 4 == 0:
+            self._cached_history_window = max(1, remainder // 4)
+            return self._cached_history_window
+        self._cached_history_window = 10
+        return self._cached_history_window
