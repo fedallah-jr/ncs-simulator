@@ -122,6 +122,16 @@ Post-training visualization lives in `tools/visualize_policy.py`.
 - True MARL visualization (all agents act): `python -m tools.visualize_policy --config configs/marl_mixed_plants.json --policy outputs/.../best_model.pt --policy-type marl_torch --n-agents 3 --generate-video --per-agent-videos`
   - Outputs include a coordination action raster, a combined state-space plot, a summary plot, and optional combined/per-agent MP4s (FFmpeg required).
 
+## Policy Testing
+
+Policy testing lives in `tools/policy_tester.py` and evaluates a target policy against a fixed heuristic set (default: `zero_wait`, `always_send`, `random_50`) over multiple seeds. The evaluator forces raw absolute reward (no normalization/mixing) while keeping communication penalties and termination settings from the config.
+
+- Example (single-agent): `python -m tools.policy_tester --config configs/perfect_comm.json --policy outputs/.../best_model.zip --policy-type sb3 --num-seeds 30`
+- Example (MARL): `python -m tools.policy_tester --config configs/marl_mixed_plants.json --policy outputs/.../best_model.pt --policy-type marl_torch --n-agents 3 --num-seeds 30`
+- Example (batch): `python -m tools.policy_tester --models-root outputs --n-agents 3 --num-seeds 30`
+  - Expects subfolders like `model_1/config.json`, `model_1/best_model.pt`, `model_1/latest_model.pt`.
+  - Writes `leaderboard.csv` at the models root plus per-model evaluation folders under `model_*/policy_tests/`.
+
 ### Saved Configuration Format
 
 The `config.json` file saved in each run directory preserves the complete environment configuration and adds a `training_run` section with metadata:
