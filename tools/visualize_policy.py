@@ -343,9 +343,13 @@ def run_episode(env: Any, policy: Any, episode_length: int, deterministic: bool 
         estimates[t + 1] = ncs_env.controllers[0].x_hat
         actions[t] = action
         rewards[t] = reward
-        controls[t] = ncs_env.controllers[0].last_control if hasattr(
-            ncs_env.controllers[0], 'last_control'
-        ) else 0.0
+        controller = ncs_env.controllers[0]
+        if hasattr(controller, "last_u"):
+            controls[t] = controller.last_u
+        elif hasattr(controller, "last_control"):
+            controls[t] = controller.last_control
+        else:
+            controls[t] = 0.0
         state_errors[t + 1] = np.linalg.norm(states[t + 1])
 
         # Break if episode ended early (shouldn't happen normally)

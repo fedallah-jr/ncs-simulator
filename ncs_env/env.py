@@ -817,12 +817,15 @@ class NCS_Env(gym.Env):
         """Compute throughput (kbps) over the sliding window."""
         if self.perfect_communication:
             return 0.0
+        if self.timestep <= 0:
+            return 0.0
         window_start = self.timestep - self.throughput_window + 1
         while self.throughput_records and self.throughput_records[0]["timestamp"] < window_start:
             self.throughput_records.popleft()
 
         total_bits = sum(record["bits"] for record in self.throughput_records)
-        window_duration = self.throughput_window * self.timestep_duration
+        effective_steps = min(self.throughput_window, self.timestep)
+        window_duration = effective_steps * self.timestep_duration
         if window_duration == 0:
             return 0.0
         throughput_kbps = (total_bits / window_duration) / 1000.0
@@ -963,7 +966,7 @@ class NCS_Env(gym.Env):
 
                 # Step environment
                 try:
-                    obs, rewards, terminated, truncated, info = self.step(actions)
+                    _, _, terminated, truncated, info = self.step(actions)
                 except Exception:
                     # If step fails during initialization, skip this sample
                     break
@@ -971,33 +974,26 @@ class NCS_Env(gym.Env):
                 # Collect error rewards for each agent
                 for i in range(self.n_agents):
                     action = actions[f"agent_{i}"]
-                    # Get current state error
-                    x = self.plants[i].x  # Plant state is stored in .x attribute
-                    curr_error = self._compute_state_error(x)
+                    x = self.plants[i].x
+                    curr_error_raw = self._compute_state_error(x)
+                    components = info.get("reward_components", {}).get(f"agent_{i}", {})
+                    prev_error = float(components.get("prev_error", prev_errors[i]))
+                    curr_error = float(components.get("curr_error", curr_error_raw))
+                    info_arrived = bool(components.get("info_arrived", 0.0))
+                    message_age_steps = components.get("message_age_steps", None)
+                    reward_components = self._compute_reward_for_definition(
+                        i,
+                        definition,
+                        definition_idx,
+                        prev_error,
+                        curr_error,
+                        action,
+                        info_arrived,
+                        message_age_steps,
+                        apply_normalization=False,
+                    )
 
-                    # Compute the error reward component based on definition mode
-                    if definition.mode == "absolute":
-                        error_reward = -curr_error
-                    elif definition.mode == "difference":
-                        error_reward = prev_errors[i] - curr_error
-                    else:
-                        # Simple rewards - shouldn't reach here but handle it
-                        # Just use the actual reward value
-                        error_reward = rewards[f"agent_{i}"]
-
-                    comm_penalty = 0.0
-                    if not self.perfect_communication and action == 1:
-                        penalty_alpha = (
-                            definition.comm_penalty_alpha
-                            if definition.mode not in {"simple", "simple_penalty"}
-                            else definition.simple_comm_penalty_alpha
-                        )
-                        if penalty_alpha > 0:
-                            recent_tx = self._recent_transmission_count(i)
-                            throughput_estimate = self._compute_agent_throughput(i)
-                            comm_penalty = penalty_alpha * (recent_tx / throughput_estimate)
-
-                    collected_rewards.append(error_reward - comm_penalty)
+                    collected_rewards.append(float(reward_components["reward"]))
                     prev_errors[i] = curr_error
 
                 if all(terminated.values()) or all(truncated.values()):
@@ -1044,6 +1040,7 @@ class NCS_Env(gym.Env):
         action: int,
         info_arrived: bool,
         message_age_steps: Optional[int] = None,
+        apply_normalization: bool = True,
     ) -> Dict[str, float]:
         """Compute reward and components for the given reward definition."""
         comm_penalty = 0.0
@@ -1077,11 +1074,12 @@ class NCS_Env(gym.Env):
 
         reward_value = float(error_reward - comm_penalty)
 
-        # Apply normalization to full reward if configured
-        if isinstance(definition.normalizer, RunningRewardNormalizer):
-            reward_value = self._apply_running_normalization(definition_idx, agent_idx, reward_value)
-        elif definition.normalizer is not None:
-            reward_value = definition.normalizer(reward_value)
+        if apply_normalization:
+            # Apply normalization to full reward if configured
+            if isinstance(definition.normalizer, RunningRewardNormalizer):
+                reward_value = self._apply_running_normalization(definition_idx, agent_idx, reward_value)
+            elif definition.normalizer is not None:
+                reward_value = definition.normalizer(reward_value)
         components: Dict[str, float] = {
             "prev_error": float(prev_error),
             "curr_error": float(curr_error),
