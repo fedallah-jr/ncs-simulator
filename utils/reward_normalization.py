@@ -5,7 +5,7 @@ Utilities for estimating reward normalization statistics.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional, Any
+from typing import Callable, Optional, Any, Dict
 
 import numpy as np
 from gymnasium import spaces
@@ -48,6 +48,21 @@ class RunningRewardNormalizer:
 
     def __call__(self, reward: float) -> float:
         return reward / self.std
+
+
+_SHARED_RUNNING_NORMALIZERS: Dict[str, RunningRewardNormalizer] = {}
+
+
+def get_shared_running_normalizer(key: str) -> RunningRewardNormalizer:
+    normalizer = _SHARED_RUNNING_NORMALIZERS.get(key)
+    if normalizer is None:
+        normalizer = RunningRewardNormalizer()
+        _SHARED_RUNNING_NORMALIZERS[key] = normalizer
+    return normalizer
+
+
+def reset_shared_running_normalizers() -> None:
+    _SHARED_RUNNING_NORMALIZERS.clear()
 
 
 # Backward-compatible alias

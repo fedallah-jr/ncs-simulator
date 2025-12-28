@@ -241,6 +241,66 @@ def load_marl_torch_multi_agent_policy(model_path: str, env: NCS_Env) -> MARLTor
     return MARLTorchMultiAgentPolicy(agent_or_agents, meta, device=torch.device("cpu"))
 
 
+class MARLTorchSingleAgentPolicy:
+    def __init__(self, agent_or_agents: Any, metadata: Any, agent_index: int) -> None:
+        self.agent_or_agents = agent_or_agents
+        self.metadata = metadata
+        self.agent_index = int(agent_index)
+        if self.agent_index < 0 or self.agent_index >= int(self.metadata.n_agents):
+            raise ValueError("marl_agent_index must be within [0, n_agents)")
+
+        import torch
+        from utils.marl.networks import DuelingMLPAgent, MLPAgent
+
+        self.device = torch.device("cpu")
+        if isinstance(self.agent_or_agents, (MLPAgent, DuelingMLPAgent)):
+            self.agent_or_agents.to(self.device)
+        else:
+            for net in self.agent_or_agents:
+                net.to(self.device)
+
+    def predict(self, observation: np.ndarray, deterministic: bool = True) -> Tuple[int, None]:
+        import torch
+        from utils.marl.networks import DuelingMLPAgent, MLPAgent, append_agent_id
+
+        obs = np.asarray(observation, dtype=np.float32)
+        obs_t = torch.as_tensor(obs, device=self.device, dtype=torch.float32).unsqueeze(0)
+        full_obs = torch.zeros(
+            (1, int(self.metadata.n_agents), obs_t.shape[-1]),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        full_obs[:, self.agent_index, :] = obs_t
+        if bool(self.metadata.use_agent_id):
+            full_obs = append_agent_id(full_obs, int(self.metadata.n_agents))
+
+        if isinstance(self.agent_or_agents, (MLPAgent, DuelingMLPAgent)):
+            q = self.agent_or_agents(full_obs.view(int(self.metadata.n_agents), -1))
+            q_agent = q[self.agent_index]
+        else:
+            if len(self.agent_or_agents) != int(self.metadata.n_agents):
+                raise ValueError("Independent agents sequence length must equal n_agents")
+            q_agent = self.agent_or_agents[self.agent_index](full_obs[:, self.agent_index, :]).squeeze(0)
+        action = int(torch.argmax(q_agent).item())
+        return action, None
+
+
+def load_marl_torch_policy(model_path: str, env: Any, marl_agent_index: int = 0) -> MARLTorchSingleAgentPolicy:
+    from utils.marl.torch_policy import load_marl_torch_agents_from_checkpoint
+
+    agent_or_agents, meta = load_marl_torch_agents_from_checkpoint(Path(model_path))
+    env_obs_dim = None
+    if hasattr(env, "observation_space"):
+        space = env.observation_space
+        if hasattr(space, "spaces") and "agent_0" in space.spaces:
+            env_obs_dim = int(space.spaces["agent_0"].shape[0])
+        elif hasattr(space, "shape") and space.shape:
+            env_obs_dim = int(space.shape[0])
+    if env_obs_dim is not None and env_obs_dim != meta.obs_dim:
+        raise ValueError(f"Env obs_dim={env_obs_dim} does not match checkpoint obs_dim={meta.obs_dim}")
+    return MARLTorchSingleAgentPolicy(agent_or_agents, meta, agent_index=marl_agent_index)
+
+
 def load_multi_agent_policy(
     policy_path: str,
     policy_type: str,

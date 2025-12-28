@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -9,11 +11,15 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from .controller import Controller, compute_discrete_lqr_gain, compute_finite_horizon_lqr_gains
-from .config import load_config
+from .config import DEFAULT_CONFIG_PATH, load_config
 from .network import NetworkModel
 from .plant import Plant
 from utils.schedulers import build_scheduler
-from utils.reward_normalization import RunningRewardNormalizer, ZScoreRewardNormalizer
+from utils.reward_normalization import (
+    RunningRewardNormalizer,
+    ZScoreRewardNormalizer,
+    get_shared_running_normalizer,
+)
 
 
 @dataclass
@@ -82,7 +88,8 @@ class NCS_Env(gym.Env):
         self.reward_override = reward_override
         self.termination_override = termination_override
 
-        self.config = load_config(config_path)
+        self.config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
+        self.config = load_config(str(self.config_path))
         self.system_cfg = self.config.get("system", {})
         self.timestep_duration = 0.01
         self.timestep = 0
@@ -889,13 +896,29 @@ class NCS_Env(gym.Env):
         self._compute_reward_normalizers(self.reward_normalization_episodes)
         print("[Reward Normalization] Statistics computed.\n")
 
+    def _running_normalizer_key(self, definition_idx: int, definition: RewardDefinition) -> str:
+        signature = {
+            "config_path": str(self.config_path),
+            "definition_idx": int(definition_idx),
+            "mode": definition.mode,
+            "comm_penalty_alpha": float(definition.comm_penalty_alpha),
+            "simple_comm_penalty_alpha": float(definition.simple_comm_penalty_alpha),
+            "simple_freshness_decay": float(definition.simple_freshness_decay),
+            "state_cost_matrix": np.asarray(self.state_cost_matrix).tolist(),
+            "comm_recent_window": int(self.comm_recent_window),
+            "comm_throughput_window": int(self.comm_throughput_window),
+            "comm_throughput_floor": float(self.comm_throughput_floor),
+        }
+        return json.dumps(signature, sort_keys=True, separators=(",", ":"))
+
     def _init_running_reward_normalizers(self) -> None:
         self._running_reward_returns = [
             [0.0 for _ in range(self.n_agents)] for _ in range(len(self.reward_definitions))
         ]
-        for definition in self.reward_definitions:
+        for idx, definition in enumerate(self.reward_definitions):
             if _should_normalize_reward(definition):
-                definition.normalizer = RunningRewardNormalizer()
+                key = self._running_normalizer_key(idx, definition)
+                definition.normalizer = get_shared_running_normalizer(key)
 
     def _reset_running_returns(self) -> None:
         if self._running_reward_returns is None:
