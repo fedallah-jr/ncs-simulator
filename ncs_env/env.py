@@ -898,7 +898,7 @@ class NCS_Env(gym.Env):
 
     def _running_normalizer_key(self, definition_idx: int, definition: RewardDefinition) -> str:
         signature = {
-            "config_path": str(self.config_path),
+            "config_path": str(self.config_path.resolve()),
             "definition_idx": int(definition_idx),
             "mode": definition.mode,
             "comm_penalty_alpha": float(definition.comm_penalty_alpha),

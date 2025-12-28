@@ -32,6 +32,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from ncs_env.env import NCS_Env
 from ncs_env.config import load_config
+from utils.reward_normalization import reset_shared_running_normalizers
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
 # -----------------------------------------------------------------------------
@@ -217,6 +218,7 @@ def get_fitness_shaping_fn(method: str = "centered_rank"):
 
 def train(args):
     """Main training loop."""
+    reset_shared_running_normalizers()
     import jax
     import jax.numpy as jnp
     from jax import flatten_util

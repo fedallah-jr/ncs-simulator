@@ -17,6 +17,7 @@ from ncs_env.config import load_config
 from ncs_env.env import NCS_Env
 from utils.marl import MARLReplayBuffer, QMIXLearner, MLPAgent, DuelingMLPAgent, QMixer, run_evaluation
 from utils.marl.common import select_device, epsilon_by_step, stack_obs, select_actions
+from utils.reward_normalization import reset_shared_running_normalizers
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
 
@@ -69,6 +70,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    reset_shared_running_normalizers()
     args = parse_args()
     device = select_device(args.device)
     rng = np.random.default_rng(args.seed)

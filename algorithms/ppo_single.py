@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from ncs_env.env import NCS_Env
 from ncs_env.config import load_config
 from utils import SingleAgentWrapper, save_training_rewards, unwrap_base_env, RewardMixLoggingEvalCallback
+from utils.reward_normalization import reset_shared_running_normalizers
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
 
@@ -72,6 +73,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    reset_shared_running_normalizers()
     args = parse_args()
 
     config_path_str = str(args.config) if args.config is not None else None
