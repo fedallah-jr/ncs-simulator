@@ -32,7 +32,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from ncs_env.env import NCS_Env
 from ncs_env.config import load_config
-from utils.reward_normalization import reset_shared_running_normalizers
+from utils.reward_normalization import (
+    configure_shared_running_normalizers,
+    reset_shared_running_normalizers,
+)
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
 # -----------------------------------------------------------------------------
@@ -98,15 +101,17 @@ def create_policy_net(action_dim: int, hidden_size: int = 64, use_layer_norm: bo
 
 
 def _init_worker(
-    config_path: Optional[str], 
-    episode_length: int, 
+    config_path: Optional[str],
+    episode_length: int,
     seed: Optional[int],
     action_dim: int,
     obs_dim: int,
     n_agents: int,
     use_agent_id: bool,
     hidden_size: int = 64,
-    use_layer_norm: bool = False
+    use_layer_norm: bool = False,
+    shared_normalizer_store: Optional[Any] = None,
+    shared_normalizer_lock: Optional[Any] = None,
 ):
     """Initialize the environment and model in the worker process."""
     global _worker_env, _worker_model, _worker_params, _worker_config_path, _worker_episode_length
@@ -125,7 +130,8 @@ def _init_worker(
     _worker_n_agents = int(n_agents)
     _worker_use_agent_id = bool(use_agent_id)
     _worker_agent_id_eye = np.eye(_worker_n_agents, dtype=np.float32) if _worker_use_agent_id else None
-    
+
+    configure_shared_running_normalizers(shared_normalizer_store, shared_normalizer_lock)
     _worker_env = NCS_Env(
         n_agents=_worker_n_agents,
         episode_length=episode_length,
@@ -336,9 +342,16 @@ def train(args):
 
     # 4. Setup Parallel Workers
     pool = None
+    manager = None
+    shared_normalizer_store = None
+    shared_normalizer_lock = None
     map_fn = None
     if args.n_workers and args.n_workers > 1:
         ctx = multiprocessing.get_context("spawn")
+        manager = ctx.Manager()
+        shared_normalizer_store = manager.dict()
+        shared_normalizer_lock = manager.Lock()
+        configure_shared_running_normalizers(shared_normalizer_store, shared_normalizer_lock)
         pool = ctx.Pool(
             processes=args.n_workers,
             initializer=_init_worker,
@@ -352,12 +365,17 @@ def train(args):
                 use_agent_id,
                 args.hidden_size,
                 args.use_layer_norm,
+                shared_normalizer_store,
+                shared_normalizer_lock,
             ),
         )
         map_fn = pool.map
     else:
+        configure_shared_running_normalizers(None, None)
+
         def map_fn(func, iterable):
             return list(map(func, iterable))
+
         _init_worker(
             config_path_str,
             args.episode_length,
@@ -515,6 +533,9 @@ def train(args):
     if pool is not None:
         pool.close()
         pool.join()
+    if manager is not None:
+        manager.shutdown()
+        configure_shared_running_normalizers(None, None)
     
     # Save hyperparameters
     hyperparams = {
