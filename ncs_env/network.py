@@ -63,7 +63,6 @@ class NetworkModel:
         data_rate_kbps: float = 250.0,
         data_packet_size: int = 50,
         ack_packet_size: int = 10,
-        max_queue_size: int = 1,
         timestep_duration: float = 0.01,
         slots_per_step: int = 32,
         mac_min_be: int = 3,
@@ -80,7 +79,6 @@ class NetworkModel:
         self.data_rate_kbps = data_rate_kbps
         self.data_packet_size = data_packet_size
         self.ack_packet_size = ack_packet_size
-        self.max_queue_size = max_queue_size
         self.timestep_duration = timestep_duration
         self.slots_per_step = max(1, int(slots_per_step))
         self.slot_duration = self.timestep_duration / float(self.slots_per_step)
@@ -134,7 +132,7 @@ class NetworkModel:
         entity = self.entities[entity_idx]
 
         overwritten_packet = None
-        if entity.pending_packet is not None and self.max_queue_size == 1:
+        if entity.pending_packet is not None:
             overwritten_packet = entity.pending_packet
             entity.pending_packet = None
 
@@ -162,7 +160,7 @@ class NetworkModel:
         entity = self.entities[entity_idx]
 
         overwritten_packet = None
-        if entity.pending_packet is not None and self.max_queue_size == 1:
+        if entity.pending_packet is not None:
             overwritten_packet = entity.pending_packet
             entity.pending_packet = None
 

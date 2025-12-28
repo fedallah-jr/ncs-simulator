@@ -80,6 +80,7 @@ class NCS_Env(gym.Env):
         seed: Optional[int] = None,
         reward_override: Optional[Dict[str, Any]] = None,
         termination_override: Optional[Dict[str, Any]] = None,
+        freeze_running_normalization: bool = False,
     ):
         super().__init__()
         self.n_agents = n_agents
@@ -87,6 +88,7 @@ class NCS_Env(gym.Env):
         self.comm_cost = comm_cost
         self.reward_override = reward_override
         self.termination_override = termination_override
+        self.freeze_running_normalization = bool(freeze_running_normalization)
 
         self.config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
         self.config = load_config(str(self.config_path))
@@ -248,7 +250,6 @@ class NCS_Env(gym.Env):
             data_rate_kbps=network_cfg.get("data_rate_kbps", 250.0),
             data_packet_size=network_cfg.get("data_packet_size", 50),
             ack_packet_size=network_cfg.get("ack_packet_size", 10),
-            max_queue_size=network_cfg.get("max_queue_size", 1),
             slots_per_step=network_cfg.get("slots_per_step", 32),
             mac_min_be=network_cfg.get("mac_min_be", 3),
             mac_max_be=network_cfg.get("mac_max_be", 5),
@@ -901,6 +902,7 @@ class NCS_Env(gym.Env):
             "config_path": str(self.config_path.resolve()),
             "definition_idx": int(definition_idx),
             "mode": definition.mode,
+            "normalization_gamma": float(self.reward_normalization_gamma),
             "comm_penalty_alpha": float(definition.comm_penalty_alpha),
             "simple_comm_penalty_alpha": float(definition.simple_comm_penalty_alpha),
             "simple_freshness_decay": float(definition.simple_freshness_decay),
@@ -1049,7 +1051,8 @@ class NCS_Env(gym.Env):
         returns[agent_idx] = self.reward_normalization_gamma * returns[agent_idx] + reward_value
         normalizer = self.reward_definitions[definition_idx].normalizer
         if isinstance(normalizer, RunningRewardNormalizer):
-            normalizer.update(returns[agent_idx])
+            if not self.freeze_running_normalization:
+                normalizer.update(returns[agent_idx])
             return normalizer(reward_value)
         return reward_value
 

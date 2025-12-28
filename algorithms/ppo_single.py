@@ -34,6 +34,7 @@ def make_ncs_single_env(
     seed: Optional[int],
     reward_override: Optional[Dict[str, Any]] = None,
     termination_override: Optional[Dict[str, Any]] = None,
+    freeze_running_normalization: bool = False,
 ) -> SingleAgentWrapper:
     def factory():
         return NCS_Env(
@@ -43,6 +44,7 @@ def make_ncs_single_env(
             seed=seed,
             reward_override=reward_override,
             termination_override=termination_override,
+            freeze_running_normalization=freeze_running_normalization,
         )
 
     return SingleAgentWrapper(factory)
@@ -107,6 +109,7 @@ def main() -> None:
             args.seed,
             reward_override=eval_reward_override,
             termination_override=eval_termination_override,
+            freeze_running_normalization=True,
         )
         return Monitor(env)
 

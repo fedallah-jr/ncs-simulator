@@ -110,6 +110,7 @@ def main() -> None:
         seed=args.seed,
         reward_override=eval_reward_override,
         termination_override=eval_termination_override,
+        freeze_running_normalization=True,
     )
 
     obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])

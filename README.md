@@ -70,7 +70,6 @@ Observations are laid out as `[current_state, current_throughput, prev_states...
 ### `network`
 - `data_rate_kbps`: Physical-layer rate used to convert packet sizes into transmission durations.
 - `data_packet_size`, `ack_packet_size`: Sensor/ACK payload sizes in bytes. Larger packets hold the channel for more timesteps.
-- `max_queue_size`: Pending-packet capacity per entity. A value of `1` means new data overwrites unsent packets, enforcing “freshest data only.”
 - `perfect_communication`: When `true`, disables CSMA behavior entirely—measurements reach controllers instantly, collisions/throughput bookkeeping is skipped, and decision histories record immediate successes for every transmission attempt.
 - `slots_per_step`: Number of micro-slots simulated inside each 10 ms environment step (default 32, ≈312 µs per slot).
 - `mac_min_be` / `mac_max_be`: CSMA/CA backoff exponent bounds (defaults 3/5).
@@ -78,6 +77,8 @@ Observations are laid out as `[current_state, current_throughput, prev_states...
 - `max_frame_retries`: How many collided/NAKed frame retries are attempted before drop (default 3).
 - `cca_time_us`, `mac_ack_wait_us`, `mac_ack_turnaround_us`: Timing knobs (µs) for CCA duration, MAC ACK wait, and ACK turnaround.
 - `mac_ack_size_bytes`: Size of the MAC ACK frame (default 5 bytes).
+
+Note: `max_queue_size` is not supported yet; the network currently behaves as a fixed single-packet queue with overwrite-on-send. This option may be implemented in a future update.
 
 Adjusting these parameters lets you explore different plant dynamics, estimator fidelity, reward shaping, or network congestion levels without modifying the source code.
 

@@ -66,7 +66,6 @@
     "data_rate_kbps": 100.0,
     "data_packet_size": 100,
     "ack_packet_size": 2,
-    "max_queue_size": 1,
     "perfect_communication": false
   }
 }

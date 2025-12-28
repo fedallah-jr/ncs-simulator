@@ -31,6 +31,7 @@ def make_env_fn(
     seed: Optional[int],
     reward_override: Optional[Dict[str, Any]] = None,
     termination_override: Optional[Dict[str, Any]] = None,
+    freeze_running_normalization: bool = False,
 ) -> Callable[[], gym.Env]:
     def factory():
         def env_factory():
@@ -41,6 +42,7 @@ def make_env_fn(
                 seed=seed,
                 reward_override=reward_override,
                 termination_override=termination_override,
+                freeze_running_normalization=freeze_running_normalization,
             )
         return SingleAgentWrapper(env_factory)
 
@@ -101,6 +103,7 @@ def main() -> None:
                 episode_length=args.episode_length,
                 config_path=config_path_str,
                 seed=args.seed,
+                freeze_running_normalization=False,
             )
         return SingleAgentWrapper(factory)
 
@@ -113,6 +116,7 @@ def main() -> None:
                 seed=args.seed,
                 reward_override=eval_reward_override,
                 termination_override=eval_termination_override,
+                freeze_running_normalization=True,
             )
         return SingleAgentWrapper(factory)
 
