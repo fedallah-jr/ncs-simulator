@@ -11,6 +11,7 @@ from .buffer import MARLReplayBuffer, MARLBatch
 from .common import select_device, epsilon_by_step, stack_obs, select_actions, run_evaluation
 from .learners import IQLLearner, VDNLearner, QMIXLearner
 from .networks import CentralValueMLP, MLPAgent, DuelingMLPAgent, QMixer, VDNMixer, append_agent_id
+from .value_norm import ValueNorm
 
 __all__ = [
     "MARLBatch",
@@ -29,4 +30,5 @@ __all__ = [
     "stack_obs",
     "VDNLearner",
     "VDNMixer",
+    "ValueNorm",
 ]

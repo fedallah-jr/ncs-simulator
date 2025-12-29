@@ -18,7 +18,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from ncs_env.config import load_config
 from ncs_env.env import NCS_Env
-from utils.marl import CentralValueMLP, MLPAgent, append_agent_id, run_evaluation, select_device, stack_obs
+from utils.marl import (
+    CentralValueMLP,
+    MLPAgent,
+    ValueNorm,
+    append_agent_id,
+    run_evaluation,
+    select_device,
+    stack_obs,
+)
 from utils.reward_normalization import reset_shared_running_normalizers
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
@@ -107,6 +115,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clip-range", type=float, default=0.2, help="PPO clipping range.")
     parser.add_argument("--ent-coef", type=float, default=0.01, help="Entropy coefficient.")
     parser.add_argument("--vf-coef", type=float, default=0.5, help="Value loss coefficient.")
+    parser.add_argument("--huber-delta", type=float, default=10.0, help="Huber loss delta for value loss.")
     parser.add_argument("--max-grad-norm", type=float, default=10.0, help="Gradient clipping L2 norm.")
 
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[128, 128], help="MLP hidden dims.")
@@ -146,6 +155,13 @@ def _compute_gae(
 def _append_agent_id_flat(obs_flat: torch.Tensor, agent_ids: torch.Tensor, n_agents: int) -> torch.Tensor:
     one_hot = F.one_hot(agent_ids, num_classes=n_agents).to(dtype=obs_flat.dtype)
     return torch.cat([obs_flat, one_hot], dim=-1)
+
+
+def _huber_loss(error: torch.Tensor, delta: float) -> torch.Tensor:
+    abs_error = torch.abs(error)
+    quadratic = torch.minimum(abs_error, torch.tensor(delta, device=error.device))
+    linear = abs_error - quadratic
+    return 0.5 * quadratic ** 2 + float(delta) * linear
 
 
 def main() -> None:
@@ -216,6 +232,7 @@ def main() -> None:
 
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=float(args.learning_rate))
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=float(args.learning_rate))
+    value_normalizer = ValueNorm(n_agents, device=device)
 
     best_eval_reward = -float("inf")
     global_step = 0
@@ -385,6 +402,7 @@ def main() -> None:
             old_log_probs_t = torch.as_tensor(log_probs_batch, device=device, dtype=torch.float32)
             advantages_t = torch.as_tensor(advantages, device=device, dtype=torch.float32)
             returns_t = torch.as_tensor(returns, device=device, dtype=torch.float32)
+            value_normalizer.update(returns_t)
 
             obs_flat = obs_t.reshape(-1, obs_dim)
             actions_flat = actions_t.reshape(-1)
@@ -439,7 +457,22 @@ def main() -> None:
                     actor_optimizer.step()
 
                 values_pred = critic(global_obs_t)
-                value_loss = F.mse_loss(values_pred, returns_t) * float(args.vf_coef)
+                values_old = torch.as_tensor(values_batch, device=device, dtype=torch.float32)
+
+                normalized_returns = value_normalizer.normalize(returns_t)
+                normalized_values = value_normalizer.normalize(values_pred)
+                normalized_values_old = value_normalizer.normalize(values_old)
+
+                value_pred_clipped = normalized_values_old + (
+                    normalized_values - normalized_values_old
+                ).clamp(-float(args.clip_range), float(args.clip_range))
+
+                error_original = normalized_returns - normalized_values
+                error_clipped = normalized_returns - value_pred_clipped
+
+                value_loss_original = _huber_loss(error_original, args.huber_delta)
+                value_loss_clipped = _huber_loss(error_clipped, args.huber_delta)
+                value_loss = torch.max(value_loss_original, value_loss_clipped).mean() * float(args.vf_coef)
 
                 critic_optimizer.zero_grad(set_to_none=True)
                 value_loss.backward()
@@ -462,6 +495,8 @@ def main() -> None:
         "clip_range": args.clip_range,
         "ent_coef": args.ent_coef,
         "vf_coef": args.vf_coef,
+        "huber_delta": args.huber_delta,
+        "value_norm": True,
         "max_grad_norm": args.max_grad_norm,
         "hidden_dims": list(args.hidden_dims),
         "activation": args.activation,
