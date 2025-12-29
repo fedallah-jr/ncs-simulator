@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence
 
 import torch
 
@@ -13,10 +13,12 @@ class ValueNorm:
         device: Optional[torch.device] = None,
     ) -> None:
         if isinstance(shape, int):
-            shape = (shape,)
-        if not shape:
-            raise ValueError("shape must be non-empty")
-        self.shape: Tuple[int, ...] = tuple(int(x) for x in shape)
+            if shape < 0:
+                raise ValueError("shape must be non-negative")
+            shape = () if shape == 0 else (shape,)
+        self.shape = tuple(int(x) for x in shape)
+        if any(dim <= 0 for dim in self.shape):
+            raise ValueError("shape dimensions must be positive")
         self.eps = float(eps)
         self.device = device if device is not None else torch.device("cpu")
 
@@ -25,15 +27,20 @@ class ValueNorm:
         self.count = torch.tensor(self.eps, dtype=torch.float32, device=self.device)
 
     def update(self, values: torch.Tensor) -> None:
-        if values.ndim < len(self.shape):
-            raise ValueError("values must have at least as many dims as shape")
-        if tuple(values.shape[-len(self.shape):]) != self.shape:
-            raise ValueError("values trailing dimensions must match ValueNorm shape")
-
-        flat = values.reshape(-1, *self.shape)
-        batch_mean = flat.mean(dim=0)
-        batch_var = flat.var(dim=0, unbiased=False)
-        batch_count = torch.tensor(float(flat.shape[0]), device=self.device)
+        if self.shape:
+            if values.ndim < len(self.shape):
+                raise ValueError("values must have at least as many dims as shape")
+            if tuple(values.shape[-len(self.shape):]) != self.shape:
+                raise ValueError("values trailing dimensions must match ValueNorm shape")
+            flat = values.reshape(-1, *self.shape)
+            batch_mean = flat.mean(dim=0)
+            batch_var = flat.var(dim=0, unbiased=False)
+            batch_count = torch.tensor(float(flat.shape[0]), device=self.device)
+        else:
+            flat = values.reshape(-1)
+            batch_mean = flat.mean()
+            batch_var = flat.var(unbiased=False)
+            batch_count = torch.tensor(float(flat.shape[0]), device=self.device)
 
         delta = batch_mean - self.mean
         total_count = self.count + batch_count
