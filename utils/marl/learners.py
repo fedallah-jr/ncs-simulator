@@ -80,7 +80,7 @@ class IQLLearner:
         use_agent_id: bool = True,
         double_q: bool = True,
         device: Optional[torch.device] = None,
-        optimizer_type: str = "adam",
+        optimizer_type: str = "rmsprop",
     ) -> None:
         self.agent = agent
         self.target_agent = copy.deepcopy(agent)
@@ -158,7 +158,7 @@ class VDNLearner:
         use_agent_id: bool = True,
         double_q: bool = True,
         device: Optional[torch.device] = None,
-        optimizer_type: str = "adam",
+        optimizer_type: str = "rmsprop",
     ) -> None:
         self.agent = agent
         self.target_agent = copy.deepcopy(agent)

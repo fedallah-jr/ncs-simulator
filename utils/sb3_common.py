@@ -8,11 +8,63 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import gymnasium as gym
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.vec_env import VecNormalize
+
+from ncs_env.config import load_config
+
+
+def load_eval_overrides(
+    config_path: Optional[str],
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """
+    Load evaluation reward and termination overrides from a config file.
+
+    Args:
+        config_path: Path to the config JSON file, or None.
+
+    Returns:
+        Tuple of (eval_reward_override, eval_termination_override), each may be None.
+    """
+    if config_path is None:
+        return None, None
+    try:
+        cfg = load_config(config_path)
+        reward_cfg = cfg.get("reward", {})
+        eval_reward_cfg = reward_cfg.get("evaluation", None)
+        eval_reward_override = eval_reward_cfg if isinstance(eval_reward_cfg, dict) else None
+
+        termination_cfg = cfg.get("termination", {})
+        eval_termination_cfg = termination_cfg.get("evaluation", None)
+        eval_termination_override = eval_termination_cfg if isinstance(eval_termination_cfg, dict) else None
+
+        return eval_reward_override, eval_termination_override
+    except Exception:
+        return None, None
+
+
+def make_mix_weight_fn(env: Any) -> Callable[[], Optional[float]]:
+    """
+    Create a function that returns the current reward mix weight from an environment.
+
+    Args:
+        env: A possibly wrapped environment.
+
+    Returns:
+        A callable that returns the mix weight or None.
+    """
+    def get_mix_weight() -> Optional[float]:
+        base_env = unwrap_base_env(env)
+        if hasattr(base_env, "get_reward_mix_weight"):
+            try:
+                return float(base_env.get_reward_mix_weight())
+            except Exception:
+                return None
+        return None
+    return get_mix_weight
 
 
 def save_training_rewards(vec_env: gym.Env, output_path: Path) -> None:

@@ -3,13 +3,14 @@ Utility helpers shared across algorithms.
 """
 
 from .reward_normalization import (
-    RewardNormalizer,
     ZScoreRewardNormalizer,
     compute_reward_normalizer,
     compute_zscore_reward_normalizer,
 )
 from .sb3_common import (
     RewardMixLoggingEvalCallback,
+    load_eval_overrides,
+    make_mix_weight_fn,
     save_training_rewards,
     unwrap_base_env,
 )
@@ -23,7 +24,6 @@ from .wrapper import SingleAgentWrapper
 
 __all__ = [
     "RewardMixLoggingEvalCallback",
-    "RewardNormalizer",
     "ZScoreRewardNormalizer",
     "build_scheduler",
     "compute_reward_normalizer",
@@ -31,6 +31,8 @@ __all__ = [
     "constant_scheduler",
     "cosine_scheduler",
     "linear_scheduler",
+    "load_eval_overrides",
+    "make_mix_weight_fn",
     "save_training_rewards",
     "SingleAgentWrapper",
     "unwrap_base_env",

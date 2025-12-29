@@ -75,17 +75,16 @@ class NCS_Env(gym.Env):
         self,
         n_agents: int = 3,
         episode_length: int = 1000,
-        comm_cost: float = 0.01,
         config_path: Optional[str] = None,
         seed: Optional[int] = None,
         reward_override: Optional[Dict[str, Any]] = None,
         termination_override: Optional[Dict[str, Any]] = None,
         freeze_running_normalization: bool = False,
+        **kwargs,  # Accept deprecated parameters like comm_cost
     ):
         super().__init__()
         self.n_agents = n_agents
         self.episode_length = episode_length
-        self.comm_cost = comm_cost
         self.reward_override = reward_override
         self.termination_override = termination_override
         self.freeze_running_normalization = bool(freeze_running_normalization)
@@ -189,7 +188,7 @@ class NCS_Env(gym.Env):
         self.comm_throughput_window = int(
             reward_cfg.get("comm_throughput_window", max(5 * self.history_window, 50))
         )
-        base_comm_penalty_alpha = float(reward_cfg.get("comm_penalty_alpha", self.comm_cost))
+        base_comm_penalty_alpha = float(reward_cfg.get("comm_penalty_alpha", 0.0))
         base_simple_comm_penalty_alpha = float(
             reward_cfg.get("simple_comm_penalty_alpha", base_comm_penalty_alpha)
         )

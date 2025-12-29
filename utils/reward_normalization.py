@@ -172,10 +172,6 @@ def reset_shared_running_normalizers() -> None:
             _SHARED_RUNNING_NORMALIZER_STORE.clear()
 
 
-# Backward-compatible alias
-RewardNormalizer = ZScoreRewardNormalizer
-
-
 def _sample_random_action(action_space: spaces.Space, rng: np.random.Generator):
     """Sample an action from the given space using the provided RNG."""
     if isinstance(action_space, spaces.Dict):

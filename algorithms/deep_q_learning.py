@@ -7,7 +7,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Optional
 
 import gymnasium as gym
 from stable_baselines3 import DQN
@@ -19,34 +19,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ncs_env.env import NCS_Env
-from ncs_env.config import load_config
-from utils import SingleAgentWrapper, save_training_rewards, unwrap_base_env, RewardMixLoggingEvalCallback
+from utils import SingleAgentWrapper, save_training_rewards, RewardMixLoggingEvalCallback, load_eval_overrides, make_mix_weight_fn
 from utils.reward_normalization import reset_shared_running_normalizers
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
-
-
-def make_env_fn(
-    config_path: Optional[str],
-    episode_length: int,
-    seed: Optional[int],
-    reward_override: Optional[Dict[str, Any]] = None,
-    termination_override: Optional[Dict[str, Any]] = None,
-    freeze_running_normalization: bool = False,
-) -> Callable[[], gym.Env]:
-    def factory():
-        def env_factory():
-            return NCS_Env(
-                n_agents=1,
-                episode_length=episode_length,
-                config_path=config_path,
-                seed=seed,
-                reward_override=reward_override,
-                termination_override=termination_override,
-                freeze_running_normalization=freeze_running_normalization,
-            )
-        return SingleAgentWrapper(env_factory)
-
-    return factory
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,22 +52,7 @@ def main() -> None:
     reset_shared_running_normalizers()
     args = parse_args()
     config_path_str = str(args.config) if args.config is not None else None
-    eval_reward_override: Optional[Dict[str, Any]] = None
-    eval_termination_override: Optional[Dict[str, Any]] = None
-    if config_path_str is not None:
-        try:
-            cfg = load_config(config_path_str)
-            reward_cfg = cfg.get("reward", {})
-            eval_reward_cfg = reward_cfg.get("evaluation", None)
-            if isinstance(eval_reward_cfg, dict):
-                eval_reward_override = eval_reward_cfg
-            termination_cfg = cfg.get("termination", {})
-            eval_termination_cfg = termination_cfg.get("evaluation", None)
-            if isinstance(eval_termination_cfg, dict):
-                eval_termination_override = eval_termination_cfg
-        except Exception:
-            eval_reward_override = None
-            eval_termination_override = None
+    eval_reward_override, eval_termination_override = load_eval_overrides(config_path_str)
 
     run_dir = prepare_run_directory("dqn", args.config, args.output_root)
 
@@ -127,15 +87,6 @@ def main() -> None:
         eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True)
         eval_env.training = False
 
-    def get_mix_weight() -> Optional[float]:
-        base_env = unwrap_base_env(eval_env)
-        if hasattr(base_env, "get_reward_mix_weight"):
-            try:
-                return float(base_env.get_reward_mix_weight())
-            except Exception:
-                return None
-        return None
-
     eval_callback = RewardMixLoggingEvalCallback(
         eval_env,
         best_model_save_path=str(run_dir),
@@ -143,7 +94,7 @@ def main() -> None:
         eval_freq=args.eval_freq,
         n_eval_episodes=args.eval_episodes,
         deterministic=True,
-        mix_weight_fn=get_mix_weight,
+        mix_weight_fn=make_mix_weight_fn(eval_env),
     )
     model = DQN(
         "MlpPolicy",
