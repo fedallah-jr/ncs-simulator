@@ -10,12 +10,13 @@ from __future__ import annotations
 from .buffer import MARLReplayBuffer, MARLBatch
 from .common import select_device, epsilon_by_step, stack_obs, select_actions, run_evaluation
 from .learners import IQLLearner, VDNLearner, QMIXLearner
-from .networks import MLPAgent, DuelingMLPAgent, QMixer, VDNMixer, append_agent_id
+from .networks import CentralValueMLP, MLPAgent, DuelingMLPAgent, QMixer, VDNMixer, append_agent_id
 
 __all__ = [
     "MARLBatch",
     "MARLReplayBuffer",
     "append_agent_id",
+    "CentralValueMLP",
     "DuelingMLPAgent",
     "epsilon_by_step",
     "IQLLearner",
@@ -29,4 +30,3 @@ __all__ = [
     "VDNLearner",
     "VDNMixer",
 ]
-

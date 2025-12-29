@@ -137,6 +137,46 @@ class DuelingMLPAgent(nn.Module):
         return q
 
 
+class CentralValueMLP(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        n_outputs: int,
+        hidden_dims: Sequence[int] = (128, 128),
+        activation: str = "relu",
+        layer_norm: bool = False,
+    ) -> None:
+        super().__init__()
+        if input_dim <= 0 or n_outputs <= 0:
+            raise ValueError("input_dim and n_outputs must be positive")
+        if not hidden_dims:
+            raise ValueError("hidden_dims must be non-empty")
+
+        act: nn.Module
+        if activation == "relu":
+            act = nn.ReLU()
+        elif activation == "tanh":
+            act = nn.Tanh()
+        elif activation == "elu":
+            act = nn.ELU()
+        else:
+            raise ValueError("activation must be one of: relu, tanh, elu")
+
+        layers: list[nn.Module] = []
+        last_dim = input_dim
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(last_dim, int(hidden_dim)))
+            if layer_norm:
+                layers.append(nn.LayerNorm(int(hidden_dim)))
+            layers.append(act)
+            last_dim = int(hidden_dim)
+        layers.append(nn.Linear(last_dim, n_outputs))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        return self.net(obs)
+
+
 class VDNMixer(nn.Module):
     def __init__(self) -> None:
         super().__init__()
