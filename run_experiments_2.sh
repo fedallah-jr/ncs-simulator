@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiments for absolute reward config with running normalization (shared params + agent-id).
+# MARL experiment batch 2: QMIX (double+dueling, shared), VDN (double, shared), IQL (double, shared).
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -13,7 +13,7 @@ TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-1000000}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-800000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/marl_absolute_running_ablation_dueling_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/exp_2_qmix_dueling_vdn_double_iql_double_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -37,49 +37,62 @@ if [[ ! -f "${config_path}" ]]; then
   exit 1
 fi
 
+next_run_dir() {
+  local algo="$1"
+  local idx=0
+  local candidate
+  while :; do
+    candidate="${run_root}/${algo}_${idx}"
+    if [[ ! -d "${candidate}" ]]; then
+      echo "${candidate}"
+      return 0
+    fi
+    idx=$((idx + 1))
+  done
+}
+
 run_one() {
   local algo_module="$1"
-  local label="$2"
-  shift 2
+  local algo_label="$2"
+  local run_label="$3"
+  shift 3
 
   local common_args=(
     --config "${config_path}"
     --output-root "${run_root}"
     --seed "${SEED}"
     --total-timesteps "${TOTAL_TIMESTEPS}"
-    --epsilon-decay-steps "${EPS_DECAY_STEPS}"
     --n-eval-episodes 10
   )
 
-  local log_path="${run_root}/logs/${label}.log"
-  echo "=== ${label} ==="
+  local log_path="${run_root}/logs/${run_label}.log"
+  local expected_dir
+  expected_dir="$(next_run_dir "${algo_label}")"
+
+  echo "=== ${run_label} ==="
   echo "Logging to: ${log_path}"
+  echo "Expected run dir: ${expected_dir}"
+
   PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m "${algo_module}" "${common_args[@]}" "$@" 2>&1 | tee "${log_path}"
+
+  local final_dir="${run_root}/${run_label}"
+  if [[ ! -d "${expected_dir}" ]]; then
+    echo "Expected run dir missing: ${expected_dir}" >&2
+    exit 1
+  fi
+  if [[ -e "${final_dir}" ]]; then
+    echo "Target run dir already exists: ${final_dir}" >&2
+    exit 1
+  fi
+  mv "${expected_dir}" "${final_dir}"
 }
 
-algos=(
-  "algorithms.marl_iql:iql"
-  "algorithms.marl_vdn:vdn"
-  "algorithms.marl_qmix:qmix"
-)
-
-ablations=(
-  "dueling:--dueling"
-  "double_dueling:--double-q --dueling"
-)
-
-for algo_entry in "${algos[@]}"; do
-  IFS=":" read -r algo_module algo_label <<<"${algo_entry}"
-  for ablation_entry in "${ablations[@]}"; do
-    IFS=":" read -r ablation_label ablation_args <<<"${ablation_entry}"
-    label="${algo_label}_absolute_running_${ablation_label}"
-    if [[ -n "${ablation_args}" ]]; then
-      run_one "${algo_module}" "${label}" ${ablation_args}
-    else
-      run_one "${algo_module}" "${label}"
-    fi
-  done
-done
+run_one "algorithms.marl_qmix" "qmix" "qmix_dueling_doubleq_shared" \
+  --double-q --dueling --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_vdn" "vdn" "vdn_doubleq_shared" \
+  --double-q --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_iql" "iql" "iql_doubleq_shared" \
+  --double-q --epsilon-decay-steps "${EPS_DECAY_STEPS}"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then

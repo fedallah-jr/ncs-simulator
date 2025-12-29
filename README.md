@@ -114,6 +114,16 @@ CLI flags let you change environment parameters. Use `--output-root` (defaults t
 
 Configuration presets live under `configs/`. `configs/perfect_comm.json` mirrors the default plant/network settings but forces `network.perfect_communication` to `true`, which is useful for debugging algorithms without channel contention.
 
+## Experiment Scripts
+
+The MARL experiment batches live in three shell scripts and all use `configs/marl_absolute_plants.json`:
+
+- `run_experiments_1.sh`: `vdn_dueling_doubleq_shared`, `qmix_doubleq_shared`, `mappo_shared`
+- `run_experiments_2.sh`: `qmix_dueling_doubleq_shared`, `vdn_doubleq_shared`, `iql_doubleq_shared`
+- `run_experiments_3.sh`: `iql_dueling_doubleq_shared`, `iql_doubleq_independent`
+
+Each script writes to a timestamped `outputs/exp_*` folder and renames the per-run directories to match the experiment settings (for example, `iql_dueling_doubleq_shared`). You can override common knobs via environment variables: `SEED`, `OUTPUT_ROOT`, `TOTAL_TIMESTEPS`, `EPS_DECAY_STEPS`.
+
 ## Visualization
 
 Post-training visualization lives in `tools/visualize_policy.py`.
