@@ -1,6 +1,6 @@
 # Networked Control System Simulator
 
-This project models multiple physical plants that share a single IEEE 802.15.4-style channel. Sensors decide each timestep whether to transmit their state, controllers run a Kalman-filtered LQR policy, and a CSMA/CA-inspired medium access layer arbitrates the shared network. The default behavior is configured through `default_config.json` in this directory.
+This project models multiple physical plants that share a single IEEE 802.15.4-style channel. Sensors decide each timestep whether to transmit their state, controllers run a Kalman-filtered LQR policy, and a CSMA/CA-inspired medium access layer arbitrates the shared network. The simulation behaviour is configured with the json files from the configs directory.
 
 ## Simulation Parameters
 
@@ -29,7 +29,7 @@ The configuration file is divided into sections; each key controls a specific as
 - `simple_comm_penalty_alpha`: Optional override for `"simple"` and `"simple_penalty"` reward modes. Set to `0` to keep no comm penalty in those modes; otherwise the same penalty formula applies.
 - `simple_freshness_decay`: Exponential freshness decay rate for `"simple"` reward mode (default `0.0`). When a measurement is delivered, the base reward becomes `exp(-simple_freshness_decay * age_steps)`, where `age_steps` is the measurement staleness in environment steps.
 - `normalize`: Optional flag for reward normalization in multi-agent runs. For standalone rewards (no mixing), this controls whether the base error reward is normalized.
-- `normalization_type`: `"fixed"` (default) or `"running"` for multi-agent reward normalization. Fixed computes stats from random rollouts; running updates stats online (VecNormalize-like).
+- `normalization_type`: `"fixed"` (default) or `"running"` for multi-agent reward normalization (single agent uses --normalize-reward which is the VecNormalize from sb3). Fixed computes stats from random rollouts; running updates stats online (VecNormalize-like).
 - `normalization_episodes`: Episode count for fixed normalization statistics (default `30`).
 - `normalization_gamma`: Discount factor for running normalization returns (default `0.99`).
 - `comm_throughput_floor`: Small positive value to keep the throughput estimate from collapsing to zero when no ACKs have been observed recently.
@@ -49,7 +49,7 @@ The configuration file is divided into sections; each key controls a specific as
     }
     ```
 
-With these fields the environment discourages bursts of transmissions in congested conditions: if an agent spams the channel (large `N_recent_tx`) while the measured throughput is low, the penalty grows rapidly; skipping a send (`action=0`) adds no communication cost. When `perfect_communication=true`, the penalty logic is bypassed entirely.
+When `perfect_communication=true`, the whole communication logic is bypassed directly resulting in instant package transmission.
 
 ### `termination`
 - `enabled`: End the episode early when any agent exceeds `state_error_max`.
@@ -103,8 +103,6 @@ All MARL Q-learning algorithms (IQL, VDN, QMIX) support these architectural enha
 
 Example with all enhancements: `python -m algorithms.marl_qmix --config configs/marl_mixed_plants.json --dueling --double-q --total-timesteps 200000`
 
-SB3 baselines automatically honor `reward.reward_mixing` (curriculum reward blending) when enabled in the config; the OpenAI-ES baseline can continue to use the single reward definition.
-
 CLI flags let you change environment parameters. Use `--output-root` (defaults to `outputs/`) to control where training artifacts land. Each run calls `utils.run_utils.prepare_run_directory(...)`, which creates a sequentially numbered folder for the algorithm (e.g., `iql_0`, `iql_1`, `vdn_0`, etc.). All training details are preserved in the saved config file. That directory always contains:
 
 - **Model Checkpoints:**
@@ -112,7 +110,7 @@ CLI flags let you change environment parameters. Use `--output-root` (defaults t
   - For OpenAI-ES: `best_model.npz` (flattened params of best individual) and `latest_model.npz`.
   - For MARL (IQL/VDN/QMIX/MAPPO): `best_model.pt` and `latest_model.pt`.
 - `training_rewards.csv`: A simple CSV table tracking performance. For SB3 this logs `[episode, reward]`; for OpenAI-ES it logs `[generation, mean_reward, max_reward, time]`.
-- **`config.json`**, which combines the full environment configuration with a `training_run` section containing the algorithm name, timestamp, source config path, and all hyperparameters from the run. This structured format makes it easy to reload configurations or use them directly with visualization tools.
+- **`config.json`**, which combines the full environment configuration with a `training_run` section containing the algorithm name, timestamp, source config path, and all hyperparameters from the run. 
 
 Configuration presets live under `configs/`. `configs/perfect_comm.json` mirrors the default plant/network settings but forces `network.perfect_communication` to `true`, which is useful for debugging algorithms without channel contention.
 
