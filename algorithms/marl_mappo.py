@@ -32,12 +32,15 @@ from utils.run_utils import prepare_run_directory, save_config_with_hyperparamet
 
 
 class MAPPORolloutBuffer:
-    def __init__(self, n_steps: int, n_agents: int, obs_dim: int) -> None:
+    def __init__(self, n_steps: int, n_agents: int, obs_dim: int, value_dim: int) -> None:
         if n_steps <= 0:
             raise ValueError("n_steps must be positive")
         self.n_steps = int(n_steps)
         self.n_agents = int(n_agents)
         self.obs_dim = int(obs_dim)
+        self.value_dim = int(value_dim)
+        if self.value_dim <= 0:
+            raise ValueError("value_dim must be positive")
         self.global_obs_dim = self.n_agents * self.obs_dim
         self.reset()
 
@@ -48,9 +51,9 @@ class MAPPORolloutBuffer:
         self.next_global_obs = np.zeros((self.n_steps, self.global_obs_dim), dtype=np.float32)
         self.actions = np.zeros((self.n_steps, self.n_agents), dtype=np.int64)
         self.log_probs = np.zeros((self.n_steps, self.n_agents), dtype=np.float32)
-        self.rewards = np.zeros((self.n_steps, self.n_agents), dtype=np.float32)
+        self.rewards = np.zeros((self.n_steps, self.value_dim), dtype=np.float32)
         self.terminated = np.zeros((self.n_steps,), dtype=np.float32)
-        self.values = np.zeros((self.n_steps, self.n_agents), dtype=np.float32)
+        self.values = np.zeros((self.n_steps, self.value_dim), dtype=np.float32)
 
     def add(
         self,
@@ -119,6 +122,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--activation", type=str, default="tanh", choices=["relu", "tanh", "elu"], help="Activation.")
     parser.add_argument("--layer-norm", action="store_true", help="Enable LayerNorm in MLP.")
     parser.add_argument("--no-agent-id", action="store_true", help="Disable appending one-hot agent id.")
+    parser.add_argument(
+        "--team-reward",
+        action="store_true",
+        help="Use the summed team reward and a single shared value function.",
+    )
 
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Torch device.")
     parser.add_argument("--log-interval", type=int, default=10, help="Print every N episodes.")
@@ -209,6 +217,7 @@ def main() -> None:
     n_actions = int(env.action_space.spaces["agent_0"].n)
     actor_input_dim = obs_dim + (n_agents if use_agent_id else 0)
     critic_input_dim = obs_dim * n_agents
+    value_dim = 1 if args.team_reward else n_agents
 
     actor = MLPAgent(
         input_dim=actor_input_dim,
@@ -219,7 +228,7 @@ def main() -> None:
     ).to(device)
     critic = CentralValueMLP(
         input_dim=critic_input_dim,
-        n_outputs=n_agents,
+        n_outputs=value_dim,
         hidden_dims=tuple(args.hidden_dims),
         activation=args.activation,
         layer_norm=args.layer_norm,
@@ -244,6 +253,7 @@ def main() -> None:
             "n_actions": n_actions,
             "use_agent_id": use_agent_id,
             "parameter_sharing": True,
+            "team_reward": args.team_reward,
             "agent_hidden_dims": list(args.hidden_dims),
             "agent_activation": args.activation,
             "agent_layer_norm": args.layer_norm,
@@ -268,7 +278,7 @@ def main() -> None:
         obs = stack_obs(obs_dict, n_agents)
 
         while global_step < args.total_timesteps:
-            buffer = MAPPORolloutBuffer(args.n_steps, n_agents, obs_dim)
+            buffer = MAPPORolloutBuffer(args.n_steps, n_agents, obs_dim, value_dim)
 
             for _ in range(args.n_steps):
                 if global_step >= args.total_timesteps:
@@ -296,7 +306,14 @@ def main() -> None:
                 action_dict = {f"agent_{i}": int(actions[i]) for i in range(n_agents)}
                 next_obs_dict, rewards_dict, terminated, truncated, _infos = env.step(action_dict)
                 next_obs = stack_obs(next_obs_dict, n_agents)
-                rewards = np.asarray([rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32)
+                raw_rewards = np.asarray(
+                    [rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32
+                )
+                if args.team_reward:
+                    team_reward = float(raw_rewards.sum())
+                    rewards = np.asarray([team_reward], dtype=np.float32)
+                else:
+                    rewards = raw_rewards
 
                 terminated_any = any(terminated[f"agent_{i}"] for i in range(n_agents))
                 truncated_any = any(truncated[f"agent_{i}"] for i in range(n_agents))
@@ -313,7 +330,7 @@ def main() -> None:
                     values=values,
                 )
 
-                episode_reward_sum += float(rewards.sum())
+                episode_reward_sum += float(raw_rewards.sum())
                 episode_length += 1
                 global_step += 1
 
@@ -401,13 +418,19 @@ def main() -> None:
             value_normalizer.update(returns_t)
             normalized_returns_t = value_normalizer.normalize(returns_t)
 
+            if args.team_reward:
+                advantages_actor_t = advantages_t.repeat(1, n_agents)
+            else:
+                advantages_actor_t = advantages_t
+
             obs_flat = obs_t.reshape(-1, obs_dim)
             actions_flat = actions_t.reshape(-1)
             old_log_probs_flat = old_log_probs_t.reshape(-1)
-            advantages_flat = advantages_t.reshape(-1)
+            advantages_flat = advantages_actor_t.reshape(-1)
             total_samples = int(advantages_flat.shape[0])
-            returns_flat = normalized_returns_t.reshape(-1)
-            values_old_flat = values_old.reshape(-1)
+            if not args.team_reward:
+                returns_flat = normalized_returns_t.reshape(-1)
+                values_old_flat = values_old.reshape(-1)
 
             adv_mean = advantages_flat.mean()
             adv_std = advantages_flat.std()
@@ -421,63 +444,140 @@ def main() -> None:
             if batch_size <= 0:
                 batch_size = total_samples
 
-            for _ in range(args.n_epochs):
-                indices = rng.permutation(total_samples)
-                for start in range(0, total_samples, batch_size):
-                    mb_idx = indices[start:start + batch_size]
-                    mb_idx_t = torch.as_tensor(mb_idx, device=device, dtype=torch.long)
+            if args.team_reward:
+                for _ in range(args.n_epochs):
+                    indices = rng.permutation(total_samples)
+                    for start in range(0, total_samples, batch_size):
+                        mb_idx = indices[start:start + batch_size]
+                        mb_idx_t = torch.as_tensor(mb_idx, device=device, dtype=torch.long)
 
-                    obs_mb = obs_flat[mb_idx_t]
-                    actions_mb = actions_flat[mb_idx_t]
-                    old_log_probs_mb = old_log_probs_flat[mb_idx_t]
-                    advantages_mb = advantages_flat[mb_idx_t]
-                    agent_ids_mb = agent_ids[mb_idx_t]
+                        obs_mb = obs_flat[mb_idx_t]
+                        actions_mb = actions_flat[mb_idx_t]
+                        old_log_probs_mb = old_log_probs_flat[mb_idx_t]
+                        advantages_mb = advantages_flat[mb_idx_t]
+                        agent_ids_mb = agent_ids[mb_idx_t]
 
-                    if use_agent_id:
-                        obs_in = _append_agent_id_flat(obs_mb, agent_ids_mb, n_agents)
-                    else:
-                        obs_in = obs_mb
+                        if use_agent_id:
+                            obs_in = _append_agent_id_flat(obs_mb, agent_ids_mb, n_agents)
+                        else:
+                            obs_in = obs_mb
 
-                    logits = actor(obs_in)
-                    dist = Categorical(logits=logits)
-                    new_log_probs = dist.log_prob(actions_mb)
-                    ratio = (new_log_probs - old_log_probs_mb).exp()
+                        logits = actor(obs_in)
+                        dist = Categorical(logits=logits)
+                        new_log_probs = dist.log_prob(actions_mb)
+                        ratio = (new_log_probs - old_log_probs_mb).exp()
 
-                    surr1 = ratio * advantages_mb
-                    surr2 = torch.clamp(ratio, 1.0 - args.clip_range, 1.0 + args.clip_range) * advantages_mb
-                    policy_loss = -torch.min(surr1, surr2).mean()
-                    entropy = dist.entropy().mean()
+                        surr1 = ratio * advantages_mb
+                        surr2 = torch.clamp(
+                            ratio, 1.0 - args.clip_range, 1.0 + args.clip_range
+                        ) * advantages_mb
+                        policy_loss = -torch.min(surr1, surr2).mean()
+                        entropy = dist.entropy().mean()
 
-                    actor_loss = policy_loss - float(args.ent_coef) * entropy
+                        actor_loss = policy_loss - float(args.ent_coef) * entropy
 
-                    actor_optimizer.zero_grad(set_to_none=True)
-                    actor_loss.backward()
-                    nn.utils.clip_grad_norm_(actor.parameters(), float(args.max_grad_norm))
-                    actor_optimizer.step()
+                        actor_optimizer.zero_grad(set_to_none=True)
+                        actor_loss.backward()
+                        nn.utils.clip_grad_norm_(actor.parameters(), float(args.max_grad_norm))
+                        actor_optimizer.step()
 
-                    time_ids_mb = mb_idx_t // n_agents
-                    returns_mb = returns_flat[mb_idx_t]
-                    values_old_mb = values_old_flat[mb_idx_t]
+                value_targets = normalized_returns_t.squeeze(-1)
+                values_old_targets = values_old.squeeze(-1)
+                value_total_samples = int(value_targets.shape[0])
+                value_batch_size = min(int(args.batch_size), value_total_samples)
+                if value_batch_size <= 0:
+                    value_batch_size = value_total_samples
 
-                    global_obs_mb = global_obs_t[time_ids_mb]
-                    values_pred_all = critic(global_obs_mb)
-                    values_pred_mb = values_pred_all.gather(1, agent_ids_mb.unsqueeze(-1)).squeeze(-1)
+                for _ in range(args.n_epochs):
+                    value_indices = rng.permutation(value_total_samples)
+                    for start in range(0, value_total_samples, value_batch_size):
+                        value_idx = value_indices[start:start + value_batch_size]
+                        value_idx_t = torch.as_tensor(value_idx, device=device, dtype=torch.long)
 
-                    value_pred_clipped = values_old_mb + (
-                        values_pred_mb - values_old_mb
-                    ).clamp(-float(args.clip_range), float(args.clip_range))
+                        global_obs_mb = global_obs_t[value_idx_t]
+                        values_pred_mb = critic(global_obs_mb).squeeze(-1)
+                        returns_mb = value_targets[value_idx_t]
+                        values_old_mb = values_old_targets[value_idx_t]
 
-                    error_original = returns_mb - values_pred_mb
-                    error_clipped = returns_mb - value_pred_clipped
+                        value_pred_clipped = values_old_mb + (
+                            values_pred_mb - values_old_mb
+                        ).clamp(-float(args.clip_range), float(args.clip_range))
 
-                    value_loss_original = _huber_loss(error_original, args.huber_delta)
-                    value_loss_clipped = _huber_loss(error_clipped, args.huber_delta)
-                    value_loss = torch.max(value_loss_original, value_loss_clipped).mean() * float(args.vf_coef)
+                        error_original = returns_mb - values_pred_mb
+                        error_clipped = returns_mb - value_pred_clipped
 
-                    critic_optimizer.zero_grad(set_to_none=True)
-                    value_loss.backward()
-                    nn.utils.clip_grad_norm_(critic.parameters(), float(args.max_grad_norm))
-                    critic_optimizer.step()
+                        value_loss_original = _huber_loss(error_original, args.huber_delta)
+                        value_loss_clipped = _huber_loss(error_clipped, args.huber_delta)
+                        value_loss = torch.max(value_loss_original, value_loss_clipped).mean() * float(
+                            args.vf_coef
+                        )
+
+                        critic_optimizer.zero_grad(set_to_none=True)
+                        value_loss.backward()
+                        nn.utils.clip_grad_norm_(critic.parameters(), float(args.max_grad_norm))
+                        critic_optimizer.step()
+            else:
+                for _ in range(args.n_epochs):
+                    indices = rng.permutation(total_samples)
+                    for start in range(0, total_samples, batch_size):
+                        mb_idx = indices[start:start + batch_size]
+                        mb_idx_t = torch.as_tensor(mb_idx, device=device, dtype=torch.long)
+
+                        obs_mb = obs_flat[mb_idx_t]
+                        actions_mb = actions_flat[mb_idx_t]
+                        old_log_probs_mb = old_log_probs_flat[mb_idx_t]
+                        advantages_mb = advantages_flat[mb_idx_t]
+                        agent_ids_mb = agent_ids[mb_idx_t]
+
+                        if use_agent_id:
+                            obs_in = _append_agent_id_flat(obs_mb, agent_ids_mb, n_agents)
+                        else:
+                            obs_in = obs_mb
+
+                        logits = actor(obs_in)
+                        dist = Categorical(logits=logits)
+                        new_log_probs = dist.log_prob(actions_mb)
+                        ratio = (new_log_probs - old_log_probs_mb).exp()
+
+                        surr1 = ratio * advantages_mb
+                        surr2 = torch.clamp(
+                            ratio, 1.0 - args.clip_range, 1.0 + args.clip_range
+                        ) * advantages_mb
+                        policy_loss = -torch.min(surr1, surr2).mean()
+                        entropy = dist.entropy().mean()
+
+                        actor_loss = policy_loss - float(args.ent_coef) * entropy
+
+                        actor_optimizer.zero_grad(set_to_none=True)
+                        actor_loss.backward()
+                        nn.utils.clip_grad_norm_(actor.parameters(), float(args.max_grad_norm))
+                        actor_optimizer.step()
+
+                        time_ids_mb = mb_idx_t // n_agents
+                        returns_mb = returns_flat[mb_idx_t]
+                        values_old_mb = values_old_flat[mb_idx_t]
+
+                        global_obs_mb = global_obs_t[time_ids_mb]
+                        values_pred_all = critic(global_obs_mb)
+                        values_pred_mb = values_pred_all.gather(1, agent_ids_mb.unsqueeze(-1)).squeeze(-1)
+
+                        value_pred_clipped = values_old_mb + (
+                            values_pred_mb - values_old_mb
+                        ).clamp(-float(args.clip_range), float(args.clip_range))
+
+                        error_original = returns_mb - values_pred_mb
+                        error_clipped = returns_mb - value_pred_clipped
+
+                        value_loss_original = _huber_loss(error_original, args.huber_delta)
+                        value_loss_clipped = _huber_loss(error_clipped, args.huber_delta)
+                        value_loss = torch.max(value_loss_original, value_loss_clipped).mean() * float(
+                            args.vf_coef
+                        )
+
+                        critic_optimizer.zero_grad(set_to_none=True)
+                        value_loss.backward()
+                        nn.utils.clip_grad_norm_(critic.parameters(), float(args.max_grad_norm))
+                        critic_optimizer.step()
 
     latest_path = run_dir / "latest_model.pt"
     save_checkpoint(latest_path)
@@ -498,6 +598,7 @@ def main() -> None:
         "huber_delta": args.huber_delta,
         "value_norm": True,
         "value_norm_beta": args.value_norm_beta,
+        "team_reward": args.team_reward,
         "max_grad_norm": args.max_grad_norm,
         "hidden_dims": list(args.hidden_dims),
         "activation": args.activation,
