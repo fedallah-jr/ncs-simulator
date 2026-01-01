@@ -10,6 +10,7 @@ class ValueNorm:
         self,
         shape: Sequence[int] | int,
         eps: float = 1e-5,
+        beta: float = 0.999,
         device: Optional[torch.device] = None,
     ) -> None:
         if isinstance(shape, int):
@@ -20,11 +21,14 @@ class ValueNorm:
         if any(dim <= 0 for dim in self.shape):
             raise ValueError("shape dimensions must be positive")
         self.eps = float(eps)
+        if not 0.0 < beta < 1.0:
+            raise ValueError("beta must be in (0, 1)")
         self.device = device if device is not None else torch.device("cpu")
+        self.beta = float(beta)
 
         self.mean = torch.zeros(self.shape, dtype=torch.float32, device=self.device)
-        self.var = torch.ones(self.shape, dtype=torch.float32, device=self.device)
-        self.count = torch.tensor(self.eps, dtype=torch.float32, device=self.device)
+        self.mean_sq = torch.zeros(self.shape, dtype=torch.float32, device=self.device)
+        self.step = 0
 
     def update(self, values: torch.Tensor) -> None:
         if self.shape:
@@ -34,29 +38,31 @@ class ValueNorm:
                 raise ValueError("values trailing dimensions must match ValueNorm shape")
             flat = values.reshape(-1, *self.shape)
             batch_mean = flat.mean(dim=0)
-            batch_var = flat.var(dim=0, unbiased=False)
-            batch_count = torch.tensor(float(flat.shape[0]), device=self.device)
+            batch_mean_sq = (flat ** 2).mean(dim=0)
         else:
             flat = values.reshape(-1)
             batch_mean = flat.mean()
-            batch_var = flat.var(unbiased=False)
-            batch_count = torch.tensor(float(flat.shape[0]), device=self.device)
+            batch_mean_sq = (flat ** 2).mean()
 
-        delta = batch_mean - self.mean
-        total_count = self.count + batch_count
+        self.mean = self.beta * self.mean + (1.0 - self.beta) * batch_mean
+        self.mean_sq = self.beta * self.mean_sq + (1.0 - self.beta) * batch_mean_sq
+        self.step += 1
 
-        new_mean = self.mean + delta * batch_count / total_count
-        m_a = self.var * self.count
-        m_b = batch_var * batch_count
-        m2 = m_a + m_b + (delta ** 2) * self.count * batch_count / total_count
-        new_var = m2 / total_count
-
-        self.mean = new_mean
-        self.var = new_var
-        self.count = total_count
+    def _stats(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.step == 0:
+            mean = self.mean
+            var = torch.ones_like(self.mean)
+            return mean, var
+        bias_correction = 1.0 - self.beta ** self.step
+        mean = self.mean / bias_correction
+        mean_sq = self.mean_sq / bias_correction
+        var = torch.clamp(mean_sq - mean ** 2, min=0.0)
+        return mean, var
 
     def normalize(self, values: torch.Tensor) -> torch.Tensor:
-        return (values - self.mean) / torch.sqrt(self.var + self.eps)
+        mean, var = self._stats()
+        return (values - mean) / torch.sqrt(var + self.eps)
 
     def denormalize(self, values: torch.Tensor) -> torch.Tensor:
-        return values * torch.sqrt(self.var + self.eps) + self.mean
+        mean, var = self._stats()
+        return values * torch.sqrt(var + self.eps) + mean

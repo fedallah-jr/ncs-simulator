@@ -84,7 +84,7 @@ python -m tools.visualize_policy \
 - `--labels`: Custom labels for policies in plots
 - `--episode-length`: Number of timesteps to simulate (default: 500)
 - `--seed`: Random seed for reproducibility (default: 42)
-- `--n-agents`: Number of agents (default: 1)
+- `--n-agents`: Optional override for agent count (default: read from checkpoint or config)
 - `--show-estimates`: Show controller estimates in plots (default: True)
 - `--output-dir`: Directory for saving visualizations (default: `vis/`)
 - `--output-prefix`: Prefix for output filenames (default: timestamp)

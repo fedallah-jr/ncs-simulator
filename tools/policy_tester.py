@@ -129,6 +129,72 @@ def _is_stochastic_heuristic(policy_name: str) -> bool:
     return policy_name in STOCHASTIC_HEURISTICS
 
 
+def _read_marl_torch_n_agents(model_path: Path) -> Optional[int]:
+    try:
+        import torch
+    except ImportError as exc:
+        raise ImportError("torch is required to read marl_torch checkpoints") from exc
+
+    ckpt = torch.load(str(model_path), map_location="cpu")
+    if not isinstance(ckpt, dict):
+        raise ValueError("MARL torch checkpoint must be a dict")
+    if "n_agents" not in ckpt:
+        return None
+    return int(ckpt["n_agents"])
+
+
+def _read_es_n_agents(model_path: Path) -> Optional[int]:
+    try:
+        with np.load(str(model_path)) as data:
+            if "n_agents" not in data:
+                return None
+            return int(data["n_agents"])
+    except Exception as exc:
+        raise ValueError(f"Could not load numpy data from {model_path}: {exc}") from exc
+
+
+def _infer_policy_n_agents(spec: PolicySpec) -> Optional[int]:
+    policy_type = spec.policy_type.lower()
+    if policy_type == "sb3":
+        return 1
+    if policy_type == "marl_torch":
+        return _read_marl_torch_n_agents(Path(spec.policy_path))
+    if policy_type in {"es", "openai_es"}:
+        return _read_es_n_agents(Path(spec.policy_path))
+    return None
+
+
+def _resolve_n_agents(
+    config: Dict[str, Any],
+    specs: Sequence[PolicySpec],
+    explicit_n_agents: Optional[int],
+) -> int:
+    inferred_values: List[int] = []
+    for spec in specs:
+        inferred = _infer_policy_n_agents(spec)
+        if inferred is not None:
+            inferred_values.append(int(inferred))
+
+    unique_values = sorted(set(inferred_values))
+    if len(unique_values) > 1:
+        raise ValueError(f"Policies require different n_agents values: {unique_values}")
+
+    if explicit_n_agents is not None:
+        if unique_values and int(explicit_n_agents) != unique_values[0]:
+            raise ValueError(
+                f"--n-agents={explicit_n_agents} does not match checkpoint n_agents={unique_values[0]}"
+            )
+        return int(explicit_n_agents)
+
+    if unique_values:
+        return int(unique_values[0])
+
+    config_n_agents = config.get("system", {}).get("n_agents")
+    if config_n_agents is not None:
+        return int(config_n_agents)
+    return 1
+
+
 def _build_env(
     config_path: Path,
     episode_length: int,
@@ -511,7 +577,12 @@ def main() -> int:
     )
     parser.add_argument("--policy-label", default=None, help="Label for the target policy")
     parser.add_argument("--episode-length", type=int, default=500, help="Episode length to evaluate")
-    parser.add_argument("--n-agents", type=int, default=1, help="Number of agents (marl_torch only)")
+    parser.add_argument(
+        "--n-agents",
+        type=int,
+        default=None,
+        help="Optional override for agent count (default: read from checkpoint or config)",
+    )
     parser.add_argument("--num-seeds", type=int, default=30, help="Number of seeds to evaluate")
     parser.add_argument("--seed-start", type=int, default=0, help="First seed value")
     parser.add_argument(
@@ -539,11 +610,6 @@ def main() -> int:
         config = load_config(str(config_path))
 
         policy_type = args.policy_type.lower()
-        use_multi_agent = policy_type == "marl_torch"
-        if not use_multi_agent and int(args.n_agents) != 1:
-            raise ValueError("Non-marl policies must use --n-agents 1.")
-        if use_multi_agent and int(args.n_agents) < 1:
-            raise ValueError("--n-agents must be >= 1 for marl_torch policies.")
 
         target_label = args.policy_label
         if not target_label:
@@ -566,6 +632,15 @@ def main() -> int:
                 PolicySpec(label=heuristic_name, policy_type="heuristic", policy_path=heuristic_name)
             )
 
+        resolved_n_agents = _resolve_n_agents(config, policy_specs, args.n_agents)
+        policy_type_names = [spec.policy_type.lower() for spec in policy_specs]
+        multi_agent_types = {"marl_torch", "heuristic"}
+        use_multi_agent = all(policy in multi_agent_types for policy in policy_type_names) and (
+            any(policy == "marl_torch" for policy in policy_type_names) or resolved_n_agents > 1
+        )
+        if resolved_n_agents < 1:
+            raise ValueError("Resolved n_agents must be >= 1.")
+
         print(f"Evaluating {len(policy_specs)} policies over {len(seeds)} seeds...")
         print("Raw absolute reward enabled; comm/termination settings from config.")
 
@@ -578,7 +653,7 @@ def main() -> int:
                 spec,
                 config_path=config_path,
                 episode_length=int(args.episode_length),
-                n_agents=int(args.n_agents),
+                n_agents=resolved_n_agents,
                 seeds=seeds,
                 use_multi_agent=use_multi_agent,
                 termination_override=termination_override,
@@ -698,10 +773,14 @@ def main() -> int:
     if "marl_torch" in unique_policy_types and len(unique_policy_types) > 1:
         raise ValueError("Batch mode does not support mixing marl_torch with single-agent policies.")
     use_multi_agent = "marl_torch" in unique_policy_types
-    if not use_multi_agent and int(args.n_agents) != 1:
-        raise ValueError("Non-marl policies must use --n-agents 1.")
-    if use_multi_agent and int(args.n_agents) < 1:
-        raise ValueError("--n-agents must be >= 1 for marl_torch policies.")
+
+    resolved_n_agents = _resolve_n_agents(
+        reference_config,
+        [spec for _, _, spec in model_specs],
+        args.n_agents,
+    )
+    if resolved_n_agents < 1:
+        raise ValueError("Resolved n_agents must be >= 1.")
 
     seeds = _iter_seeds(args.seed_start, args.num_seeds)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -717,7 +796,7 @@ def main() -> int:
             spec,
             config_path=run.config_path,
             episode_length=int(args.episode_length),
-            n_agents=int(args.n_agents),
+            n_agents=resolved_n_agents,
             seeds=seeds,
             use_multi_agent=use_multi_agent,
             termination_override=termination_override,
@@ -735,7 +814,7 @@ def main() -> int:
             spec,
             config_path=heuristic_config_path,
             episode_length=int(args.episode_length),
-            n_agents=int(args.n_agents),
+            n_agents=resolved_n_agents,
             seeds=seeds,
             use_multi_agent=use_multi_agent,
             termination_override=termination_override,

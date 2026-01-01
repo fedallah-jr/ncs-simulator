@@ -57,6 +57,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use independent per-agent networks (disable parameter sharing).",
     )
+    parser.add_argument(
+        "--team-reward",
+        action="store_true",
+        help="Use the summed team reward for every agent instead of per-agent rewards.",
+    )
 
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Torch device.")
     parser.add_argument("--log-interval", type=int, default=10, help="Print every N episodes.")
@@ -210,7 +215,14 @@ def main() -> None:
                 action_dict = {f"agent_{i}": int(actions[i]) for i in range(n_agents)}
                 next_obs_dict, rewards_dict, terminated, truncated, _infos = env.step(action_dict)
                 next_obs = stack_obs(next_obs_dict, n_agents)
-                rewards = np.asarray([rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32)
+                raw_rewards = np.asarray([rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32)
+                if args.team_reward:
+                    team_reward = float(raw_rewards.sum())
+                    rewards = np.full(n_agents, team_reward, dtype=np.float32)
+                    episode_reward_sum += team_reward
+                else:
+                    rewards = raw_rewards
+                    episode_reward_sum += float(raw_rewards.sum())
                 # Distinguish termination (true end) from truncation (time limit)
                 # Only terminated should zero out bootstrap; truncated should still bootstrap
                 term = any(terminated[f"agent_{i}"] for i in range(n_agents))
@@ -225,7 +237,6 @@ def main() -> None:
                     done=term,  # Store only terminated for correct bootstrapping
                 )
 
-                episode_reward_sum += float(rewards.sum())
                 obs = next_obs
                 global_step += 1
 
@@ -290,6 +301,7 @@ def main() -> None:
         "stream_hidden_dim": args.stream_hidden_dim,
         "use_agent_id": use_agent_id,
         "independent_agents": args.independent_agents,
+        "team_reward": args.team_reward,
         "eval_freq": args.eval_freq,
         "n_eval_episodes": args.n_eval_episodes,
         "device": str(device),

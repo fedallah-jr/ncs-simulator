@@ -15,14 +15,14 @@ Usage:
     python -m tools.visualize_policy --config configs/perfect_comm.json --policy always_send --policy-type heuristic
 
     # Visualize an IQL/VDN/QMIX PyTorch checkpoint (all agents act)
-    python -m tools.visualize_policy --config configs/marl_mixed_plants.json --policy path/to/latest_model.pt --policy-type marl_torch --n-agents 3 --generate-video --per-agent-videos
+    python -m tools.visualize_policy --config configs/marl_mixed_plants.json --policy path/to/latest_model.pt --policy-type marl_torch --generate-video --per-agent-videos
 
     # Compare MARL vs. always_send (multi-agent)
     python -m tools.visualize_policy --config configs/marl_mixed_plants.json \
         --policies path/to/latest_model.pt always_send \
         --policy-types marl_torch heuristic \
         --labels "MARL" "Always Send" \
-        --n-agents 3 --generate-video --per-agent-videos
+        --generate-video --per-agent-videos
 
     # Compare multiple policies
     python -m tools.visualize_policy --config configs/perfect_comm.json \
@@ -76,6 +76,74 @@ class MultiAgentHeuristicPolicy:
             action, _ = self._policies[idx].predict(obs, deterministic=True)
             actions[f"agent_{idx}"] = int(action)
         return actions
+
+
+def _read_marl_torch_n_agents(model_path: Path) -> Optional[int]:
+    try:
+        import torch
+    except ImportError as exc:
+        raise ImportError("torch is required to read marl_torch checkpoints") from exc
+
+    ckpt = torch.load(str(model_path), map_location="cpu")
+    if not isinstance(ckpt, dict):
+        raise ValueError("MARL torch checkpoint must be a dict")
+    if "n_agents" not in ckpt:
+        return None
+    return int(ckpt["n_agents"])
+
+
+def _read_es_n_agents(model_path: Path) -> Optional[int]:
+    try:
+        with np.load(str(model_path)) as data:
+            if "n_agents" not in data:
+                return None
+            return int(data["n_agents"])
+    except Exception as exc:
+        raise ValueError(f"Could not load numpy data from {model_path}: {exc}") from exc
+
+
+def _infer_policy_n_agents(policy_path: str, policy_type: str) -> Optional[int]:
+    policy_type_norm = policy_type.lower()
+    if policy_type_norm == "sb3":
+        return 1
+    if policy_type_norm in {"es", "openai_es"}:
+        return _read_es_n_agents(Path(policy_path))
+    if policy_type_norm == "marl_torch":
+        return _read_marl_torch_n_agents(Path(policy_path))
+    return None
+
+
+def _resolve_run_n_agents(
+    policy_paths: List[str],
+    policy_types: List[str],
+    *,
+    config: Dict[str, Any],
+    explicit_n_agents: Optional[int],
+) -> int:
+    inferred_values: List[int] = []
+    for policy_path, policy_type in zip(policy_paths, policy_types):
+        inferred = _infer_policy_n_agents(policy_path, policy_type)
+        if inferred is not None:
+            inferred_values.append(int(inferred))
+
+    unique_values = sorted(set(inferred_values))
+    if len(unique_values) > 1:
+        raise ValueError(f"Policies require different n_agents values: {unique_values}")
+
+    if explicit_n_agents is not None:
+        if unique_values and int(explicit_n_agents) != unique_values[0]:
+            raise ValueError(
+                f"--n-agents={explicit_n_agents} does not match checkpoint n_agents={unique_values[0]}"
+            )
+        return int(explicit_n_agents)
+
+    if unique_values:
+        return int(unique_values[0])
+
+    config_n_agents = config.get("system", {}).get("n_agents")
+    if config_n_agents is not None:
+        return int(config_n_agents)
+    return 1
 
 
 def load_sb3_policy(model_path: str, env: Any):
@@ -233,7 +301,7 @@ def load_marl_torch_multi_agent_policy(model_path: str, env: NCS_Env) -> MARLTor
     if int(getattr(env, "n_agents", 0)) != meta.n_agents:
         raise ValueError(
             f"Env n_agents={getattr(env, 'n_agents', None)} does not match checkpoint n_agents={meta.n_agents}. "
-            "Pass the correct `--n-agents` for the checkpoint."
+            "Ensure the config and checkpoint describe the same agent count."
         )
     env_obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
     if env_obs_dim != meta.obs_dim:
@@ -1300,8 +1368,8 @@ def main():
     parser.add_argument(
         '--n-agents',
         type=int,
-        default=1,
-        help='Number of agents in the environment (default: 1; for marl_torch must match checkpoint n_agents)'
+        default=None,
+        help='Optional override for agent count (default: read from checkpoint or config)'
     )
 
     # Visualization parameters
@@ -1388,16 +1456,30 @@ def main():
         parser.error("--labels must have the same length as number of policies")
 
     policy_types_norm = [policy_type.lower() for policy_type in policy_types]
+
+    print(f"\n{'='*60}")
+    print(f"NCS Policy Visualization Tool")
+    print(f"{'='*60}\n")
+
+    # Load configuration
+    print(f"Loading configuration from: {args.config}")
+    config = load_config(args.config)
+    print(f"✓ Configuration loaded\n")
+
+    resolved_n_agents = _resolve_run_n_agents(
+        list(policies_to_load),
+        list(policy_types_norm),
+        config=config,
+        explicit_n_agents=args.n_agents,
+    )
     multi_agent_types = {"marl_torch", "heuristic"}
-    any_marl = any(policy_type == "marl_torch" for policy_type in policy_types_norm)
-    use_multi_agent = any_marl or (args.n_agents > 1 and all(
-        policy_type in multi_agent_types for policy_type in policy_types_norm
-    ))
-    if use_multi_agent:
-        if not all(policy_type in multi_agent_types for policy_type in policy_types_norm):
-            parser.error("Multi-agent visualization supports only marl_torch and heuristic policies in one run")
-        if args.n_agents < 1:
-            parser.error("--n-agents must be >= 1 for multi-agent policies")
+    use_multi_agent = all(policy_type in multi_agent_types for policy_type in policy_types_norm) and (
+        any(policy_type == "marl_torch" for policy_type in policy_types_norm) or resolved_n_agents > 1
+    )
+    if use_multi_agent and resolved_n_agents < 1:
+        parser.error("Resolved n_agents must be >= 1 for multi-agent policies")
+    if use_multi_agent and not all(policy_type in multi_agent_types for policy_type in policy_types_norm):
+        parser.error("Multi-agent visualization supports only marl_torch and heuristic policies in one run")
     if args.per_agent_videos and not use_multi_agent:
         parser.error("--per-agent-videos is only supported for multi-agent policies")
 
@@ -1412,19 +1494,10 @@ def main():
     else:
         output_prefix = args.output_prefix
 
-    print(f"\n{'='*60}")
-    print(f"NCS Policy Visualization Tool")
-    print(f"{'='*60}\n")
-
-    # Load configuration
-    print(f"Loading configuration from: {args.config}")
-    config = load_config(args.config)
-    print(f"✓ Configuration loaded\n")
-
     # Create environment factory function
     def make_env():
         return NCS_Env(
-            n_agents=args.n_agents,
+            n_agents=resolved_n_agents,
             episode_length=args.episode_length,
             config_path=args.config,
             seed=args.seed
@@ -1435,9 +1508,15 @@ def main():
     state_dim = int(temp_env.state_dim)
     temp_env.close()
     if use_multi_agent:
-        print(f"✓ Environment created (multi-agent, state_dim={state_dim}, episode_length={args.episode_length})\n")
+        print(
+            f"✓ Environment created (multi-agent, n_agents={resolved_n_agents}, "
+            f"state_dim={state_dim}, episode_length={args.episode_length})\n"
+        )
     else:
-        print(f"✓ Environment created (state_dim={state_dim}, episode_length={args.episode_length})\n")
+        print(
+            f"✓ Environment created (n_agents={resolved_n_agents}, "
+            f"state_dim={state_dim}, episode_length={args.episode_length})\n"
+        )
 
     # Load policies and run episodes
     trajectories = []
@@ -1455,7 +1534,7 @@ def main():
                     policy_path,
                     policy_type.lower(),
                     env,
-                    n_agents=args.n_agents,
+                    n_agents=resolved_n_agents,
                     seed=args.seed,
                 )
             except Exception as e:
@@ -1471,7 +1550,7 @@ def main():
                     policy_path,
                     policy_type,
                     env,
-                    n_agents=args.n_agents,
+                    n_agents=resolved_n_agents,
                     seed=args.seed,
                 )
             except Exception as e:
@@ -1488,7 +1567,7 @@ def main():
         final_error = float(np.mean(traj["state_errors"][-1])) if use_multi_agent else float(traj["state_errors"][-1])
         print(f"  ✓ Episode complete")
         print(f"    - Total reward: {total_reward:.2f}")
-        denom = args.episode_length * (args.n_agents if use_multi_agent else 1)
+        denom = args.episode_length * (resolved_n_agents if use_multi_agent else 1)
         print(f"    - Transmissions: {int(tx_count)}/{denom}")
         print(f"    - Final state error: {final_error:.4f}\n")
 

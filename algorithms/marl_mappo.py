@@ -45,20 +45,22 @@ class MAPPORolloutBuffer:
         self.step = 0
         self.obs = np.zeros((self.n_steps, self.n_agents, self.obs_dim), dtype=np.float32)
         self.global_obs = np.zeros((self.n_steps, self.global_obs_dim), dtype=np.float32)
+        self.next_global_obs = np.zeros((self.n_steps, self.global_obs_dim), dtype=np.float32)
         self.actions = np.zeros((self.n_steps, self.n_agents), dtype=np.int64)
         self.log_probs = np.zeros((self.n_steps, self.n_agents), dtype=np.float32)
         self.rewards = np.zeros((self.n_steps, self.n_agents), dtype=np.float32)
-        self.dones = np.zeros((self.n_steps,), dtype=np.float32)
-        self.values = np.zeros((self.n_steps + 1, self.n_agents), dtype=np.float32)
+        self.terminated = np.zeros((self.n_steps,), dtype=np.float32)
+        self.values = np.zeros((self.n_steps, self.n_agents), dtype=np.float32)
 
     def add(
         self,
         obs: np.ndarray,
         global_obs: np.ndarray,
+        next_global_obs: np.ndarray,
         actions: np.ndarray,
         log_probs: np.ndarray,
         rewards: np.ndarray,
-        done: bool,
+        terminated: bool,
         values: np.ndarray,
     ) -> None:
         if self.step >= self.n_steps:
@@ -66,17 +68,13 @@ class MAPPORolloutBuffer:
         idx = self.step
         self.obs[idx] = obs
         self.global_obs[idx] = global_obs
+        self.next_global_obs[idx] = next_global_obs
         self.actions[idx] = actions
         self.log_probs[idx] = log_probs
         self.rewards[idx] = rewards
-        self.dones[idx] = float(done)
+        self.terminated[idx] = float(terminated)
         self.values[idx] = values
         self.step += 1
-
-    def set_last_value(self, values: np.ndarray) -> None:
-        if self.step > self.n_steps:
-            raise RuntimeError("Cannot set last value beyond buffer length")
-        self.values[self.step] = values
 
     def get(self) -> Tuple[np.ndarray, ...]:
         if self.step == 0:
@@ -85,11 +83,12 @@ class MAPPORolloutBuffer:
         return (
             self.obs[:idx],
             self.global_obs[:idx],
+            self.next_global_obs[:idx],
             self.actions[:idx],
             self.log_probs[:idx],
             self.rewards[:idx],
-            self.dones[:idx],
-            self.values[: idx + 1],
+            self.terminated[:idx],
+            self.values[:idx],
         )
 
 
@@ -113,6 +112,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ent-coef", type=float, default=0.01, help="Entropy coefficient.")
     parser.add_argument("--vf-coef", type=float, default=0.5, help="Value loss coefficient.")
     parser.add_argument("--huber-delta", type=float, default=10.0, help="Huber loss delta for value loss.")
+    parser.add_argument("--value-norm-beta", type=float, default=0.999, help="EMA decay for value normalization.")
     parser.add_argument("--max-grad-norm", type=float, default=10.0, help="Gradient clipping L2 norm.")
 
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[128, 128], help="MLP hidden dims.")
@@ -131,18 +131,19 @@ def parse_args() -> argparse.Namespace:
 def _compute_gae(
     rewards: np.ndarray,
     values: np.ndarray,
-    episode_dones: np.ndarray,
+    next_values: np.ndarray,
+    terminated: np.ndarray,
     gamma: float,
     gae_lambda: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
     advantages = np.zeros_like(rewards, dtype=np.float32)
     last_adv = np.zeros((rewards.shape[1],), dtype=np.float32)
     for t in range(rewards.shape[0] - 1, -1, -1):
-        mask = 1.0 - float(episode_dones[t])
-        delta = rewards[t] + gamma * values[t + 1] * mask - values[t]
+        mask = 1.0 - float(terminated[t])
+        delta = rewards[t] + gamma * next_values[t] * mask - values[t]
         last_adv = delta + gamma * gae_lambda * mask * last_adv
         advantages[t] = last_adv
-    returns = advantages + values[:-1]
+    returns = advantages + values
     return advantages, returns
 
 
@@ -226,7 +227,7 @@ def main() -> None:
 
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=float(args.learning_rate))
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=float(args.learning_rate))
-    value_normalizer = ValueNorm((), device=device)
+    value_normalizer = ValueNorm((), device=device, beta=float(args.value_norm_beta))
 
     best_eval_reward = -float("inf")
     global_step = 0
@@ -297,17 +298,18 @@ def main() -> None:
                 next_obs = stack_obs(next_obs_dict, n_agents)
                 rewards = np.asarray([rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32)
 
-                done = any(
-                    terminated[f"agent_{i}"] or truncated[f"agent_{i}"] for i in range(n_agents)
-                )
+                terminated_any = any(terminated[f"agent_{i}"] for i in range(n_agents))
+                truncated_any = any(truncated[f"agent_{i}"] for i in range(n_agents))
+                done = terminated_any or truncated_any
 
                 buffer.add(
                     obs=obs,
                     global_obs=global_obs,
+                    next_global_obs=next_obs.reshape(-1).astype(np.float32),
                     actions=actions,
                     log_probs=log_probs,
                     rewards=rewards,
-                    done=done,
+                    terminated=terminated_any,
                     values=values,
                 )
 
@@ -359,31 +361,31 @@ def main() -> None:
             if buffer.step == 0:
                 continue
 
-            with torch.no_grad():
-                last_global_obs = obs.reshape(-1).astype(np.float32)
-                last_global_obs_t = torch.as_tensor(
-                    last_global_obs, device=device, dtype=torch.float32
-                ).unsqueeze(0)
-                last_values_t = critic(last_global_obs_t).squeeze(0)
-            buffer.set_last_value(last_values_t.cpu().numpy().astype(np.float32))
-
             (
                 obs_batch,
                 global_obs_batch,
+                next_global_obs_batch,
                 actions_batch,
                 log_probs_batch,
                 rewards_batch,
-                dones_batch,
+                terminated_batch,
                 values_batch,
             ) = buffer.get()
 
             values_t = torch.as_tensor(values_batch, device=device, dtype=torch.float32)
+            next_global_obs_t = torch.as_tensor(
+                next_global_obs_batch, device=device, dtype=torch.float32
+            )
+            with torch.no_grad():
+                next_values_t = critic(next_global_obs_t)
             values_raw = value_normalizer.denormalize(values_t).cpu().numpy()
+            next_values_raw = value_normalizer.denormalize(next_values_t).cpu().numpy()
 
             advantages, returns = _compute_gae(
                 rewards=rewards_batch,
                 values=values_raw,
-                episode_dones=dones_batch,
+                next_values=next_values_raw,
+                terminated=terminated_batch,
                 gamma=float(args.gamma),
                 gae_lambda=float(args.gae_lambda),
             )
@@ -394,14 +396,17 @@ def main() -> None:
             old_log_probs_t = torch.as_tensor(log_probs_batch, device=device, dtype=torch.float32)
             advantages_t = torch.as_tensor(advantages, device=device, dtype=torch.float32)
             returns_t = torch.as_tensor(returns, device=device, dtype=torch.float32)
-            values_old = torch.as_tensor(values_batch[:-1], device=device, dtype=torch.float32)
+            values_old = torch.as_tensor(values_batch, device=device, dtype=torch.float32)
+
+            value_normalizer.update(returns_t)
+            normalized_returns_t = value_normalizer.normalize(returns_t)
 
             obs_flat = obs_t.reshape(-1, obs_dim)
             actions_flat = actions_t.reshape(-1)
             old_log_probs_flat = old_log_probs_t.reshape(-1)
             advantages_flat = advantages_t.reshape(-1)
             total_samples = int(advantages_flat.shape[0])
-            returns_flat = returns_t.reshape(-1)
+            returns_flat = normalized_returns_t.reshape(-1)
             values_old_flat = values_old.reshape(-1)
 
             adv_mean = advantages_flat.mean()
@@ -458,15 +463,12 @@ def main() -> None:
                     values_pred_all = critic(global_obs_mb)
                     values_pred_mb = values_pred_all.gather(1, agent_ids_mb.unsqueeze(-1)).squeeze(-1)
 
-                    value_normalizer.update(returns_mb)
-                    normalized_returns = value_normalizer.normalize(returns_mb)
-
                     value_pred_clipped = values_old_mb + (
                         values_pred_mb - values_old_mb
                     ).clamp(-float(args.clip_range), float(args.clip_range))
 
-                    error_original = normalized_returns - values_pred_mb
-                    error_clipped = normalized_returns - value_pred_clipped
+                    error_original = returns_mb - values_pred_mb
+                    error_clipped = returns_mb - value_pred_clipped
 
                     value_loss_original = _huber_loss(error_original, args.huber_delta)
                     value_loss_clipped = _huber_loss(error_clipped, args.huber_delta)
@@ -495,6 +497,7 @@ def main() -> None:
         "vf_coef": args.vf_coef,
         "huber_delta": args.huber_delta,
         "value_norm": True,
+        "value_norm_beta": args.value_norm_beta,
         "max_grad_norm": args.max_grad_norm,
         "hidden_dims": list(args.hidden_dims),
         "activation": args.activation,
