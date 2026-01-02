@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from utils.marl.networks import MLPAgent, DuelingMLPAgent, append_agent_id
+from utils.marl.obs_normalization import RunningObsNormalizer
 
 
 def select_device(device_str: str) -> torch.device:
@@ -95,6 +96,7 @@ def run_evaluation(
     device: torch.device,
     n_episodes: int,
     seed: Optional[int] = None,
+    obs_normalizer: Optional[RunningObsNormalizer] = None,
 ) -> Tuple[float, float, List[float]]:
     """
     Run deterministic evaluation episodes for MARL algorithms.
@@ -108,6 +110,7 @@ def run_evaluation(
         device: Torch device
         n_episodes: Number of evaluation episodes to run
         seed: Optional seed for reproducibility
+        obs_normalizer: Optional observation normalizer (stats frozen during eval)
 
     Returns:
         Tuple of (mean_reward, std_reward, episode_rewards)
@@ -119,6 +122,8 @@ def run_evaluation(
         episode_seed = None if seed is None else seed + ep
         obs_dict, _info = env.reset(seed=episode_seed)
         obs = stack_obs(obs_dict, n_agents)
+        if obs_normalizer is not None:
+            obs = obs_normalizer.normalize(obs, update=False)
 
         episode_reward_sum = 0.0
         done = False
@@ -138,6 +143,8 @@ def run_evaluation(
             action_dict = {f"agent_{i}": int(actions[i]) for i in range(n_agents)}
             next_obs_dict, rewards_dict, terminated, truncated, _infos = env.step(action_dict)
             next_obs = stack_obs(next_obs_dict, n_agents)
+            if obs_normalizer is not None:
+                next_obs = obs_normalizer.normalize(next_obs, update=False)
             rewards = np.asarray([rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32)
             done = any(terminated[f"agent_{i}"] or truncated[f"agent_{i}"] for i in range(n_agents))
 

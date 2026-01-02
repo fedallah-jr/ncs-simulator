@@ -11,6 +11,7 @@ from typing import Optional
 
 import gymnasium as gym
 from stable_baselines3 import DQN
+from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
@@ -19,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ncs_env.env import NCS_Env
-from utils import SingleAgentWrapper, save_training_rewards, RewardMixLoggingEvalCallback, load_eval_overrides, make_mix_weight_fn
+from utils import SingleAgentWrapper, save_training_rewards, load_eval_overrides
 from utils.reward_normalization import reset_shared_running_normalizers
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
@@ -87,14 +88,13 @@ def main() -> None:
         eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True)
         eval_env.training = False
 
-    eval_callback = RewardMixLoggingEvalCallback(
+    eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=str(run_dir),
         log_path=str(run_dir),
         eval_freq=args.eval_freq,
         n_eval_episodes=args.eval_episodes,
         deterministic=True,
-        mix_weight_fn=make_mix_weight_fn(eval_env),
     )
     model = DQN(
         "MlpPolicy",

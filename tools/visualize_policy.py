@@ -332,6 +332,8 @@ class MARLTorchSingleAgentPolicy:
         from utils.marl.networks import DuelingMLPAgent, MLPAgent, append_agent_id
 
         obs = np.asarray(observation, dtype=np.float32)
+        if getattr(self.metadata, "obs_normalizer", None) is not None:
+            obs = self.metadata.obs_normalizer.normalize(obs, update=False)
         obs_t = torch.as_tensor(obs, device=self.device, dtype=torch.float32).unsqueeze(0)
         full_obs = torch.zeros(
             (1, int(self.metadata.n_agents), obs_t.shape[-1]),
@@ -538,7 +540,6 @@ def run_episode_multi_agent(
     state_errors = np.zeros((episode_length + 1, n_agents), dtype=np.float32)
     throughputs = np.zeros(episode_length + 1, dtype=np.float32)
     collided_packets = np.zeros(episode_length + 1, dtype=np.float32)
-    reward_mix_weight = np.zeros(episode_length + 1, dtype=np.float32)
     network_stats: Dict[str, List[int]] = {
         "tx_attempts": [0 for _ in range(n_agents)],
         "tx_acked": [0 for _ in range(n_agents)],
@@ -552,7 +553,6 @@ def run_episode_multi_agent(
     state_errors[0] = np.linalg.norm(states[0], axis=1).astype(np.float32)
     throughputs[0] = float(info.get("throughput_kbps", 0.0))
     collided_packets[0] = float(info.get("collided_packets", 0.0))
-    reward_mix_weight[0] = float(info.get("reward_mix_weight", 0.0))
     if "network_stats" in info:
         network_stats = {k: [int(x) for x in v] for k, v in info["network_stats"].items()}
 
@@ -567,7 +567,6 @@ def run_episode_multi_agent(
         state_errors[t + 1] = np.linalg.norm(states[t + 1], axis=1).astype(np.float32)
         throughputs[t + 1] = float(info.get("throughput_kbps", 0.0))
         collided_packets[t + 1] = float(info.get("collided_packets", 0.0))
-        reward_mix_weight[t + 1] = float(info.get("reward_mix_weight", 0.0))
         if "network_stats" in info:
             network_stats = {k: [int(x) for x in v] for k, v in info["network_stats"].items()}
 
@@ -581,7 +580,6 @@ def run_episode_multi_agent(
             state_errors = state_errors[: end + 1]
             throughputs = throughputs[: end + 1]
             collided_packets = collided_packets[: end + 1]
-            reward_mix_weight = reward_mix_weight[: end + 1]
             break
 
     return {
@@ -592,7 +590,6 @@ def run_episode_multi_agent(
         "state_errors": state_errors,
         "throughput_kbps": throughputs,
         "collided_packets": collided_packets,
-        "reward_mix_weight": reward_mix_weight,
         "network_stats": network_stats,
         "timesteps": np.arange(states.shape[0]),
     }

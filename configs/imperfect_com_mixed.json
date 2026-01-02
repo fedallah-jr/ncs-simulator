@@ -17,20 +17,7 @@
     "comm_recent_window": 10,
     "comm_throughput_window": 200,
     "comm_penalty_alpha": 0.01,
-    "comm_throughput_floor": 0.001,
-    "reward_mixing": {
-    "enabled": true,
-    "rewards": [
-        { "state_error_reward": "absolute" },
-        { "state_error_reward": "simple", "simple_comm_penalty_alpha": 0.0 }
-    ],
-    "scheduler": {
-        "type": "cosine",
-        "start_value": 1.0,
-        "end_value": 0.0,
-        "total_steps": 80000
-    }
-    }
+    "comm_throughput_floor": 0.001
 },
 "network": {
     "data_rate_kbps": 250.0,

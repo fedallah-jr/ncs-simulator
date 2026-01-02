@@ -8,10 +8,9 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import gymnasium as gym
-from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.vec_env import VecNormalize
 
 from ncs_env.config import load_config
@@ -44,27 +43,6 @@ def load_eval_overrides(
         return eval_reward_override, eval_termination_override
     except Exception:
         return None, None
-
-
-def make_mix_weight_fn(env: Any) -> Callable[[], Optional[float]]:
-    """
-    Create a function that returns the current reward mix weight from an environment.
-
-    Args:
-        env: A possibly wrapped environment.
-
-    Returns:
-        A callable that returns the mix weight or None.
-    """
-    def get_mix_weight() -> Optional[float]:
-        base_env = unwrap_base_env(env)
-        if hasattr(base_env, "get_reward_mix_weight"):
-            try:
-                return float(base_env.get_reward_mix_weight())
-            except Exception:
-                return None
-        return None
-    return get_mix_weight
 
 
 def save_training_rewards(vec_env: gym.Env, output_path: Path) -> None:
@@ -106,32 +84,3 @@ def unwrap_base_env(env: Any) -> Any:
     while hasattr(current, "env"):
         current = current.env
     return current
-
-
-class RewardMixLoggingEvalCallback(EvalCallback):
-    """
-    Eval callback that prints current reward mix weight before each evaluation.
-
-    This is useful for curriculum learning scenarios where the reward function
-    changes during training.
-    """
-
-    def __init__(self, *args, mix_weight_fn: Callable[[], Optional[float]], **kwargs):
-        """
-        Initialize the callback.
-
-        Args:
-            *args: Arguments passed to EvalCallback
-            mix_weight_fn: Function that returns the current reward mix weight
-            **kwargs: Keyword arguments passed to EvalCallback
-        """
-        super().__init__(*args, **kwargs)
-        self._mix_weight_fn = mix_weight_fn
-
-    def _evaluate_policy(self) -> None:
-        mix_weight = None
-        if self._mix_weight_fn is not None:
-            mix_weight = self._mix_weight_fn()
-        if mix_weight is not None:
-            print(f"[Eval] reward_mix_weight={mix_weight:.4f}")
-        return super()._evaluate_policy()

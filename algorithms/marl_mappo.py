@@ -21,6 +21,7 @@ from ncs_env.env import NCS_Env
 from utils.marl import (
     CentralValueMLP,
     MLPAgent,
+    RunningObsNormalizer,
     ValueNorm,
     append_agent_id,
     run_evaluation,
@@ -127,12 +128,37 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use the summed team reward and a single shared value function.",
     )
+    obs_norm_group = parser.add_mutually_exclusive_group()
+    obs_norm_group.add_argument(
+        "--normalize-obs",
+        action="store_true",
+        help="Normalize observations with running mean/std (default).",
+    )
+    obs_norm_group.add_argument(
+        "--no-normalize-obs",
+        action="store_false",
+        dest="normalize_obs",
+        help="Disable observation normalization.",
+    )
+    parser.add_argument(
+        "--obs-norm-clip",
+        type=float,
+        default=5.0,
+        help="Clip normalized observations to +/- this value (<=0 disables).",
+    )
+    parser.add_argument(
+        "--obs-norm-eps",
+        type=float,
+        default=1e-8,
+        help="Epsilon for observation normalization.",
+    )
 
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Torch device.")
     parser.add_argument("--log-interval", type=int, default=10, help="Print every N episodes.")
 
     parser.add_argument("--eval-freq", type=int, default=2500, help="Evaluation frequency in env steps.")
     parser.add_argument("--n-eval-episodes", type=int, default=5, help="Number of evaluation episodes.")
+    parser.set_defaults(normalize_obs=True)
     return parser.parse_args()
 
 
@@ -218,6 +244,12 @@ def main() -> None:
     actor_input_dim = obs_dim + (n_agents if use_agent_id else 0)
     critic_input_dim = obs_dim * n_agents
     value_dim = 1 if args.team_reward else n_agents
+    obs_normalizer: Optional[RunningObsNormalizer] = None
+    if args.normalize_obs:
+        clip_value = None if args.obs_norm_clip <= 0 else float(args.obs_norm_clip)
+        obs_normalizer = RunningObsNormalizer.create(
+            obs_dim, clip=clip_value, eps=float(args.obs_norm_eps)
+        )
 
     actor = MLPAgent(
         input_dim=actor_input_dim,
@@ -265,6 +297,9 @@ def main() -> None:
             "critic_activation": args.activation,
             "critic_layer_norm": args.layer_norm,
         }
+        ckpt["obs_normalization"] = (
+            obs_normalizer.state_dict() if obs_normalizer is not None else {"enabled": False}
+        )
         torch.save(ckpt, path)
 
     with rewards_csv_path.open("w", newline="", encoding="utf-8") as train_f, \
@@ -276,6 +311,8 @@ def main() -> None:
 
         obs_dict, _info = env.reset(seed=args.seed)
         obs = stack_obs(obs_dict, n_agents)
+        if obs_normalizer is not None:
+            obs = obs_normalizer.normalize(obs, update=True)
 
         while global_step < args.total_timesteps:
             buffer = MAPPORolloutBuffer(args.n_steps, n_agents, obs_dim, value_dim)
@@ -306,6 +343,8 @@ def main() -> None:
                 action_dict = {f"agent_{i}": int(actions[i]) for i in range(n_agents)}
                 next_obs_dict, rewards_dict, terminated, truncated, _infos = env.step(action_dict)
                 next_obs = stack_obs(next_obs_dict, n_agents)
+                if obs_normalizer is not None:
+                    next_obs = obs_normalizer.normalize(next_obs, update=True)
                 raw_rewards = np.asarray(
                     [rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32
                 )
@@ -348,6 +387,8 @@ def main() -> None:
                     episode_seed = None if args.seed is None else args.seed + episode
                     obs_dict, _info = env.reset(seed=episode_seed)
                     obs = stack_obs(obs_dict, n_agents)
+                    if obs_normalizer is not None:
+                        obs = obs_normalizer.normalize(obs, update=True)
                 else:
                     obs = next_obs
 
@@ -361,6 +402,7 @@ def main() -> None:
                         device=device,
                         n_episodes=args.n_eval_episodes,
                         seed=args.seed,
+                        obs_normalizer=obs_normalizer,
                     )
                     eval_writer.writerow([global_step, mean_eval_reward, std_eval_reward])
                     eval_f.flush()
@@ -599,6 +641,9 @@ def main() -> None:
         "value_norm": True,
         "value_norm_beta": args.value_norm_beta,
         "team_reward": args.team_reward,
+        "normalize_obs": args.normalize_obs,
+        "obs_norm_clip": args.obs_norm_clip,
+        "obs_norm_eps": args.obs_norm_eps,
         "max_grad_norm": args.max_grad_norm,
         "hidden_dims": list(args.hidden_dims),
         "activation": args.activation,

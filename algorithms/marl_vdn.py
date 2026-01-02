@@ -15,7 +15,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from ncs_env.config import load_config
 from ncs_env.env import NCS_Env
-from utils.marl import MARLReplayBuffer, VDNLearner, MLPAgent, DuelingMLPAgent, run_evaluation
+from utils.marl import (
+    MARLReplayBuffer,
+    VDNLearner,
+    MLPAgent,
+    DuelingMLPAgent,
+    RunningObsNormalizer,
+    run_evaluation,
+)
 from utils.marl.common import select_device, epsilon_by_step, stack_obs, select_actions
 from utils.reward_normalization import reset_shared_running_normalizers
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
@@ -57,12 +64,37 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use independent per-agent networks (disable parameter sharing).",
     )
+    obs_norm_group = parser.add_mutually_exclusive_group()
+    obs_norm_group.add_argument(
+        "--normalize-obs",
+        action="store_true",
+        help="Normalize observations with running mean/std (default).",
+    )
+    obs_norm_group.add_argument(
+        "--no-normalize-obs",
+        action="store_false",
+        dest="normalize_obs",
+        help="Disable observation normalization.",
+    )
+    parser.add_argument(
+        "--obs-norm-clip",
+        type=float,
+        default=5.0,
+        help="Clip normalized observations to +/- this value (<=0 disables).",
+    )
+    parser.add_argument(
+        "--obs-norm-eps",
+        type=float,
+        default=1e-8,
+        help="Epsilon for observation normalization.",
+    )
 
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Torch device.")
     parser.add_argument("--log-interval", type=int, default=10, help="Print every N episodes.")
 
     parser.add_argument("--eval-freq", type=int, default=2500, help="Evaluation frequency in env steps.")
     parser.add_argument("--n-eval-episodes", type=int, default=5, help="Number of evaluation episodes.")
+    parser.set_defaults(normalize_obs=True)
     return parser.parse_args()
 
 
@@ -116,6 +148,12 @@ def main() -> None:
     obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
     n_actions = int(env.action_space.spaces["agent_0"].n)
     input_dim = obs_dim + (n_agents if use_agent_id else 0)
+    obs_normalizer: Optional[RunningObsNormalizer] = None
+    if args.normalize_obs:
+        clip_value = None if args.obs_norm_clip <= 0 else float(args.obs_norm_clip)
+        obs_normalizer = RunningObsNormalizer.create(
+            obs_dim, clip=clip_value, eps=float(args.obs_norm_eps)
+        )
 
     # Select network class based on --dueling flag
     AgentClass = DuelingMLPAgent if args.dueling else MLPAgent
@@ -174,6 +212,9 @@ def main() -> None:
             "dueling": args.dueling,
             "stream_hidden_dim": args.stream_hidden_dim if args.dueling else None,
         }
+        ckpt["obs_normalization"] = (
+            obs_normalizer.state_dict() if obs_normalizer is not None else {"enabled": False}
+        )
         if args.independent_agents:
             ckpt["agent_state_dicts"] = [net.state_dict() for net in learner.agent]  # type: ignore[union-attr]
         else:
@@ -192,6 +233,8 @@ def main() -> None:
             episode_seed = None if args.seed is None else args.seed + episode
             obs_dict, _info = env.reset(seed=episode_seed)
             obs = stack_obs(obs_dict, n_agents)
+            if obs_normalizer is not None:
+                obs = obs_normalizer.normalize(obs, update=True)
 
             episode_reward_sum = 0.0
             done = False
@@ -210,6 +253,8 @@ def main() -> None:
                 action_dict = {f"agent_{i}": int(actions[i]) for i in range(n_agents)}
                 next_obs_dict, rewards_dict, terminated, truncated, _infos = env.step(action_dict)
                 next_obs = stack_obs(next_obs_dict, n_agents)
+                if obs_normalizer is not None:
+                    next_obs = obs_normalizer.normalize(next_obs, update=True)
                 rewards = np.asarray([rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32)
                 # Distinguish termination (true end) from truncation (time limit)
                 # Only terminated should zero out bootstrap; truncated should still bootstrap
@@ -244,6 +289,7 @@ def main() -> None:
                         device=device,
                         n_episodes=args.n_eval_episodes,
                         seed=args.seed,
+                        obs_normalizer=obs_normalizer,
                     )
                     eval_writer.writerow([global_step, mean_eval_reward, std_eval_reward])
                     eval_f.flush()
@@ -290,6 +336,9 @@ def main() -> None:
         "stream_hidden_dim": args.stream_hidden_dim,
         "use_agent_id": use_agent_id,
         "independent_agents": args.independent_agents,
+        "normalize_obs": args.normalize_obs,
+        "obs_norm_clip": args.obs_norm_clip,
+        "obs_norm_eps": args.obs_norm_eps,
         "eval_freq": args.eval_freq,
         "n_eval_episodes": args.n_eval_episodes,
         "device": str(device),

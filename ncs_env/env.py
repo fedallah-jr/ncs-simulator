@@ -4,7 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import gymnasium as gym
@@ -14,10 +14,8 @@ from .controller import Controller, compute_discrete_lqr_gain, compute_finite_ho
 from .config import DEFAULT_CONFIG_PATH, load_config
 from .network import NetworkModel
 from .plant import Plant
-from utils.schedulers import build_scheduler
 from utils.reward_normalization import (
     RunningRewardNormalizer,
-    ZScoreRewardNormalizer,
     get_shared_running_normalizer,
 )
 
@@ -29,7 +27,7 @@ class RewardDefinition:
     simple_comm_penalty_alpha: float
     simple_freshness_decay: float = 0.0
     normalize: Optional[bool] = None  # None = auto-detect, True/False = explicit override
-    normalizer: Optional[Union[ZScoreRewardNormalizer, RunningRewardNormalizer]] = None
+    normalizer: Optional[RunningRewardNormalizer] = None
 
     def __post_init__(self) -> None:
         if self.mode not in {"difference", "absolute", "simple", "simple_penalty"}:
@@ -178,8 +176,6 @@ class NCS_Env(gym.Env):
 
         base_reward_cfg = self.config.get("reward", {})
         reward_cfg = self._merge_reward_override(base_reward_cfg, self.reward_override)
-        self.reward_normalization_type = str(reward_cfg.get("normalization_type", "fixed")).lower()
-        self.reward_normalization_episodes = int(reward_cfg.get("normalization_episodes", 30))
         self.reward_normalization_gamma = float(reward_cfg.get("normalization_gamma", 0.99))
         self.state_cost_matrix = np.array(
             reward_cfg.get("state_cost_matrix", np.eye(self.state_dim))
@@ -193,22 +189,14 @@ class NCS_Env(gym.Env):
             reward_cfg.get("simple_comm_penalty_alpha", base_comm_penalty_alpha)
         )
         base_simple_freshness_decay = float(reward_cfg.get("simple_freshness_decay", 0.0))
-        reward_mixing_cfg = self._normalize_reward_mixing_cfg(reward_cfg.get("reward_mixing", {}))
-        self.reward_definitions = self._build_reward_definitions(
+        self.reward_definition = self._build_reward_definition(
             reward_cfg,
-            reward_mixing_cfg,
             base_comm_penalty_alpha,
             base_simple_comm_penalty_alpha,
             base_simple_freshness_decay,
         )
-        self.reward_mixing_enabled = bool(reward_mixing_cfg.get("enabled", False)) and len(self.reward_definitions) == 2
         self.comm_throughput_floor = float(reward_cfg.get("comm_throughput_floor", 1e-3))
-        self.reward_scheduler: Optional[Callable[[int], float]] = self._build_reward_scheduler(
-            reward_mixing_cfg
-        )
-        self.total_env_steps = 0
-        self.last_mix_weight = self._current_mix_weight()
-        self._running_reward_returns: Optional[List[List[float]]] = None
+        self._running_reward_returns: Optional[List[float]] = None
         base_termination_cfg = self.config.get("termination", {})
         termination_cfg = self._merge_termination_override(base_termination_cfg, self.termination_override)
         self.termination_enabled = bool(termination_cfg.get("enabled", False))
@@ -298,21 +286,11 @@ class NCS_Env(gym.Env):
             f"agent_{i}": {"prev_error_sum": 0.0, "curr_error_sum": 0.0, "comm_penalty_sum": 0.0, "count": 0.0}
             for i in range(self.n_agents)
         }
-        current_mix_weight = self._current_mix_weight()
-        self.last_mix_weight = current_mix_weight
         base_components: Dict[str, float] = {
             "prev_error": 0.0,
             "curr_error": 0.0,
             "comm_penalty": 0.0,
         }
-        if self.reward_mixing_enabled:
-            base_components.update(
-                {
-                    "primary_reward": 0.0,
-                    "secondary_reward": 0.0,
-                    "mix_weight": float(current_mix_weight),
-                }
-            )
         self.last_reward_components: Dict[str, Dict[str, float]] = {
             f"agent_{i}": dict(base_components)
             for i in range(self.n_agents)
@@ -471,7 +449,6 @@ class NCS_Env(gym.Env):
         for i in range(self.n_agents):
             self.controllers[i].predict()
 
-        mix_weight = self._current_mix_weight()
         rewards = {}
         termination_triggered = False
         termination_reasons: List[str] = []
@@ -500,41 +477,19 @@ class NCS_Env(gym.Env):
             info_arrived = i in delivered_controller_ids
             message_age_steps = delivered_message_ages.get(i) if info_arrived else None
 
-            if self.reward_mixing_enabled and len(self.reward_definitions) == 2:
-                primary_def, secondary_def = self.reward_definitions
-                primary_components = self._compute_reward_for_definition(
-                    i, primary_def, 0, prev_error, curr_error, action, info_arrived, message_age_steps
-                )
-                secondary_components = self._compute_reward_for_definition(
-                    i, secondary_def, 1, prev_error, curr_error, action, info_arrived, message_age_steps
-                )
-                primary_reward = primary_components.pop("reward")
-                secondary_reward = secondary_components.pop("reward")
-                combined_reward = (1.0 - mix_weight) * primary_reward + mix_weight * secondary_reward
-                combined_comm_penalty = (
-                    (1.0 - mix_weight) * primary_components["comm_penalty"]
-                    + mix_weight * secondary_components["comm_penalty"]
-                )
-                reward_components: Dict[str, float] = {
-                    "prev_error": float(prev_error),
-                    "curr_error": float(curr_error),
-                    "comm_penalty": float(combined_comm_penalty),
-                    "primary_reward": float(primary_reward),
-                    "secondary_reward": float(secondary_reward),
-                    "mix_weight": float(mix_weight),
-                }
-                for key in ("info_arrived", "message_age_steps", "freshness"):
-                    if key in primary_components or key in secondary_components:
-                        reward_components[key] = float(primary_components.get(key, secondary_components.get(key, 0.0)))
-            else:
-                definition = self.reward_definitions[0]
-                components = self._compute_reward_for_definition(
-                    i, definition, 0, prev_error, curr_error, action, info_arrived, message_age_steps
-                )
-                reward_value = components.pop("reward")
-                combined_reward = reward_value
-                combined_comm_penalty = components.get("comm_penalty", 0.0)
-                reward_components = components
+            components = self._compute_reward_for_definition(
+                i,
+                self.reward_definition,
+                prev_error,
+                curr_error,
+                action,
+                info_arrived,
+                message_age_steps,
+            )
+            reward_value = components.pop("reward")
+            combined_reward = reward_value
+            combined_comm_penalty = components.get("comm_penalty", 0.0)
+            reward_components = components
 
             reward = float(combined_reward)
             agent_key = f"agent_{i}"
@@ -554,9 +509,6 @@ class NCS_Env(gym.Env):
                 self.last_reward_components[agent_key]["termination_penalty"] = float(
                     self.termination_penalty
                 )
-
-        self.last_mix_weight = mix_weight
-        self.total_env_steps += 1
 
         time_limit_reached = self.timestep >= self.episode_length
         finite_horizon_terminal = self.finite_horizon_enabled and time_limit_reached
@@ -588,8 +540,7 @@ class NCS_Env(gym.Env):
             for i in range(self.n_agents):
                 agent_key = f"agent_{i}"
                 if terminated[agent_key] or truncated[agent_key]:
-                    for returns in self._running_reward_returns:
-                        returns[i] = 0.0
+                    self._running_reward_returns[i] = 0.0
 
         # Get observations AFTER plant update (Gym step contract)
         # step() returns the resulting state s[k+1] after action a[k] is applied
@@ -718,100 +669,26 @@ class NCS_Env(gym.Env):
         merged.update(termination_override)
         return merged
 
-    @staticmethod
-    def _normalize_reward_mixing_cfg(raw_cfg: Any) -> Dict[str, Any]:
-        """Normalize the reward_mixing config entry into a dict with an 'enabled' flag."""
-        if isinstance(raw_cfg, bool):
-            return {"enabled": raw_cfg}
-        if raw_cfg is None:
-            return {"enabled": False}
-        if not isinstance(raw_cfg, dict):
-            raise ValueError("reward_mixing must be a boolean or mapping")
-        return raw_cfg
-
-    def _build_reward_definitions(
+    def _build_reward_definition(
         self,
         reward_cfg: Dict[str, Any],
-        mixing_cfg: Dict[str, Any],
         base_comm_penalty_alpha: float,
         base_simple_comm_penalty_alpha: float,
         base_simple_freshness_decay: float,
-    ) -> List[RewardDefinition]:
-        """Create reward definitions for primary/secondary reward functions."""
+    ) -> RewardDefinition:
         base_mode = reward_cfg.get("state_error_reward", "difference")
         base_normalize = reward_cfg.get("normalize", None)
         if base_normalize is not None:
             base_normalize = bool(base_normalize)
-        if not mixing_cfg.get("enabled", False):
-            normalize_flag = base_normalize if base_normalize is not None else False
-            return [
-                RewardDefinition(
-                    mode=base_mode,
-                    comm_penalty_alpha=base_comm_penalty_alpha,
-                    simple_comm_penalty_alpha=base_simple_comm_penalty_alpha,
-                    simple_freshness_decay=base_simple_freshness_decay,
-                    normalize=normalize_flag,
-                    normalizer=None,
-                )
-            ]
-
-        rewards_list = mixing_cfg.get("rewards", [])
-        if not isinstance(rewards_list, list) or len(rewards_list) != 2:
-            raise ValueError(
-                "reward.reward_mixing.rewards must contain exactly two reward configs "
-                "when reward_mixing.enabled is true."
-            )
-
-        definitions: List[RewardDefinition] = []
-        for reward_entry in rewards_list:
-            # Parse optional normalize override
-            normalize_override = reward_entry.get("normalize", base_normalize)
-            if normalize_override is not None:
-                normalize_override = bool(normalize_override)
-
-            definitions.append(
-                RewardDefinition(
-                    mode=str(reward_entry.get("state_error_reward", base_mode)),
-                    comm_penalty_alpha=float(
-                        reward_entry.get("comm_penalty_alpha", base_comm_penalty_alpha)
-                    ),
-                    simple_comm_penalty_alpha=float(
-                        reward_entry.get(
-                            "simple_comm_penalty_alpha",
-                            reward_entry.get("comm_penalty_alpha", base_simple_comm_penalty_alpha),
-                        )
-                    ),
-                    simple_freshness_decay=float(
-                        reward_entry.get("simple_freshness_decay", base_simple_freshness_decay)
-                    ),
-                    normalize=normalize_override,  # Optional user override
-                    normalizer=None,  # Will be set during _compute_reward_normalizers()
-                )
-            )
-        return definitions
-
-    def _build_reward_scheduler(self, mixing_cfg: Dict[str, Any]) -> Optional[Callable[[int], float]]:
-        """Create the mixing scheduler callable (or None when mixing is disabled)."""
-        if not mixing_cfg.get("enabled", False):
-            return None
-        scheduler_cfg = mixing_cfg.get("scheduler", {})
-        if not isinstance(scheduler_cfg, dict):
-            scheduler_cfg = {}
-        default_steps = int(mixing_cfg.get("total_steps", 100_000))
-        default_start = float(mixing_cfg.get("start_value", 0.0))
-        default_end = float(mixing_cfg.get("end_value", 1.0))
-        return build_scheduler(
-            scheduler_cfg,
-            default_start=default_start,
-            default_end=default_end,
-            default_steps=default_steps,
+        normalize_flag = base_normalize if base_normalize is not None else False
+        return RewardDefinition(
+            mode=str(base_mode),
+            comm_penalty_alpha=base_comm_penalty_alpha,
+            simple_comm_penalty_alpha=base_simple_comm_penalty_alpha,
+            simple_freshness_decay=base_simple_freshness_decay,
+            normalize=normalize_flag,
+            normalizer=None,
         )
-
-    def _current_mix_weight(self) -> float:
-        """Return the current reward mixing weight."""
-        if not self.reward_mixing_enabled or self.reward_scheduler is None:
-            return 0.0
-        return float(self.reward_scheduler(self.total_env_steps))
 
     def _quantize_state(self, state: np.ndarray) -> np.ndarray:
         """Quantize the measured plant state."""
@@ -885,21 +762,13 @@ class NCS_Env(gym.Env):
         return sum(1 for entry in recent_entries if entry["status"] > 0)
 
     def _setup_reward_normalization(self) -> None:
-        if not any(_should_normalize_reward(defn) for defn in self.reward_definitions):
+        if not _should_normalize_reward(self.reward_definition):
             return
-        if self.reward_normalization_type == "running":
-            self._init_running_reward_normalizers()
-            return
-        if self.reward_normalization_type != "fixed":
-            raise ValueError("reward.normalization_type must be 'fixed' or 'running'")
-        print("\n[Reward Normalization] Computing statistics...")
-        self._compute_reward_normalizers(self.reward_normalization_episodes)
-        print("[Reward Normalization] Statistics computed.\n")
+        self._init_running_reward_normalizer()
 
-    def _running_normalizer_key(self, definition_idx: int, definition: RewardDefinition) -> str:
+    def _running_normalizer_key(self, definition: RewardDefinition) -> str:
         signature = {
             "config_path": str(self.config_path.resolve()),
-            "definition_idx": int(definition_idx),
             "mode": definition.mode,
             "normalization_gamma": float(self.reward_normalization_gamma),
             "comm_penalty_alpha": float(definition.comm_penalty_alpha),
@@ -912,154 +781,47 @@ class NCS_Env(gym.Env):
         }
         return json.dumps(signature, sort_keys=True, separators=(",", ":"))
 
-    def _init_running_reward_normalizers(self) -> None:
-        self._running_reward_returns = [
-            [0.0 for _ in range(self.n_agents)] for _ in range(len(self.reward_definitions))
-        ]
-        for idx, definition in enumerate(self.reward_definitions):
-            if _should_normalize_reward(definition):
-                key = self._running_normalizer_key(idx, definition)
-                definition.normalizer = get_shared_running_normalizer(key)
+    def _init_running_reward_normalizer(self) -> None:
+        self._running_reward_returns = [0.0 for _ in range(self.n_agents)]
+        if _should_normalize_reward(self.reward_definition):
+            key = self._running_normalizer_key(self.reward_definition)
+            self.reward_definition.normalizer = get_shared_running_normalizer(key)
 
     def _reset_running_returns(self) -> None:
         if self._running_reward_returns is None:
             return
-        for idx in range(len(self._running_reward_returns)):
-            for i in range(self.n_agents):
-                self._running_reward_returns[idx][i] = 0.0
-
-    def _compute_reward_normalizers(self, episodes: int) -> None:
-        """
-        Compute normalization statistics for rewards that need it.
-
-        This runs random rollouts to estimate mean/std of each reward component,
-        but ONLY for rewards where normalization is enabled (unbounded rewards).
-        Simple/simple_penalty rewards are NOT normalized as they are already bounded.
-        """
-        saved_total_steps = self.total_env_steps
-        saved_last_mix_weight = self.last_mix_weight
-        for idx, definition in enumerate(self.reward_definitions):
-            if not _should_normalize_reward(definition):
-                # Skip normalization for this reward (e.g., simple_penalty)
-                print(f"  Reward {idx} ({definition.mode}): No normalization (bounded reward)")
-                continue
-
-            print(f"  Reward {idx} ({definition.mode}): Computing normalization statistics...")
-
-            # Compute normalizer for this reward definition
-            temp_normalizer = self._compute_normalizer_for_definition(definition, idx, episodes=episodes)
-            definition.normalizer = temp_normalizer
-
-            print(f"    → Normalizer: mean={temp_normalizer.mean:.3f}, std={temp_normalizer.std:.3f}")
-        self.total_env_steps = saved_total_steps
-        self.last_mix_weight = saved_last_mix_weight
-
-    def _compute_normalizer_for_definition(
-        self,
-        definition: RewardDefinition,
-        definition_idx: int,
-        episodes: int = 30,
-    ) -> ZScoreRewardNormalizer:
-        """
-        Compute normalizer for a single reward definition.
-
-        Runs random episodes and collects rewards for this specific reward component.
-
-        Args:
-            definition: The reward definition to normalize
-            definition_idx: Index of the definition (for debugging)
-            episodes: Number of random episodes to sample
-
-        Returns:
-            ZScoreRewardNormalizer with computed mean and std
-        """
-        # Use the environment's RNG to generate seeds for normalization episodes
-        rng = self.np_random
-        collected_rewards = []
-
-        for ep in range(episodes):
-            # Reset environment
-            self.reset(seed=int(rng.integers(0, 1_000_000)))
-            prev_errors = [float(x) for x in self.last_errors]
-
-            for step in range(self.episode_length):
-                # Random actions for all agents
-                actions = {}
-                for i in range(self.n_agents):
-                    actions[f"agent_{i}"] = int(rng.integers(0, 2))  # 0 or 1
-
-                # Step environment
-                try:
-                    _, _, terminated, truncated, info = self.step(actions)
-                except Exception:
-                    # If step fails during initialization, skip this sample
-                    break
-
-                # Collect error rewards for each agent
-                for i in range(self.n_agents):
-                    action = actions[f"agent_{i}"]
-                    x = self.plants[i].x
-                    curr_error_raw = self._compute_state_error(x)
-                    components = info.get("reward_components", {}).get(f"agent_{i}", {})
-                    prev_error = float(components.get("prev_error", prev_errors[i]))
-                    curr_error = float(components.get("curr_error", curr_error_raw))
-                    info_arrived = bool(components.get("info_arrived", 0.0))
-                    message_age_steps = components.get("message_age_steps", None)
-                    reward_components = self._compute_reward_for_definition(
-                        i,
-                        definition,
-                        definition_idx,
-                        prev_error,
-                        curr_error,
-                        action,
-                        info_arrived,
-                        message_age_steps,
-                        apply_normalization=False,
-                    )
-
-                    collected_rewards.append(float(reward_components["reward"]))
-                    prev_errors[i] = curr_error
-
-                if all(terminated.values()) or all(truncated.values()):
-                    break
-
-        # Compute statistics
-        if len(collected_rewards) == 0:
-            # Fallback if no rewards collected
-            print(f"    ⚠️  Warning: No rewards collected for normalization, using defaults")
-            return ZScoreRewardNormalizer(mean=0.0, std=1.0)
-
-        rewards_array = np.array(collected_rewards, dtype=np.float32)
-        mean = float(rewards_array.mean())
-        std = float(rewards_array.std())
-
-        # Ensure std is not too small to avoid division issues
-        std = max(std, 1e-8)
-
-        return ZScoreRewardNormalizer(mean=mean, std=std)
+        for i in range(self.n_agents):
+            self._running_reward_returns[i] = 0.0
 
     def _apply_running_normalization(
         self,
-        definition_idx: int,
         agent_idx: int,
         reward_value: float,
     ) -> float:
         if self._running_reward_returns is None:
             return reward_value
-        returns = self._running_reward_returns[definition_idx]
-        returns[agent_idx] = self.reward_normalization_gamma * returns[agent_idx] + reward_value
-        normalizer = self.reward_definitions[definition_idx].normalizer
+        self._running_reward_returns[agent_idx] = (
+            self.reward_normalization_gamma * self._running_reward_returns[agent_idx] + reward_value
+        )
+        normalizer = self.reward_definition.normalizer
         if isinstance(normalizer, RunningRewardNormalizer):
             if not self.freeze_running_normalization:
-                normalizer.update(returns[agent_idx])
+                normalizer.update(self._running_reward_returns[agent_idx])
             return normalizer(reward_value)
+        return reward_value
+
+    def _normalize_reward_value(self, agent_idx: int, reward_value: float) -> float:
+        definition = self.reward_definition
+        if isinstance(definition.normalizer, RunningRewardNormalizer):
+            return self._apply_running_normalization(agent_idx, reward_value)
+        if definition.normalizer is not None:
+            return definition.normalizer(reward_value)
         return reward_value
 
     def _compute_reward_for_definition(
         self,
         agent_idx: int,
         definition: RewardDefinition,
-        definition_idx: int,
         prev_error: float,
         curr_error: float,
         action: int,
@@ -1100,11 +862,7 @@ class NCS_Env(gym.Env):
         reward_value = float(error_reward - comm_penalty)
 
         if apply_normalization:
-            # Apply normalization to full reward if configured
-            if isinstance(definition.normalizer, RunningRewardNormalizer):
-                reward_value = self._apply_running_normalization(definition_idx, agent_idx, reward_value)
-            elif definition.normalizer is not None:
-                reward_value = definition.normalizer(reward_value)
+            reward_value = self._normalize_reward_value(agent_idx, reward_value)
         components: Dict[str, float] = {
             "prev_error": float(prev_error),
             "curr_error": float(curr_error),
@@ -1188,7 +946,6 @@ class NCS_Env(gym.Env):
                 "tx_collisions": collisions,
             },
             "reward_components": {k: v.copy() for k, v in self.last_reward_components.items()},
-            "reward_mix_weight": float(self.last_mix_weight) if self.reward_mixing_enabled else 0.0,
             "termination_reasons": list(self.last_termination_reasons),
             "termination_agents": list(self.last_termination_agents),
             "bad_termination": bool(self.last_bad_termination),
@@ -1201,11 +958,3 @@ class NCS_Env(gym.Env):
     def close(self):
         """Clean up resources."""
         pass
-
-    def get_reward_mix_weight(self) -> float:
-        """
-        Return the current reward mixing weight (0.0 when mixing is disabled).
-
-        This is useful for logging during evaluation.
-        """
-        return float(self.last_mix_weight) if hasattr(self, "last_mix_weight") else 0.0

@@ -2,7 +2,7 @@
 Policy testing tool for the NCS simulator.
 
 Evaluates a target policy against a fixed set of heuristic baselines across multiple seeds,
-using raw absolute reward (no normalization, no reward mixing).
+using raw absolute reward (no normalization).
 """
 
 from __future__ import annotations
@@ -38,11 +38,10 @@ HEURISTIC_POLICY_NAMES: Sequence[str] = ("zero_wait", "always_send", "random_50"
 # Names for stochastic heuristics that should use non-deterministic actions.
 STOCHASTIC_HEURISTICS: Sequence[str] = ("random_50",)
 
-# Reward override for evaluation: raw absolute reward, no normalization/mixing.
+# Reward override for evaluation: raw absolute reward, no normalization.
 EVAL_REWARD_OVERRIDE: Dict[str, Any] = {
     "state_error_reward": "absolute",
     "normalize": False,
-    "reward_mixing": {"enabled": False},
 }
 
 REWARD_COMPARISON_KEYS: Sequence[str] = (
