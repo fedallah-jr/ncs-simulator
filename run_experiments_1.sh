@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiment batch 1: VDN (double+dueling, shared), QMIX (double, shared), MAPPO (shared).
+# MARL experiment batch 1: Baselines + single-feature ablations (shared parameters)
+# vdn_shared, qmix_shared, vdn_dueling_shared, qmix_dueling_shared, iql_dueling_shared
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -13,7 +14,7 @@ TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-1000000}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-800000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/exp_1_vdn_dueling_qmix_double_mappo_shared_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/exp_1_baselines_dueling_shared_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -87,11 +88,16 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
-run_one "algorithms.marl_vdn" "vdn" "vdn_dueling_doubleq_shared" \
-  --double-q --dueling --epsilon-decay-steps "${EPS_DECAY_STEPS}"
-run_one "algorithms.marl_qmix" "qmix" "qmix_doubleq_shared" \
-  --double-q --epsilon-decay-steps "${EPS_DECAY_STEPS}"
-run_one "algorithms.marl_mappo" "mappo" "mappo_shared"
+run_one "algorithms.marl_vdn" "vdn" "vdn_shared" \
+  --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_qmix" "qmix" "qmix_shared" \
+  --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_vdn" "vdn" "vdn_dueling_shared" \
+  --dueling --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_qmix" "qmix" "qmix_dueling_shared" \
+  --dueling --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_iql" "iql" "iql_dueling_shared" \
+  --dueling --epsilon-decay-steps "${EPS_DECAY_STEPS}"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then
