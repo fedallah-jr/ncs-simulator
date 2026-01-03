@@ -13,7 +13,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -584,6 +584,116 @@ def _select_column(df: pd.DataFrame, candidates: Sequence[str]) -> Optional[str]
     return None
 
 
+def _to_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _compute_training_stats(model_dir: Path) -> Optional[Dict[str, Union[str, float, int]]]:
+    training_csv = model_dir / "training_rewards.csv"
+    if not training_csv.exists():
+        return None
+
+    try:
+        train_df = pd.read_csv(str(training_csv))
+        if len(train_df) == 0:
+            return None
+
+        episode_col = _select_column(train_df, ["episode", "Episode", "generation", "Generation"])
+        reward_col = _select_column(
+            train_df,
+            ["reward_sum", "reward", "total_reward", "episode_reward", "mean_reward"],
+        )
+        if reward_col is None:
+            raise ValueError(f"Could not find reward column. Available: {list(train_df.columns)}")
+
+        rewards = train_df[reward_col].astype(float)
+        max_idx = int(np.argmax(rewards))
+        min_idx = int(np.argmin(rewards))
+        max_episode = _to_float(train_df[episode_col].iloc[max_idx]) if episode_col else float("nan")
+        min_episode = _to_float(train_df[episode_col].iloc[min_idx]) if episode_col else float("nan")
+
+        return {
+            "episode_column": episode_col or "",
+            "reward_column": reward_col,
+            "count": int(len(rewards)),
+            "mean_reward": float(np.mean(rewards)),
+            "std_reward": float(np.std(rewards)),
+            "max_reward": float(rewards.iloc[max_idx]),
+            "max_reward_episode": max_episode,
+            "min_reward": float(rewards.iloc[min_idx]),
+            "min_reward_episode": min_episode,
+        }
+    except Exception as exc:
+        print(f"Warning: Could not compute training stats: {exc}")
+        return None
+
+
+def _compute_evaluation_stats(model_dir: Path) -> Optional[Dict[str, Union[str, float, int]]]:
+    eval_csv = model_dir / "evaluation_rewards.csv"
+    if not eval_csv.exists():
+        return None
+
+    try:
+        eval_df = pd.read_csv(str(eval_csv))
+        if len(eval_df) == 0:
+            return None
+
+        step_col = _select_column(eval_df, ["step", "Step", "steps", "Steps"])
+        mean_reward_col = _select_column(eval_df, ["mean_reward", "reward", "avg_reward"])
+        std_reward_col = _select_column(eval_df, ["std_reward", "reward_std", "std"])
+        if mean_reward_col is None:
+            raise ValueError(f"Could not find mean reward column. Available: {list(eval_df.columns)}")
+
+        mean_rewards = eval_df[mean_reward_col].astype(float)
+        max_idx = int(np.argmax(mean_rewards))
+        min_idx = int(np.argmin(mean_rewards))
+        max_step = _to_float(eval_df[step_col].iloc[max_idx]) if step_col else float("nan")
+        min_step = _to_float(eval_df[step_col].iloc[min_idx]) if step_col else float("nan")
+
+        mean_std_reward = None
+        if std_reward_col is not None:
+            std_rewards = eval_df[std_reward_col].astype(float)
+            mean_std_reward = float(np.mean(std_rewards))
+
+        stats: Dict[str, Union[str, float, int]] = {
+            "step_column": step_col or "",
+            "mean_reward_column": mean_reward_col,
+            "std_reward_column": std_reward_col or "",
+            "count": int(len(mean_rewards)),
+            "mean_of_mean_reward": float(np.mean(mean_rewards)),
+            "std_of_mean_reward": float(np.std(mean_rewards)),
+            "max_mean_reward": float(mean_rewards.iloc[max_idx]),
+            "max_mean_reward_step": max_step,
+            "min_mean_reward": float(mean_rewards.iloc[min_idx]),
+            "min_mean_reward_step": min_step,
+        }
+        if mean_std_reward is not None:
+            stats["mean_of_std_reward"] = mean_std_reward
+        return stats
+    except Exception as exc:
+        print(f"Warning: Could not compute evaluation stats: {exc}")
+        return None
+
+
+def _write_reward_stats(
+    run_dir: Path,
+    training_stats: Optional[Dict[str, Union[str, float, int]]],
+    evaluation_stats: Optional[Dict[str, Union[str, float, int]]],
+) -> None:
+    if training_stats is None and evaluation_stats is None:
+        return
+    payload = {
+        "training": training_stats,
+        "evaluation": evaluation_stats,
+    }
+    path = run_dir / "reward_stats.json"
+    with path.open("w") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True, ensure_ascii=True)
+
+
 def _plot_training_rewards(model_dir: Path, output_path: Path, model_name: str = "Model") -> None:
     """Plot training reward curves from a model directory."""
     training_csv = model_dir / "training_rewards.csv"
@@ -835,10 +945,13 @@ def main() -> int:
         print(f"✓ Wrote per-seed results to {run_dir / 'per_seed_results.csv'}")
         print(f"✓ Wrote summary results to {run_dir / 'summary_results.csv'}")
 
-        # Plot training curves if the policy is from a trained model
+        # Plot training curves and save stats if the policy is from a trained model
         if policy_type != "heuristic":
             policy_path = Path(args.policy)
             model_dir = policy_path.parent
+            training_stats = _compute_training_stats(model_dir)
+            evaluation_stats = _compute_evaluation_stats(model_dir)
+            _write_reward_stats(run_dir, training_stats, evaluation_stats)
             _plot_training_rewards(
                 model_dir,
                 model_dir / "training_rewards.png",
@@ -934,6 +1047,10 @@ def main() -> int:
         summary_row["model_name"] = model_name
         summary_row["checkpoint"] = checkpoint
         leaderboard_rows.append(summary_row)
+
+        training_stats = _compute_training_stats(run.path)
+        evaluation_stats = _compute_evaluation_stats(run.path)
+        _write_reward_stats(run_dir, training_stats, evaluation_stats)
 
         if model_name not in plotted_models:
             _plot_training_rewards(
