@@ -12,9 +12,8 @@ import csv
 import json
 import sys
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -578,121 +577,105 @@ def _smooth_rewards(rewards: np.ndarray, window_size: int) -> np.ndarray:
     return np.concatenate([padding, smoothed])
 
 
-def _plot_training_curves(model_dir: Path, output_path: Path, model_name: str = "Model") -> None:
-    """
-    Plot training and evaluation reward curves from a model directory.
+def _select_column(df: pd.DataFrame, candidates: Sequence[str]) -> Optional[str]:
+    for col_name in candidates:
+        if col_name in df.columns:
+            return col_name
+    return None
 
-    Args:
-        model_dir: Directory containing training_rewards.csv and evaluation_rewards.csv
-        output_path: Path to save the plot
-        model_name: Name to display in plot title
-    """
+
+def _plot_training_rewards(model_dir: Path, output_path: Path, model_name: str = "Model") -> None:
+    """Plot training reward curves from a model directory."""
     training_csv = model_dir / "training_rewards.csv"
+    if not training_csv.exists():
+        print(f"Warning: Training rewards not found at {training_csv}")
+        return
+
+    try:
+        train_df = pd.read_csv(str(training_csv))
+        if len(train_df) == 0:
+            print(f"Warning: Training rewards file is empty at {training_csv}")
+            return
+
+        episode_col = _select_column(train_df, ["episode", "Episode", "generation", "Generation"])
+        reward_col = _select_column(train_df, ["reward", "reward_sum", "total_reward", "episode_reward", "mean_reward"])
+        if episode_col is None or reward_col is None:
+            raise ValueError(f"Could not find episode/reward columns. Available: {list(train_df.columns)}")
+
+        episodes = train_df[episode_col].values
+        rewards = train_df[reward_col].values
+        smoothed = _smooth_rewards(rewards, window_size=200)
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.plot(episodes, rewards, alpha=0.3, linewidth=0.5, color="blue", label="Raw")
+        ax.plot(episodes, smoothed, linewidth=2, color="blue", label="Smoothed (window=200)")
+        ax.set_xlabel("Episode")
+        ax.set_ylabel("Training Reward")
+        ax.set_title(f"{model_name} - Training Rewards")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(str(output_path), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"✓ Saved training rewards plot to {output_path}")
+    except Exception as exc:
+        print(f"Warning: Could not plot training rewards: {exc}")
+
+
+def _plot_evaluation_rewards(model_dir: Path, output_path: Path, model_name: str = "Model") -> None:
+    """Plot evaluation reward curves from a model directory."""
     eval_csv = model_dir / "evaluation_rewards.csv"
+    if not eval_csv.exists():
+        print(f"Warning: Evaluation rewards not found at {eval_csv}")
+        return
 
-    if not training_csv.exists() and not eval_csv.exists():
-        return  # Nothing to plot
+    try:
+        eval_df = pd.read_csv(str(eval_csv))
+        if len(eval_df) == 0:
+            print(f"Warning: Evaluation rewards file is empty at {eval_csv}")
+            return
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        step_col = _select_column(eval_df, ["step", "Step", "steps", "Steps"])
+        mean_reward_col = _select_column(eval_df, ["mean_reward", "reward", "avg_reward"])
+        std_reward_col = _select_column(eval_df, ["std_reward", "reward_std", "std"])
+        if step_col is None or mean_reward_col is None:
+            raise ValueError(f"Could not find step/reward columns. Available: {list(eval_df.columns)}")
 
-    # Plot training rewards
-    if training_csv.exists():
-        try:
-            train_df = pd.read_csv(str(training_csv))
-            if len(train_df) > 0:
-                # Try different possible column names for episodes and rewards
-                episode_col = None
-                reward_col = None
+        steps = eval_df[step_col].values
+        mean_rewards = eval_df[mean_reward_col].values
+        std_rewards = eval_df[std_reward_col].values if std_reward_col is not None else None
+        smoothed = _smooth_rewards(mean_rewards, window_size=20)
 
-                for col_name in ['episode', 'Episode']:
-                    if col_name in train_df.columns:
-                        episode_col = col_name
-                        break
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.plot(steps, mean_rewards, alpha=0.3, linewidth=0.5, color="green", label="Raw")
+        ax.plot(steps, smoothed, linewidth=2, color="green", label="Smoothed (window=20)")
 
-                for col_name in ['reward', 'reward_sum', 'total_reward', 'episode_reward']:
-                    if col_name in train_df.columns:
-                        reward_col = col_name
-                        break
+        if std_rewards is not None:
+            smoothed_std = _smooth_rewards(std_rewards, window_size=20)
+            ax.fill_between(
+                steps,
+                smoothed - smoothed_std,
+                smoothed + smoothed_std,
+                alpha=0.2,
+                color="green",
+                label="+/- 1 std",
+            )
 
-                if episode_col is not None and reward_col is not None:
-                    episodes = train_df[episode_col].values
-                    rewards = train_df[reward_col].values
-                    smoothed = _smooth_rewards(rewards, window_size=200)
+        ax.set_xlabel("Environment Steps")
+        ax.set_ylabel("Evaluation Reward (mean)")
+        ax.set_title(f"{model_name} - Evaluation Rewards")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
 
-                    axes[0].plot(episodes, rewards, alpha=0.3, linewidth=0.5, color='blue', label='Raw')
-                    axes[0].plot(episodes, smoothed, linewidth=2, color='blue', label='Smoothed (window=200)')
-                    axes[0].set_xlabel('Episode')
-                    axes[0].set_ylabel('Training Reward')
-                    axes[0].set_title(f'{model_name} - Training Rewards')
-                    axes[0].legend()
-                    axes[0].grid(True, alpha=0.3)
-                else:
-                    raise ValueError(f"Could not find episode/reward columns. Available: {list(train_df.columns)}")
-        except Exception as e:
-            print(f"Warning: Could not plot training rewards: {e}")
-    else:
-        axes[0].text(0.5, 0.5, 'No training data available',
-                     ha='center', va='center', transform=axes[0].transAxes)
-        axes[0].set_title(f'{model_name} - Training Rewards')
-
-    # Plot evaluation rewards
-    if eval_csv.exists():
-        try:
-            eval_df = pd.read_csv(str(eval_csv))
-            if len(eval_df) > 0:
-                # Try different possible column names
-                step_col = None
-                mean_reward_col = None
-                std_reward_col = None
-
-                for col_name in ['step', 'Step', 'steps', 'Steps']:
-                    if col_name in eval_df.columns:
-                        step_col = col_name
-                        break
-
-                for col_name in ['mean_reward', 'reward', 'avg_reward']:
-                    if col_name in eval_df.columns:
-                        mean_reward_col = col_name
-                        break
-
-                for col_name in ['std_reward', 'reward_std', 'std']:
-                    if col_name in eval_df.columns:
-                        std_reward_col = col_name
-                        break
-
-                if step_col is not None and mean_reward_col is not None:
-                    steps = eval_df[step_col].values
-                    mean_rewards = eval_df[mean_reward_col].values
-                    std_rewards = eval_df[std_reward_col].values if std_reward_col is not None else None
-                    smoothed = _smooth_rewards(mean_rewards, window_size=20)
-
-                    axes[1].plot(steps, mean_rewards, alpha=0.3, linewidth=0.5, color='green', label='Raw')
-                    axes[1].plot(steps, smoothed, linewidth=2, color='green', label='Smoothed (window=20)')
-
-                    if std_rewards is not None:
-                        smoothed_std = _smooth_rewards(std_rewards, window_size=20)
-                        axes[1].fill_between(steps, smoothed - smoothed_std, smoothed + smoothed_std,
-                                            alpha=0.2, color='green', label='±1 std')
-
-                    axes[1].set_xlabel('Environment Steps')
-                    axes[1].set_ylabel('Evaluation Reward (mean)')
-                    axes[1].set_title(f'{model_name} - Evaluation Rewards')
-                    axes[1].legend()
-                    axes[1].grid(True, alpha=0.3)
-                else:
-                    raise ValueError(f"Could not find step/reward columns. Available: {list(eval_df.columns)}")
-        except Exception as e:
-            print(f"Warning: Could not plot evaluation rewards: {e}")
-    else:
-        axes[1].text(0.5, 0.5, 'No evaluation data available',
-                     ha='center', va='center', transform=axes[1].transAxes)
-        axes[1].set_title(f'{model_name} - Evaluation Rewards')
-
-    plt.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(str(output_path), dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"✓ Saved training curves plot to {output_path}")
+        plt.tight_layout()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(str(output_path), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"✓ Saved evaluation rewards plot to {output_path}")
+    except Exception as exc:
+        print(f"Warning: Could not plot evaluation rewards: {exc}")
 
 
 def main() -> int:
@@ -752,8 +735,7 @@ def main() -> int:
         seeds = _iter_seeds(args.seed_start, args.num_seeds)
         output_root = Path(args.output_dir)
         output_root.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = output_root / f"policy_test_{timestamp}_{_sanitize_filename(target_label)}"
+        run_dir = output_root / f"policy_test_{_sanitize_filename(target_label)}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
         policy_specs = [PolicySpec(label=target_label, policy_type=policy_type, policy_path=args.policy)]
@@ -856,10 +838,17 @@ def main() -> int:
         # Plot training curves if the policy is from a trained model
         if policy_type != "heuristic":
             policy_path = Path(args.policy)
-            # Model directory is the parent of the policy file (e.g., best_model.pt)
             model_dir = policy_path.parent
-            plot_path = run_dir / "training_curves.png"
-            _plot_training_curves(model_dir, plot_path, model_name=target_label)
+            _plot_training_rewards(
+                model_dir,
+                model_dir / "training_rewards.png",
+                model_name=target_label,
+            )
+            _plot_evaluation_rewards(
+                model_dir,
+                model_dir / "evaluation_rewards.png",
+                model_name=target_label,
+            )
 
         return 0
 
@@ -922,8 +911,8 @@ def main() -> int:
         raise ValueError("Resolved n_agents must be >= 1.")
 
     seeds = _iter_seeds(args.seed_start, args.num_seeds)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     leaderboard_rows: List[Dict[str, Any]] = []
+    plotted_models: Set[str] = set()
 
     print(f"Evaluating {len(model_specs)} model checkpoints over {len(seeds)} seeds...")
     print("Raw absolute reward enabled; comm/termination settings from config.")
@@ -940,15 +929,24 @@ def main() -> int:
             use_multi_agent=use_multi_agent,
             termination_override=termination_override,
         )
-        run_dir = models_root / model_name / "policy_tests" / f"{checkpoint}_eval_{timestamp}"
+        run_dir = models_root / model_name / "policy_tests" / f"{checkpoint}_eval"
         summary_row = _write_policy_results(run_dir, spec, results)
         summary_row["model_name"] = model_name
         summary_row["checkpoint"] = checkpoint
         leaderboard_rows.append(summary_row)
 
-        # Plot training curves for this model
-        plot_path = run_dir / "training_curves.png"
-        _plot_training_curves(run.path, plot_path, model_name=f"{model_name} ({checkpoint})")
+        if model_name not in plotted_models:
+            _plot_training_rewards(
+                run.path,
+                run.path / "training_rewards.png",
+                model_name=model_name,
+            )
+            _plot_evaluation_rewards(
+                run.path,
+                run.path / "evaluation_rewards.png",
+                model_name=model_name,
+            )
+            plotted_models.add(model_name)
 
     heuristic_config_path = runs[0].config_path
     for heuristic_name in HEURISTIC_POLICY_NAMES:
@@ -962,7 +960,7 @@ def main() -> int:
             use_multi_agent=use_multi_agent,
             termination_override=termination_override,
         )
-        run_dir = models_root / "heuristics" / f"{heuristic_name}_eval_{timestamp}"
+        run_dir = models_root / "heuristics" / f"{heuristic_name}_eval"
         summary_row = _write_policy_results(run_dir, spec, results)
         summary_row["model_name"] = "heuristics"
         summary_row["checkpoint"] = "n/a"
