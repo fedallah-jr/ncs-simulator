@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiment batch 3: Independent agents + Dueling architecture
-# vdn_dueling_independent, qmix_dueling_independent, iql_dueling_independent
+# MARL experiment batch 3: IQL team_reward doubleq/dueling variants
+# iql_team_reward_doubleq_independent, iql_team_reward_dueling_shared, iql_team_reward_dueling_independent
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -14,7 +14,7 @@ TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-1000000}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-800000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/exp_3_dueling_independent_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/exp_3_iql_team_reward_doubleq_dueling_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -88,12 +88,12 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
-run_one "algorithms.marl_vdn" "vdn" "vdn_dueling_independent" \
-  --dueling --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
-run_one "algorithms.marl_qmix" "qmix" "qmix_dueling_independent" \
-  --dueling --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
-run_one "algorithms.marl_iql" "iql" "iql_dueling_independent" \
-  --dueling --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_iql" "iql" "iql_team_reward_doubleq_independent" \
+  --team-reward --double-q --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_iql" "iql" "iql_team_reward_dueling_shared" \
+  --team-reward --dueling --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_iql" "iql" "iql_team_reward_dueling_independent" \
+  --team-reward --dueling --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then
