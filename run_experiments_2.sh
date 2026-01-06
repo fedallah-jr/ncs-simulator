@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiment batch 2: IQL dueling+doubleq independent + team_reward baselines + QPLEX shared
-# iql_dueling_doubleq_independent, iql_team_reward_independent, iql_team_reward_doubleq_shared, qplex_doubleq_shared
+# MARL experiment batch 2: QPLEX double-q shared parameters
+# qplex_doubleq_shared
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -14,7 +14,7 @@ TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-1000000}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-800000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/exp_2_iql_dueling_doubleq_independent_team_reward_qplex_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/exp_2_qplex_doubleq_shared_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -88,12 +88,6 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
-run_one "algorithms.marl_iql" "iql" "iql_dueling_doubleq_independent" \
-  --dueling --double-q --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
-run_one "algorithms.marl_iql" "iql" "iql_team_reward_independent" \
-  --team-reward --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
-run_one "algorithms.marl_iql" "iql" "iql_team_reward_doubleq_shared" \
-  --team-reward --double-q --epsilon-decay-steps "${EPS_DECAY_STEPS}"
 run_one "algorithms.marl_qplex" "qplex" "qplex_doubleq_shared" \
   --double-q --epsilon-decay-steps "${EPS_DECAY_STEPS}"
 
