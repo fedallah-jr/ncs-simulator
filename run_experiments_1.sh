@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiment batch 1: Dueling + Double-Q (independent) for VDN/QMIX + IQL team_reward baseline
-# vdn_dueling_doubleq_independent, qmix_dueling_doubleq_independent, iql_team_reward_shared
+# MARL experiment batch 1: Dueling + Double-Q (independent) for VDN/QMIX + QPLEX independent + IQL team_reward baseline
+# vdn_dueling_doubleq_independent, qmix_dueling_doubleq_independent, qplex_doubleq_independent, iql_team_reward_shared
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -14,7 +14,7 @@ TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-1000000}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-800000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/exp_1_dueling_doubleq_independent_iql_team_reward_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/exp_1_dueling_doubleq_independent_iql_team_reward_qplex_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -92,6 +92,8 @@ run_one "algorithms.marl_vdn" "vdn" "vdn_dueling_doubleq_independent" \
   --dueling --double-q --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
 run_one "algorithms.marl_qmix" "qmix" "qmix_dueling_doubleq_independent" \
   --dueling --double-q --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_qplex" "qplex" "qplex_doubleq_independent" \
+  --double-q --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
 run_one "algorithms.marl_iql" "iql" "iql_team_reward_shared" \
   --team-reward --epsilon-decay-steps "${EPS_DECAY_STEPS}"
 
