@@ -77,16 +77,17 @@ Learning-based baselines live under `algorithms/`:
 - IQL (multi-agent, PyTorch): `python -m algorithms.marl_iql --config configs/marl_mixed_plants.json --total-timesteps 200000`
 - VDN (multi-agent, PyTorch): `python -m algorithms.marl_vdn --config configs/marl_mixed_plants.json --total-timesteps 200000`
 - QMIX (multi-agent, PyTorch): `python -m algorithms.marl_qmix --config configs/marl_mixed_plants.json --total-timesteps 200000`
+- QPLEX (multi-agent, PyTorch): `python -m algorithms.marl_qplex --config configs/marl_mixed_plants.json --total-timesteps 200000`
 - MAPPO (multi-agent, PyTorch): `python -m algorithms.marl_mappo --config configs/marl_mixed_plants.json --total-timesteps 200000`
 
-All MARL Q-learning algorithms (IQL, VDN, QMIX) support these architectural enhancements:
+All MARL Q-learning algorithms (IQL, VDN, QMIX, QPLEX) support these architectural enhancements:
 - `--double-q`: Enable Double DQN (use online network to select actions, target network to evaluate).
 - `--dueling`: Enable Dueling DQN architecture (separate value and advantage streams).
 - `--stream-hidden-dim`: Hidden dimension for dueling streams (default: 64).
 
 Example with all enhancements: `python -m algorithms.marl_qmix --config configs/marl_mixed_plants.json --dueling --double-q --total-timesteps 200000`
 
-All MARL algorithms (IQL, VDN, QMIX, MAPPO) support observation normalization (enabled by default):
+All MARL algorithms (IQL, VDN, QMIX, QPLEX, MAPPO) support observation normalization (enabled by default):
 - `--no-normalize-obs`: Disable running mean/std normalization on per-agent observations.
 - `--obs-norm-clip`: Clip normalized observations to +/- this value (<=0 disables).
 - `--obs-norm-eps`: Epsilon for observation normalization.
