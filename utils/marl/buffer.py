@@ -6,6 +6,7 @@ from typing import Optional
 import numpy as np
 import torch
 
+from utils.marl.obs_normalization import RunningObsNormalizer
 
 @dataclass(frozen=True)
 class MARLBatch:
@@ -94,19 +95,30 @@ class MARLReplayBuffer:
         self._ptr = (self._ptr + 1) % self.capacity
         self._size = min(self._size + 1, self.capacity)
 
-    def sample(self, batch_size: int) -> MARLBatch:
+    def sample(self, batch_size: int, *, obs_normalizer: Optional[RunningObsNormalizer] = None) -> MARLBatch:
         if self._size == 0:
             raise RuntimeError("Cannot sample from an empty buffer")
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         indices = self.rng.integers(0, self._size, size=int(batch_size), endpoint=False)
+        obs = self._obs[indices]
+        next_obs = self._next_obs[indices]
+        if obs_normalizer is not None:
+            # Normalize on sample to keep stats consistent across the batch.
+            obs = obs_normalizer.normalize(obs, update=False)
+            next_obs = obs_normalizer.normalize(next_obs, update=False)
+            states = obs.reshape(obs.shape[0], -1)
+            next_states = next_obs.reshape(next_obs.shape[0], -1)
+        else:
+            states = self._states[indices]
+            next_states = self._next_states[indices]
 
         return MARLBatch(
-            obs=torch.as_tensor(self._obs[indices], device=self.device, dtype=torch.float32),
+            obs=torch.as_tensor(obs, device=self.device, dtype=torch.float32),
             actions=torch.as_tensor(self._actions[indices], device=self.device, dtype=torch.long),
             rewards=torch.as_tensor(self._rewards[indices], device=self.device, dtype=torch.float32),
-            next_obs=torch.as_tensor(self._next_obs[indices], device=self.device, dtype=torch.float32),
+            next_obs=torch.as_tensor(next_obs, device=self.device, dtype=torch.float32),
             dones=torch.as_tensor(self._dones[indices], device=self.device, dtype=torch.float32),
-            states=torch.as_tensor(self._states[indices], device=self.device, dtype=torch.float32),
-            next_states=torch.as_tensor(self._next_states[indices], device=self.device, dtype=torch.float32),
+            states=torch.as_tensor(states, device=self.device, dtype=torch.float32),
+            next_states=torch.as_tensor(next_states, device=self.device, dtype=torch.float32),
         )

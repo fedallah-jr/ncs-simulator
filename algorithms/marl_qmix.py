@@ -248,9 +248,11 @@ def main() -> None:
         while global_step < args.total_timesteps:
             episode_seed = None if args.seed is None else args.seed + episode
             obs_dict, _info = env.reset(seed=episode_seed)
-            obs = stack_obs(obs_dict, n_agents)
+            obs_raw = stack_obs(obs_dict, n_agents)
             if obs_normalizer is not None:
-                obs = obs_normalizer.normalize(obs, update=True)
+                obs = obs_normalizer.normalize(obs_raw, update=True)
+            else:
+                obs = obs_raw
 
             episode_reward_sum = 0.0
             done = False
@@ -268,9 +270,11 @@ def main() -> None:
                 )
                 action_dict = {f"agent_{i}": int(actions[i]) for i in range(n_agents)}
                 next_obs_dict, rewards_dict, terminated, truncated, _infos = env.step(action_dict)
-                next_obs = stack_obs(next_obs_dict, n_agents)
+                next_obs_raw = stack_obs(next_obs_dict, n_agents)
                 if obs_normalizer is not None:
-                    next_obs = obs_normalizer.normalize(next_obs, update=True)
+                    next_obs = obs_normalizer.normalize(next_obs_raw, update=True)
+                else:
+                    next_obs = next_obs_raw
                 rewards = np.asarray([rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32)
                 # Distinguish termination (true end) from truncation (time limit)
                 # Only terminated should zero out bootstrap; truncated should still bootstrap
@@ -279,19 +283,20 @@ def main() -> None:
                 done = term or trunc  # For episode reset logic
 
                 buffer.add(
-                    obs=obs,
+                    obs=obs_raw,
                     actions=actions.astype(np.int64),
                     rewards=rewards,
-                    next_obs=next_obs,
+                    next_obs=next_obs_raw,
                     done=term,  # Store only terminated for correct bootstrapping
                 )
 
                 episode_reward_sum += float(rewards.sum())
+                obs_raw = next_obs_raw
                 obs = next_obs
                 global_step += 1
 
                 if len(buffer) >= args.start_learning and global_step % args.train_interval == 0:
-                    batch = buffer.sample(args.batch_size)
+                    batch = buffer.sample(args.batch_size, obs_normalizer=obs_normalizer)
                     learner.update(batch)
 
                 # Periodic evaluation
