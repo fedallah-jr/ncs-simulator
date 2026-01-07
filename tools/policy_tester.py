@@ -8,12 +8,13 @@ using raw absolute reward (no normalization).
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -46,6 +47,11 @@ EVAL_REWARD_OVERRIDE: Dict[str, Any] = {
     "state_error_reward": "absolute",
     "normalize": False,
 }
+
+# Keep evaluation seeds disjoint from training-time evaluation (0-10).
+TRAINING_EVAL_SEED_COUNT = 11
+DEFAULT_EVAL_SEED_START = 100
+MAX_EVAL_SEEDS = 50
 
 REWARD_COMPARISON_KEYS: Sequence[str] = (
     "state_cost_matrix",
@@ -129,6 +135,28 @@ def _iter_seeds(seed_start: int, num_seeds: int) -> List[int]:
 
 def _is_stochastic_heuristic(policy_name: str) -> bool:
     return policy_name in STOCHASTIC_HEURISTICS
+
+
+def _log(message: str, *, indent: int = 0) -> None:
+    print(f"{' ' * indent}{message}")
+
+
+def _format_seed_range(seeds: Sequence[int]) -> str:
+    if not seeds:
+        return "none"
+    if len(seeds) == 1:
+        return str(seeds[0])
+    return f"{seeds[0]}..{seeds[-1]}"
+
+
+def _write_perfect_comm_config(config: Dict[str, Any], output_path: Path) -> Path:
+    config_copy = copy.deepcopy(config)
+    network_cfg = config_copy.setdefault("network", {})
+    network_cfg["perfect_communication"] = True
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w") as handle:
+        json.dump(config_copy, handle, indent=2, sort_keys=True, ensure_ascii=True)
+    return output_path
 
 
 def _read_marl_torch_n_agents(model_path: Path) -> Optional[int]:
@@ -694,18 +722,26 @@ def _write_reward_stats(
         json.dump(payload, handle, indent=2, sort_keys=True, ensure_ascii=True)
 
 
-def _plot_training_rewards(model_dir: Path, output_path: Path, model_name: str = "Model") -> None:
+def _plot_training_rewards(
+    model_dir: Path,
+    output_path: Path,
+    model_name: str = "Model",
+    *,
+    log_warnings: bool = True,
+) -> bool:
     """Plot training reward curves from a model directory."""
     training_csv = model_dir / "training_rewards.csv"
     if not training_csv.exists():
-        print(f"Warning: Training rewards not found at {training_csv}")
-        return
+        if log_warnings:
+            print(f"Warning: Training rewards not found at {training_csv}")
+        return False
 
     try:
         train_df = pd.read_csv(str(training_csv))
         if len(train_df) == 0:
-            print(f"Warning: Training rewards file is empty at {training_csv}")
-            return
+            if log_warnings:
+                print(f"Warning: Training rewards file is empty at {training_csv}")
+            return False
 
         episode_col = _select_column(train_df, ["episode", "Episode", "generation", "Generation"])
         reward_col = _select_column(train_df, ["reward", "reward_sum", "total_reward", "episode_reward", "mean_reward"])
@@ -729,23 +765,35 @@ def _plot_training_rewards(model_dir: Path, output_path: Path, model_name: str =
         output_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(str(output_path), dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"✓ Saved training rewards plot to {output_path}")
+        if log_warnings:
+            print(f"Saved training rewards plot to {output_path}")
+        return True
     except Exception as exc:
-        print(f"Warning: Could not plot training rewards: {exc}")
+        if log_warnings:
+            print(f"Warning: Could not plot training rewards: {exc}")
+        return False
 
 
-def _plot_evaluation_rewards(model_dir: Path, output_path: Path, model_name: str = "Model") -> None:
+def _plot_evaluation_rewards(
+    model_dir: Path,
+    output_path: Path,
+    model_name: str = "Model",
+    *,
+    log_warnings: bool = True,
+) -> bool:
     """Plot evaluation reward curves from a model directory."""
     eval_csv = model_dir / "evaluation_rewards.csv"
     if not eval_csv.exists():
-        print(f"Warning: Evaluation rewards not found at {eval_csv}")
-        return
+        if log_warnings:
+            print(f"Warning: Evaluation rewards not found at {eval_csv}")
+        return False
 
     try:
         eval_df = pd.read_csv(str(eval_csv))
         if len(eval_df) == 0:
-            print(f"Warning: Evaluation rewards file is empty at {eval_csv}")
-            return
+            if log_warnings:
+                print(f"Warning: Evaluation rewards file is empty at {eval_csv}")
+            return False
 
         step_col = _select_column(eval_df, ["step", "Step", "steps", "Steps"])
         mean_reward_col = _select_column(eval_df, ["mean_reward", "reward", "avg_reward"])
@@ -783,9 +831,13 @@ def _plot_evaluation_rewards(model_dir: Path, output_path: Path, model_name: str
         output_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(str(output_path), dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"✓ Saved evaluation rewards plot to {output_path}")
+        if log_warnings:
+            print(f"Saved evaluation rewards plot to {output_path}")
+        return True
     except Exception as exc:
-        print(f"Warning: Could not plot evaluation rewards: {exc}")
+        if log_warnings:
+            print(f"Warning: Could not plot evaluation rewards: {exc}")
+        return False
 
 
 def main() -> int:
@@ -806,14 +858,27 @@ def main() -> int:
         default=None,
         help="Optional override for agent count (default: read from checkpoint or config)",
     )
-    parser.add_argument("--num-seeds", type=int, default=30, help="Number of seeds to evaluate")
-    parser.add_argument("--seed-start", type=int, default=0, help="First seed value")
+    parser.add_argument("--num-seeds", type=int, default=50, help="Number of seeds to evaluate (max 50)")
+    parser.add_argument(
+        "--seed-start",
+        type=int,
+        default=DEFAULT_EVAL_SEED_START,
+        help="First seed value (default avoids training evaluation seeds 0-10)",
+    )
     parser.add_argument(
         "--output-dir",
         default="outputs/policy_tests",
         help="Directory to write results",
     )
     args = parser.parse_args()
+
+    if args.num_seeds < 1 or args.num_seeds > MAX_EVAL_SEEDS:
+        raise ValueError(f"--num-seeds must be within [1, {MAX_EVAL_SEEDS}]")
+    if args.seed_start < TRAINING_EVAL_SEED_COUNT:
+        raise ValueError(
+            "Seed range overlaps training evaluation seeds (0-10). "
+            f"Use --seed-start >= {TRAINING_EVAL_SEED_COUNT}."
+        )
 
     if args.models_root:
         if args.policy or args.policy_type or args.config:
@@ -863,14 +928,19 @@ def main() -> int:
         if resolved_n_agents < 1:
             raise ValueError("Resolved n_agents must be >= 1.")
 
-        print(f"Evaluating {len(policy_specs)} policies over {len(seeds)} seeds...")
-        print("Raw absolute reward enabled; comm/termination settings from config.")
+        _log("Policy tester (single policy)")
+        _log(f"Config: {config_path}")
+        _log(f"Seeds: {_format_seed_range(seeds)} ({len(seeds)})")
+        _log("Evaluation: raw absolute reward; comm/termination from config.")
+        _log("Policies:")
+        for spec in policy_specs:
+            _log(f"- {spec.label} ({spec.policy_type})", indent=2)
 
         per_seed_rows: List[Dict[str, Any]] = []
         summary_rows: List[Dict[str, Any]] = []
 
-        for spec in policy_specs:
-            print(f"  -> {spec.label} ({spec.policy_type})")
+        for idx, spec in enumerate(policy_specs, start=1):
+            _log(f"[{idx}/{len(policy_specs)}] {spec.label} ({spec.policy_type})")
             results = _evaluate_policy(
                 spec,
                 config_path=config_path,
@@ -942,8 +1012,9 @@ def main() -> int:
             summary_rows,
         )
 
-        print(f"✓ Wrote per-seed results to {run_dir / 'per_seed_results.csv'}")
-        print(f"✓ Wrote summary results to {run_dir / 'summary_results.csv'}")
+        _log("Outputs:")
+        _log(str(run_dir / "per_seed_results.csv"), indent=2)
+        _log(str(run_dir / "summary_results.csv"), indent=2)
 
         # Plot training curves and save stats if the policy is from a trained model
         if policy_type != "heuristic":
@@ -952,16 +1023,27 @@ def main() -> int:
             training_stats = _compute_training_stats(model_dir)
             evaluation_stats = _compute_evaluation_stats(model_dir)
             _write_reward_stats(run_dir, training_stats, evaluation_stats)
-            _plot_training_rewards(
+            training_plot = _plot_training_rewards(
                 model_dir,
                 model_dir / "training_rewards.png",
                 model_name=target_label,
+                log_warnings=False,
             )
-            _plot_evaluation_rewards(
+            evaluation_plot = _plot_evaluation_rewards(
                 model_dir,
                 model_dir / "evaluation_rewards.png",
                 model_name=target_label,
+                log_warnings=False,
             )
+            plotted_paths = []
+            if training_plot:
+                plotted_paths.append(str(model_dir / "training_rewards.png"))
+            if evaluation_plot:
+                plotted_paths.append(str(model_dir / "evaluation_rewards.png"))
+            if plotted_paths:
+                _log("Plots:")
+                for path in plotted_paths:
+                    _log(path, indent=2)
 
         return 0
 
@@ -993,21 +1075,24 @@ def main() -> int:
     if not isinstance(termination_override, dict):
         termination_override = None
 
-    model_specs: List[Tuple[str, str, PolicySpec]] = []
+    model_specs_by_run: Dict[str, List[Tuple[str, PolicySpec]]] = {}
     run_lookup = {run.name: run for run in runs}
     policy_types: List[str] = []
     for run in runs:
+        specs: List[Tuple[str, PolicySpec]] = []
         for checkpoint_name, model_path in (("best", run.best_model), ("latest", run.latest_model)):
             if model_path is None:
                 continue
             policy_type = _infer_policy_type(model_path)
             policy_types.append(policy_type)
             label = f"{run.name}/{checkpoint_name}"
-            model_specs.append(
-                (run.name, checkpoint_name, PolicySpec(label=label, policy_type=policy_type, policy_path=str(model_path)))
+            specs.append(
+                (checkpoint_name, PolicySpec(label=label, policy_type=policy_type, policy_path=str(model_path)))
             )
+        if specs:
+            model_specs_by_run[run.name] = specs
 
-    if not model_specs:
+    if not model_specs_by_run:
         raise ValueError("No model checkpoints found under the specified root.")
 
     unique_policy_types = sorted(set(policy_types))
@@ -1017,7 +1102,7 @@ def main() -> int:
 
     resolved_n_agents = _resolve_n_agents(
         reference_config,
-        [spec for _, _, spec in model_specs],
+        [spec for specs in model_specs_by_run.values() for _, spec in specs],
         args.n_agents,
     )
     if resolved_n_agents < 1:
@@ -1025,48 +1110,65 @@ def main() -> int:
 
     seeds = _iter_seeds(args.seed_start, args.num_seeds)
     leaderboard_rows: List[Dict[str, Any]] = []
-    plotted_models: Set[str] = set()
 
-    print(f"Evaluating {len(model_specs)} model checkpoints over {len(seeds)} seeds...")
-    print("Raw absolute reward enabled; comm/termination settings from config.")
+    total_models = len(model_specs_by_run)
+    total_checkpoints = sum(len(specs) for specs in model_specs_by_run.values())
+    _log("Policy tester (batch)")
+    _log(f"Models: {total_models}")
+    _log(f"Checkpoints: {total_checkpoints}")
+    _log(f"Seeds: {_format_seed_range(seeds)} ({len(seeds)})")
+    _log("Evaluation: raw absolute reward; comm/termination from config.")
 
-    for model_name, checkpoint, spec in model_specs:
-        print(f"  -> {spec.label} ({spec.policy_type})")
+    for model_idx, (model_name, specs) in enumerate(model_specs_by_run.items(), start=1):
+        _log(f"[{model_idx}/{total_models}] {model_name}")
         run = run_lookup[model_name]
-        results = _evaluate_policy(
-            spec,
-            config_path=run.config_path,
-            episode_length=int(args.episode_length),
-            n_agents=resolved_n_agents,
-            seeds=seeds,
-            use_multi_agent=use_multi_agent,
-            termination_override=termination_override,
-        )
-        run_dir = models_root / model_name / "policy_tests" / f"{checkpoint}_eval"
-        summary_row = _write_policy_results(run_dir, spec, results)
-        summary_row["model_name"] = model_name
-        summary_row["checkpoint"] = checkpoint
-        leaderboard_rows.append(summary_row)
-
         training_stats = _compute_training_stats(run.path)
         evaluation_stats = _compute_evaluation_stats(run.path)
-        _write_reward_stats(run_dir, training_stats, evaluation_stats)
+        for checkpoint_name, spec in specs:
+            _log(f"  checkpoint: {checkpoint_name} ({spec.policy_type})")
+            results = _evaluate_policy(
+                spec,
+                config_path=run.config_path,
+                episode_length=int(args.episode_length),
+                n_agents=resolved_n_agents,
+                seeds=seeds,
+                use_multi_agent=use_multi_agent,
+                termination_override=termination_override,
+            )
+            run_dir = models_root / model_name / "policy_tests" / f"{checkpoint_name}_eval"
+            summary_row = _write_policy_results(run_dir, spec, results)
+            summary_row["model_name"] = model_name
+            summary_row["checkpoint"] = checkpoint_name
+            leaderboard_rows.append(summary_row)
+            _write_reward_stats(run_dir, training_stats, evaluation_stats)
+            _log(f"    results: {run_dir / 'summary_results.csv'}")
 
-        if model_name not in plotted_models:
-            _plot_training_rewards(
-                run.path,
-                run.path / "training_rewards.png",
-                model_name=model_name,
-            )
-            _plot_evaluation_rewards(
-                run.path,
-                run.path / "evaluation_rewards.png",
-                model_name=model_name,
-            )
-            plotted_models.add(model_name)
+        training_plot = _plot_training_rewards(
+            run.path,
+            run.path / "training_rewards.png",
+            model_name=model_name,
+            log_warnings=False,
+        )
+        evaluation_plot = _plot_evaluation_rewards(
+            run.path,
+            run.path / "evaluation_rewards.png",
+            model_name=model_name,
+            log_warnings=False,
+        )
+        plotted_paths = []
+        if training_plot:
+            plotted_paths.append(str(run.path / "training_rewards.png"))
+        if evaluation_plot:
+            plotted_paths.append(str(run.path / "evaluation_rewards.png"))
+        if plotted_paths:
+            _log("  plots:")
+            for path in plotted_paths:
+                _log(path, indent=4)
 
     heuristic_config_path = runs[0].config_path
+    _log("Heuristics:")
     for heuristic_name in HEURISTIC_POLICY_NAMES:
+        _log(f"- {heuristic_name}", indent=2)
         spec = PolicySpec(label=heuristic_name, policy_type="heuristic", policy_path=heuristic_name)
         results = _evaluate_policy(
             spec,
@@ -1082,6 +1184,34 @@ def main() -> int:
         summary_row["model_name"] = "heuristics"
         summary_row["checkpoint"] = "n/a"
         leaderboard_rows.append(summary_row)
+        _log(f"results: {run_dir / 'summary_results.csv'}", indent=4)
+
+    perfect_comm_root = models_root / "perfect_comm"
+    perfect_comm_config_path = _write_perfect_comm_config(
+        reference_config, perfect_comm_root / "perfect_comm_config.json"
+    )
+    _log("Perfect communication baseline:")
+    _log(f"config: {perfect_comm_config_path}", indent=2)
+    perfect_comm_spec = PolicySpec(
+        label="perfect_comm/always_send",
+        policy_type="heuristic",
+        policy_path="always_send",
+    )
+    perfect_comm_results = _evaluate_policy(
+        perfect_comm_spec,
+        config_path=perfect_comm_config_path,
+        episode_length=int(args.episode_length),
+        n_agents=resolved_n_agents,
+        seeds=seeds,
+        use_multi_agent=use_multi_agent,
+        termination_override=termination_override,
+    )
+    perfect_comm_dir = perfect_comm_root / "policy_tests" / "always_send_eval"
+    perfect_comm_summary = _write_policy_results(perfect_comm_dir, perfect_comm_spec, perfect_comm_results)
+    perfect_comm_summary["model_name"] = "perfect_comm"
+    perfect_comm_summary["checkpoint"] = "always_send"
+    leaderboard_rows.append(perfect_comm_summary)
+    _log(f"results: {perfect_comm_dir / 'summary_results.csv'}", indent=2)
 
     leaderboard_rows.sort(key=lambda row: float(row["mean_total_reward"]), reverse=True)
     ranked_rows: List[Dict[str, Any]] = []
@@ -1092,7 +1222,7 @@ def main() -> int:
 
     leaderboard_path = models_root / "leaderboard.csv"
     _write_leaderboard(leaderboard_path, ranked_rows)
-    print(f"✓ Wrote leaderboard to {leaderboard_path}")
+    _log(f"Leaderboard: {leaderboard_path}")
     return 0
 
 
