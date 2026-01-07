@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiment batch 3: IQL independent variants (baseline/doubleq/dueling/dueling+doubleq)
-# iql_independent, iql_doubleq_independent, iql_dueling_independent, iql_dueling_doubleq_independent
+# MARL experiment batch 7: VDN independent variants
+# vdn_independent, vdn_doubleq_independent, vdn_dueling_independent, vdn_dueling_doubleq_independent
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -14,7 +14,7 @@ TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-1000000}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-800000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/exp_3_iql_independent_variants_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/exp_7_vdn_independent_variants_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -88,13 +88,13 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
-run_one "algorithms.marl_iql" "iql" "iql_independent" \
+run_one "algorithms.marl_vdn" "vdn" "vdn_independent" \
   --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
-run_one "algorithms.marl_iql" "iql" "iql_doubleq_independent" \
+run_one "algorithms.marl_vdn" "vdn" "vdn_doubleq_independent" \
   --double-q --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
-run_one "algorithms.marl_iql" "iql" "iql_dueling_independent" \
+run_one "algorithms.marl_vdn" "vdn" "vdn_dueling_independent" \
   --dueling --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
-run_one "algorithms.marl_iql" "iql" "iql_dueling_doubleq_independent" \
+run_one "algorithms.marl_vdn" "vdn" "vdn_dueling_doubleq_independent" \
   --dueling --double-q --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
 
 zip_path="${run_root}.zip"

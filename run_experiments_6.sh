@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiment batch 3: IQL independent variants (baseline/doubleq/dueling/dueling+doubleq)
-# iql_independent, iql_doubleq_independent, iql_dueling_independent, iql_dueling_doubleq_independent
+# MARL experiment batch 6: IQL team_reward shared variants (no baseline) + QMIX shared variants
+# iql_team_reward_doubleq_shared, iql_team_reward_dueling_shared,
+# iql_team_reward_dueling_doubleq_shared,
+# qmix_shared, qmix_doubleq_shared, qmix_dueling_shared, qmix_dueling_doubleq_shared
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -14,7 +16,7 @@ TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-1000000}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-800000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/exp_3_iql_independent_variants_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/exp_6_iql_team_reward_variants_qmix_shared_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -88,14 +90,21 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
-run_one "algorithms.marl_iql" "iql" "iql_independent" \
-  --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
-run_one "algorithms.marl_iql" "iql" "iql_doubleq_independent" \
-  --double-q --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
-run_one "algorithms.marl_iql" "iql" "iql_dueling_independent" \
-  --dueling --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
-run_one "algorithms.marl_iql" "iql" "iql_dueling_doubleq_independent" \
-  --dueling --double-q --independent-agents --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_iql" "iql" "iql_team_reward_doubleq_shared" \
+  --team-reward --double-q --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_iql" "iql" "iql_team_reward_dueling_shared" \
+  --team-reward --dueling --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_iql" "iql" "iql_team_reward_dueling_doubleq_shared" \
+  --team-reward --dueling --double-q --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+
+run_one "algorithms.marl_qmix" "qmix" "qmix_shared" \
+  --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_qmix" "qmix" "qmix_doubleq_shared" \
+  --double-q --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_qmix" "qmix" "qmix_dueling_shared" \
+  --dueling --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_qmix" "qmix" "qmix_dueling_doubleq_shared" \
+  --dueling --double-q --epsilon-decay-steps "${EPS_DECAY_STEPS}"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then

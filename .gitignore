@@ -11,6 +11,7 @@ __pycache__/
 
 # Generated artifacts and visuals
 outputs/
+outputs_legacy/
 vis/
 *.mp4
 *.png

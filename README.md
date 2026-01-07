@@ -106,11 +106,16 @@ Configuration presets live under `configs/`. `configs/perfect_comm.json` mirrors
 
 ## Experiment Scripts
 
-The MARL experiment batches live in three shell scripts and all use `configs/marl_absolute_plants.json`:
+The MARL experiment batches live in eight shell scripts and all use `configs/marl_absolute_plants.json`:
 
-- `run_experiments_1.sh`: `vdn_dueling_doubleq_shared`, `qmix_doubleq_shared`, `mappo_shared`
-- `run_experiments_2.sh`: `qmix_dueling_doubleq_shared`, `vdn_doubleq_shared`, `iql_doubleq_shared`
-- `run_experiments_3.sh`: `iql_dueling_doubleq_shared`, `iql_doubleq_independent`
+- `run_experiments_1.sh`: `qplex_doubleq_independent`
+- `run_experiments_2.sh`: `qplex_doubleq_shared`, `iql_shared`, `iql_team_reward_shared`
+- `run_experiments_3.sh`: `iql_independent`, `iql_doubleq_independent`, `iql_dueling_independent`, `iql_dueling_doubleq_independent`
+- `run_experiments_4.sh`: `iql_team_reward_independent`, `iql_team_reward_doubleq_independent`, `iql_team_reward_dueling_independent`, `iql_team_reward_dueling_doubleq_independent`
+- `run_experiments_5.sh`: `iql_doubleq_shared`, `iql_dueling_shared`, `iql_dueling_doubleq_shared`, `vdn_shared`, `vdn_doubleq_shared`, `vdn_dueling_shared`, `vdn_dueling_doubleq_shared`
+- `run_experiments_6.sh`: `iql_team_reward_doubleq_shared`, `iql_team_reward_dueling_shared`, `iql_team_reward_dueling_doubleq_shared`, `qmix_shared`, `qmix_doubleq_shared`, `qmix_dueling_shared`, `qmix_dueling_doubleq_shared`
+- `run_experiments_7.sh`: `vdn_independent`, `vdn_doubleq_independent`, `vdn_dueling_independent`, `vdn_dueling_doubleq_independent`
+- `run_experiments_8.sh`: `qmix_independent`, `qmix_doubleq_independent`, `qmix_dueling_independent`, `qmix_dueling_doubleq_independent`
 
 Each script writes to a timestamped `outputs/exp_*` folder and renames the per-run directories to match the experiment settings (for example, `iql_dueling_doubleq_shared`). You can override common knobs via environment variables: `SEED`, `OUTPUT_ROOT`, `TOTAL_TIMESTEPS`, `EPS_DECAY_STEPS`.
 

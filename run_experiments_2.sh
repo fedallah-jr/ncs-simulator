@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiment batch 2: QPLEX double-q shared parameters
-# qplex_doubleq_shared
+# MARL experiment batch 2: QPLEX double-q shared + light IQL shared variants
+# qplex_doubleq_shared, iql_shared, iql_team_reward_shared
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -14,7 +14,7 @@ TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-1000000}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-800000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/exp_2_qplex_doubleq_shared_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/exp_2_qplex_doubleq_shared_iql_shared_team_reward_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -90,6 +90,10 @@ run_one() {
 
 run_one "algorithms.marl_qplex" "qplex" "qplex_doubleq_shared" \
   --double-q --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_iql" "iql" "iql_shared" \
+  --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+run_one "algorithms.marl_iql" "iql" "iql_team_reward_shared" \
+  --team-reward --epsilon-decay-steps "${EPS_DECAY_STEPS}"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then
