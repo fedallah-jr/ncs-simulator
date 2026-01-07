@@ -77,7 +77,8 @@ Learning-based baselines live under `algorithms/`:
 - IQL (multi-agent, PyTorch): `python -m algorithms.marl_iql --config configs/marl_mixed_plants.json --total-timesteps 200000`
 - VDN (multi-agent, PyTorch): `python -m algorithms.marl_vdn --config configs/marl_mixed_plants.json --total-timesteps 200000`
 - QMIX (multi-agent, PyTorch): `python -m algorithms.marl_qmix --config configs/marl_mixed_plants.json --total-timesteps 200000`
-- QPLEX (multi-agent, PyTorch): `python -m algorithms.marl_qplex --config configs/marl_mixed_plants.json --total-timesteps 200000`
+- QPLEX (multi-agent, PyTorch, Q-attention mixer): `python -m algorithms.marl_qplex --config configs/marl_mixed_plants.json --total-timesteps 200000`
+  - QPLEX weights agent Qs via Q-attention (state + per-agent Q-values); tune with `--n-head`, `--attend-reg-coef`, `--nonlinear`, `--no-state-bias`, `--no-weighted-head`.
 - MAPPO (multi-agent, PyTorch): `python -m algorithms.marl_mappo --config configs/marl_mixed_plants.json --total-timesteps 200000`
 
 All MARL Q-learning algorithms (IQL, VDN, QMIX, QPLEX) support these architectural enhancements:

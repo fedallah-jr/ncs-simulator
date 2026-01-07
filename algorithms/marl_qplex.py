@@ -30,7 +30,7 @@ from utils.run_utils import prepare_run_directory, save_config_with_hyperparamet
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train QPLEX (duplex dueling mixer) on multi-agent NCS env.")
+    parser = argparse.ArgumentParser(description="Train QPLEX (Q-attention duplex mixer) on multi-agent NCS env.")
     parser.add_argument("--config", type=Path, default=None, help="Config JSON path.")
     parser.add_argument("--output-root", type=Path, default=Path("outputs"), help="Output root directory.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
@@ -72,12 +72,17 @@ def parse_args() -> argparse.Namespace:
         help="Use independent per-agent networks (disable parameter sharing).",
     )
 
-    parser.add_argument("--mixing-embed-dim", type=int, default=32, help="QPLEX mixing embed dim.")
-    parser.add_argument("--hypernet-embed", type=int, default=64, help="QPLEX hypernetwork embed dim.")
+    parser.add_argument("--mixing-embed-dim", type=int, default=32, help="QPLEX attention embed dim.")
+    parser.add_argument("--hypernet-embed", type=int, default=64, help="QPLEX attention hypernet embed dim.")
     parser.add_argument("--adv-hypernet-layers", type=int, default=3, help="Advantage hypernet layers (1-3).")
     parser.add_argument("--adv-hypernet-embed", type=int, default=64, help="Advantage hypernet embed dim.")
-    parser.add_argument("--num-kernel", type=int, default=10, help="Number of QPLEX attention heads.")
-    parser.add_argument("--no-weighted-head", action="store_false", dest="weighted_head", help="Disable weighted head.")
+    parser.add_argument("--num-kernel", type=int, default=10, help="Number of QPLEX SI-weight kernels.")
+    parser.add_argument("--n-head", type=int, default=4, help="Number of QPLEX Q-attention heads.")
+    parser.add_argument("--attend-reg-coef", type=float, default=0.001, help="QPLEX attention regularization coef.")
+    parser.add_argument("--nonlinear", action="store_true", help="Include agent Q-values in attention keys.")
+    parser.add_argument("--mask-dead", action="store_true", help="Mask dead agents in attention (action==0).")
+    parser.add_argument("--no-weighted-head", action="store_false", dest="weighted_head", help="Disable weighted heads.")
+    parser.add_argument("--no-state-bias", action="store_false", dest="state_bias", help="Disable state bias term.")
     parser.add_argument("--no-is-minus-one", action="store_false", dest="is_minus_one", help="Disable minus-one trick.")
 
     obs_norm_group = parser.add_mutually_exclusive_group()
@@ -110,7 +115,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--eval-freq", type=int, default=2500, help="Evaluation frequency in env steps.")
     parser.add_argument("--n-eval-episodes", type=int, default=5, help="Number of evaluation episodes.")
-    parser.set_defaults(normalize_obs=True, weighted_head=True, is_minus_one=True)
+    parser.set_defaults(normalize_obs=True, weighted_head=True, state_bias=True, is_minus_one=True)
     return parser.parse_args()
 
 
@@ -192,11 +197,17 @@ def main() -> None:
         n_agents=n_agents,
         n_actions=n_actions,
         state_dim=state_dim,
+        unit_dim=obs_dim,
         mixing_embed_dim=args.mixing_embed_dim,
         hypernet_embed=args.hypernet_embed,
         num_kernel=args.num_kernel,
         adv_hypernet_layers=args.adv_hypernet_layers,
         adv_hypernet_embed=args.adv_hypernet_embed,
+        n_head=args.n_head,
+        attend_reg_coef=args.attend_reg_coef,
+        state_bias=args.state_bias,
+        nonlinear=args.nonlinear,
+        mask_dead=args.mask_dead,
         weighted_head=args.weighted_head,
         is_minus_one=args.is_minus_one,
     )
@@ -247,6 +258,12 @@ def main() -> None:
             "adv_hypernet_layers": args.adv_hypernet_layers,
             "adv_hypernet_embed": args.adv_hypernet_embed,
             "num_kernel": args.num_kernel,
+            "unit_dim": obs_dim,
+            "n_head": args.n_head,
+            "attend_reg_coef": args.attend_reg_coef,
+            "state_bias": args.state_bias,
+            "nonlinear": args.nonlinear,
+            "mask_dead": args.mask_dead,
             "weighted_head": args.weighted_head,
             "is_minus_one": args.is_minus_one,
             "mixer_state_dict": learner.mixer.state_dict(),
