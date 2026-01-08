@@ -54,6 +54,7 @@ class MAPPORolloutBuffer:
         self.log_probs = np.zeros((self.n_steps, self.n_agents), dtype=np.float32)
         self.rewards = np.zeros((self.n_steps, self.value_dim), dtype=np.float32)
         self.terminated = np.zeros((self.n_steps,), dtype=np.float32)
+        self.episode_end = np.zeros((self.n_steps,), dtype=np.float32)
         self.values = np.zeros((self.n_steps, self.value_dim), dtype=np.float32)
 
     def add(
@@ -65,6 +66,7 @@ class MAPPORolloutBuffer:
         log_probs: np.ndarray,
         rewards: np.ndarray,
         terminated: bool,
+        episode_end: bool,
         values: np.ndarray,
     ) -> None:
         if self.step >= self.n_steps:
@@ -77,6 +79,7 @@ class MAPPORolloutBuffer:
         self.log_probs[idx] = log_probs
         self.rewards[idx] = rewards
         self.terminated[idx] = float(terminated)
+        self.episode_end[idx] = float(episode_end)
         self.values[idx] = values
         self.step += 1
 
@@ -92,6 +95,7 @@ class MAPPORolloutBuffer:
             self.log_probs[:idx],
             self.rewards[:idx],
             self.terminated[:idx],
+            self.episode_end[:idx],
             self.values[:idx],
         )
 
@@ -167,15 +171,17 @@ def _compute_gae(
     values: np.ndarray,
     next_values: np.ndarray,
     terminated: np.ndarray,
+    episode_end: np.ndarray,
     gamma: float,
     gae_lambda: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
     advantages = np.zeros_like(rewards, dtype=np.float32)
     last_adv = np.zeros((rewards.shape[1],), dtype=np.float32)
     for t in range(rewards.shape[0] - 1, -1, -1):
-        mask = 1.0 - float(terminated[t])
-        delta = rewards[t] + gamma * next_values[t] * mask - values[t]
-        last_adv = delta + gamma * gae_lambda * mask * last_adv
+        bootstrap_mask = 1.0 - float(terminated[t])
+        delta = rewards[t] + gamma * next_values[t] * bootstrap_mask - values[t]
+        cont = 1.0 - float(episode_end[t])
+        last_adv = delta + gamma * gae_lambda * cont * last_adv
         advantages[t] = last_adv
     returns = advantages + values
     return advantages, returns
@@ -268,7 +274,7 @@ def main() -> None:
 
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=float(args.learning_rate))
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=float(args.learning_rate))
-    value_normalizer = ValueNorm((), device=device, beta=float(args.value_norm_beta))
+    value_normalizer = ValueNorm((value_dim,), device=device, beta=float(args.value_norm_beta))
 
     best_eval_reward = -float("inf")
     global_step = 0
@@ -366,6 +372,7 @@ def main() -> None:
                     log_probs=log_probs,
                     rewards=rewards,
                     terminated=terminated_any,
+                    episode_end=done,
                     values=values,
                 )
 
@@ -428,6 +435,7 @@ def main() -> None:
                 log_probs_batch,
                 rewards_batch,
                 terminated_batch,
+                episode_end_batch,
                 values_batch,
             ) = buffer.get()
 
@@ -445,6 +453,7 @@ def main() -> None:
                 values=values_raw,
                 next_values=next_values_raw,
                 terminated=terminated_batch,
+                episode_end=episode_end_batch,
                 gamma=float(args.gamma),
                 gae_lambda=float(args.gae_lambda),
             )
