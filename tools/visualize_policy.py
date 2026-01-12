@@ -1461,7 +1461,16 @@ def main():
     # Load configuration
     print(f"Loading configuration from: {args.config}")
     config = load_config(args.config)
-    print(f"✓ Configuration loaded\n")
+    reward_override = config.get("reward", {}).get("evaluation")
+    if not isinstance(reward_override, dict):
+        reward_override = None
+    termination_override = config.get("termination", {}).get("evaluation")
+    if not isinstance(termination_override, dict):
+        termination_override = None
+    print(f"✓ Configuration loaded")
+    if reward_override is not None or termination_override is not None:
+        print("✓ Using evaluation reward/termination overrides")
+    print()
 
     resolved_n_agents = _resolve_run_n_agents(
         list(policies_to_load),
@@ -1497,7 +1506,9 @@ def main():
             n_agents=resolved_n_agents,
             episode_length=args.episode_length,
             config_path=args.config,
-            seed=args.seed
+            seed=args.seed,
+            reward_override=reward_override,
+            termination_override=termination_override,
         )
 
     print(f"Creating environment...")
