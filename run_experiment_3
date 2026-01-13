@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiment batch 1: IQL shared variants
-# iql_shared, iql_dueling_doubleq_shared, iql_doubleq_shared
+# MARL experiment batch 3: VDN shared variants
+# vdn_shared, vdn_doubleq_shared
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -14,7 +14,7 @@ TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-1000000}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-800000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/exp_1_iql_shared_variants_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/exp_3_vdn_shared_variants_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -88,11 +88,9 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
-run_one "algorithms.marl_iql" "iql" "iql_shared" \
+run_one "algorithms.marl_vdn" "vdn" "vdn_shared" \
   --epsilon-decay-steps "${EPS_DECAY_STEPS}"
-run_one "algorithms.marl_iql" "iql" "iql_dueling_doubleq_shared" \
-  --dueling --double-q --epsilon-decay-steps "${EPS_DECAY_STEPS}"
-run_one "algorithms.marl_iql" "iql" "iql_doubleq_shared" \
+run_one "algorithms.marl_vdn" "vdn" "vdn_doubleq_shared" \
   --double-q --epsilon-decay-steps "${EPS_DECAY_STEPS}"
 
 zip_path="${run_root}.zip"
