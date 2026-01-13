@@ -51,7 +51,6 @@ EVAL_REWARD_OVERRIDE: Dict[str, Any] = {
 # Keep evaluation seeds disjoint from training-time evaluation (0-10).
 TRAINING_EVAL_SEED_COUNT = 11
 DEFAULT_EVAL_SEED_START = 100
-MAX_EVAL_SEEDS = 50
 
 REWARD_COMPARISON_KEYS: Sequence[str] = (
     "state_cost_matrix",
@@ -858,7 +857,7 @@ def main() -> int:
         default=None,
         help="Optional override for agent count (default: read from checkpoint or config)",
     )
-    parser.add_argument("--num-seeds", type=int, default=50, help="Number of seeds to evaluate (max 50)")
+    parser.add_argument("--num-seeds", type=int, default=50, help="Number of seeds to evaluate")
     parser.add_argument(
         "--seed-start",
         type=int,
@@ -872,8 +871,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.num_seeds < 1 or args.num_seeds > MAX_EVAL_SEEDS:
-        raise ValueError(f"--num-seeds must be within [1, {MAX_EVAL_SEEDS}]")
+    if args.num_seeds < 1:
+        raise ValueError("--num-seeds must be >= 1")
     if args.seed_start < TRAINING_EVAL_SEED_COUNT:
         raise ValueError(
             "Seed range overlaps training evaluation seeds (0-10). "
@@ -906,7 +905,6 @@ def main() -> int:
         termination_override = config.get("termination", {}).get("evaluation")
         if not isinstance(termination_override, dict):
             termination_override = None
-
         seeds = _iter_seeds(args.seed_start, args.num_seeds)
         output_root = Path(args.output_dir)
         output_root.mkdir(parents=True, exist_ok=True)
@@ -1074,7 +1072,6 @@ def main() -> int:
     termination_override = reference_config.get("termination", {}).get("evaluation")
     if not isinstance(termination_override, dict):
         termination_override = None
-
     model_specs_by_run: Dict[str, List[Tuple[str, PolicySpec]]] = {}
     run_lookup = {run.name: run for run in runs}
     policy_types: List[str] = []
