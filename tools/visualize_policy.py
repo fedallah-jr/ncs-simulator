@@ -42,6 +42,9 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 from matplotlib.animation import FuncAnimation, FFMpegWriter
+from matplotlib.colors import ListedColormap
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 import json
 from datetime import datetime
 
@@ -56,9 +59,17 @@ from tools.heuristic_policies import get_heuristic_policy, HEURISTIC_POLICIES
 
 
 class MultiAgentHeuristicPolicy:
-    def __init__(self, policy_name: str, n_agents: int, seed: Optional[int]) -> None:
+    def __init__(
+        self,
+        policy_name: str,
+        n_agents: int,
+        seed: Optional[int],
+        *,
+        deterministic: bool = False,
+    ) -> None:
         self.policy_name = policy_name
         self.n_agents = int(n_agents)
+        self.deterministic = bool(deterministic)
         self._policies = []
         for idx in range(self.n_agents):
             agent_seed = None if seed is None else int(seed) + idx
@@ -73,7 +84,7 @@ class MultiAgentHeuristicPolicy:
         actions: Dict[str, int] = {}
         for idx in range(self.n_agents):
             obs = obs_dict[f"agent_{idx}"]
-            action, _ = self._policies[idx].predict(obs, deterministic=True)
+            action, _ = self._policies[idx].predict(obs, deterministic=self.deterministic)
             actions[f"agent_{idx}"] = int(action)
         return actions
 
@@ -377,11 +388,18 @@ def load_multi_agent_policy(
     env: NCS_Env,
     n_agents: int,
     seed: Optional[int],
+    *,
+    deterministic: bool = False,
 ):
     if policy_type == "marl_torch":
         return load_marl_torch_multi_agent_policy(policy_path, env)
     if policy_type == "heuristic":
-        return MultiAgentHeuristicPolicy(policy_path, n_agents=n_agents, seed=seed)
+        return MultiAgentHeuristicPolicy(
+            policy_path,
+            n_agents=n_agents,
+            seed=seed,
+            deterministic=deterministic,
+        )
     raise ValueError("Multi-agent visualization supports only 'marl_torch' and 'heuristic' policies.")
 
 
@@ -415,7 +433,16 @@ def load_policy(
         raise ValueError(f"Unknown policy type: {policy_type}. Use 'sb3', 'es', or 'heuristic'")
 
 
-def run_episode(env: Any, policy: Any, episode_length: int, deterministic: bool = True) -> Dict[str, np.ndarray]:
+def run_episode(
+    env: Any,
+    policy: Any,
+    episode_length: int,
+    deterministic: bool = True,
+    *,
+    network_trace: bool = False,
+    trace_interval: int = 50,
+    trace_start: int = 1,
+) -> Dict[str, Any]:
     """
     Run a single episode and collect trajectory data.
 
@@ -446,6 +473,14 @@ def run_episode(env: Any, policy: Any, episode_length: int, deterministic: bool 
 
     # Get state dimension from environment
     state_dim = ncs_env.state_dim
+    network_tick_traces: List[Dict[str, Any]] = []
+
+    _configure_network_trace_env(
+        ncs_env,
+        enabled=network_trace,
+        trace_interval=trace_interval,
+        trace_start=trace_start,
+    )
 
     # Initialize data storage
     states = np.zeros((episode_length + 1, state_dim))
@@ -481,6 +516,10 @@ def run_episode(env: Any, policy: Any, episode_length: int, deterministic: bool 
         else:
             controls[t] = 0.0
         state_errors[t + 1] = np.linalg.norm(states[t + 1])
+        if network_trace:
+            tick_trace = info.get("network_tick_trace")
+            if isinstance(tick_trace, dict):
+                network_tick_traces.append(tick_trace)
 
         # Break if episode ended early (shouldn't happen normally)
         if terminated or truncated:
@@ -505,6 +544,7 @@ def run_episode(env: Any, policy: Any, episode_length: int, deterministic: bool 
         'controls': controls,
         'state_errors': state_errors,
         'timesteps': np.arange(len(states)),
+        'network_tick_traces': network_tick_traces,
     }
 
 
@@ -525,13 +565,24 @@ def run_episode_multi_agent(
     episode_length: int,
     *,
     seed: Optional[int] = None,
-) -> Dict[str, np.ndarray]:
+    network_trace: bool = False,
+    trace_interval: int = 50,
+    trace_start: int = 1,
+) -> Dict[str, Any]:
     if hasattr(policy, "reset"):
         policy.reset()
 
     obs_dict, info = env.reset(seed=seed)
     n_agents = int(env.n_agents)
     state_dim = int(env.state_dim)
+    network_tick_traces: List[Dict[str, Any]] = []
+
+    _configure_network_trace_env(
+        env,
+        enabled=network_trace,
+        trace_interval=trace_interval,
+        trace_start=trace_start,
+    )
 
     states = np.zeros((episode_length + 1, n_agents, state_dim), dtype=np.float32)
     estimates = np.zeros((episode_length + 1, n_agents, state_dim), dtype=np.float32)
@@ -569,6 +620,10 @@ def run_episode_multi_agent(
         collided_packets[t + 1] = float(info.get("collided_packets", 0.0))
         if "network_stats" in info:
             network_stats = {k: [int(x) for x in v] for k, v in info["network_stats"].items()}
+        if network_trace:
+            tick_trace = info.get("network_tick_trace")
+            if isinstance(tick_trace, dict):
+                network_tick_traces.append(tick_trace)
 
         done = any(bool(terminated[f"agent_{i}"]) or bool(truncated[f"agent_{i}"]) for i in range(n_agents))
         if done:
@@ -592,7 +647,153 @@ def run_episode_multi_agent(
         "collided_packets": collided_packets,
         "network_stats": network_stats,
         "timesteps": np.arange(states.shape[0]),
+        "network_tick_traces": network_tick_traces,
     }
+
+
+def _configure_network_trace_env(
+    env: NCS_Env,
+    *,
+    enabled: bool,
+    trace_interval: int,
+    trace_start: int,
+) -> None:
+    env.network_trace_enabled = bool(enabled)
+    env.network_trace_interval = int(trace_interval)
+    env.network_trace_start = int(trace_start)
+    env.network.trace_enabled = bool(enabled)
+
+
+def _write_network_trace_jsonl(traces: List[Dict[str, Any]], path: Path) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        for trace in traces:
+            f.write(json.dumps(trace))
+            f.write("\n")
+
+
+def plot_network_tick_timeline(trace: Dict[str, Any], save_path: Path, title: str) -> None:
+    slots = trace.get("slots", [])
+    if not slots:
+        return
+    entity_labels = [str(label) for label in trace.get("entity_labels", [])]
+    n_entities = len(entity_labels)
+    n_slots = len(slots)
+    state_map = {
+        "IDLE": 0,
+        "BACKING_OFF": 1,
+        "CCA": 2,
+        "TRANSMITTING": 3,
+        "WAITING_ACK": 4,
+    }
+    state_colors = ["#f0f0f0", "#ffd166", "#f4a261", "#2a9d8f", "#457b9d"]
+    data = np.zeros((n_entities, n_slots), dtype=np.int64)
+    for slot_idx, slot in enumerate(slots):
+        states = slot.get("entity_states", [])
+        for ent_idx in range(min(n_entities, len(states))):
+            state_name = str(states[ent_idx])
+            data[ent_idx, slot_idx] = state_map.get(state_name, 0)
+
+    fig, ax = plt.subplots(1, 1, figsize=(max(8, n_slots * 0.35), max(4, n_entities * 0.35)))
+    cmap = ListedColormap(state_colors[: len(state_map)])
+    ax.imshow(data, aspect="auto", interpolation="nearest", cmap=cmap, vmin=0, vmax=len(state_map) - 1)
+    ax.set_xlabel("Micro-slot", fontsize=11)
+    ax.set_ylabel("Entity", fontsize=11)
+    ax.set_xticks(np.arange(n_slots))
+    ax.set_yticks(np.arange(n_entities))
+    ax.set_yticklabels(entity_labels, fontsize=9)
+    ax.set_title(title, fontsize=12, fontweight="bold")
+    ax.set_xticks(np.arange(-0.5, n_slots, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, n_entities, 1), minor=True)
+    ax.grid(which="minor", color="#e0e0e0", linestyle="-", linewidth=0.6)
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+    event_types_present: set[str] = set()
+    for slot_idx, slot in enumerate(slots):
+        events = slot.get("events", [])
+        for event in events:
+            event_type = event.get("type")
+            if event_type == "collision":
+                entities = event.get("entities", [])
+                for ent_idx in entities:
+                    ax.scatter(slot_idx, ent_idx, marker="x", color="#e63946", s=50, zorder=3)
+                event_types_present.add("collision")
+                continue
+            entity_idx = event.get("entity_idx")
+            if entity_idx is None:
+                continue
+            if event_type == "backoff_draw":
+                units = int(event.get("backoff_units", event.get("backoff_slots", 0)))
+                ax.scatter(slot_idx, entity_idx, marker="v", color="#111111", s=35, zorder=3)
+                ax.text(
+                    slot_idx + 0.15,
+                    entity_idx + 0.15,
+                    f"{units}",
+                    fontsize=7,
+                    color="#111111",
+                    zorder=4,
+                )
+                event_types_present.add("backoff_draw")
+            elif event_type == "retry":
+                ax.scatter(slot_idx, entity_idx, marker="o", color="#f4a261", s=45, zorder=3)
+                event_types_present.add("retry")
+            elif event_type == "drop":
+                ax.scatter(slot_idx, entity_idx, marker="X", color="#e63946", s=55, zorder=3)
+                event_types_present.add("drop")
+            elif event_type == "ack_timeout":
+                ax.scatter(slot_idx, entity_idx, marker="D", color="#264653", s=40, zorder=3)
+                event_types_present.add("ack_timeout")
+            elif event_type == "tx_start" and bool(event.get("is_mac_ack", False)):
+                ax.scatter(slot_idx, entity_idx, marker="+", color="#457b9d", s=55, zorder=3)
+                event_types_present.add("mac_ack_start")
+
+    legend_handles = [
+        Patch(color=state_colors[state_map["IDLE"]], label="IDLE"),
+        Patch(color=state_colors[state_map["BACKING_OFF"]], label="BACKING_OFF"),
+        Patch(color=state_colors[state_map["CCA"]], label="CCA"),
+        Patch(color=state_colors[state_map["TRANSMITTING"]], label="TRANSMITTING"),
+        Patch(color=state_colors[state_map["WAITING_ACK"]], label="WAITING_ACK"),
+    ]
+    event_handles: List[Line2D] = []
+    if "backoff_draw" in event_types_present:
+        event_handles.append(
+            Line2D([0], [0], marker="v", color="none", markerfacecolor="#111111",
+                   markeredgecolor="#111111", linestyle="None", label="Backoff draw (units)")
+        )
+    if "collision" in event_types_present:
+        event_handles.append(
+            Line2D([0], [0], marker="x", color="#e63946", linestyle="None", label="Collision")
+        )
+    if "retry" in event_types_present:
+        event_handles.append(
+            Line2D([0], [0], marker="o", color="none", markerfacecolor="#f4a261",
+                   markeredgecolor="#f4a261", linestyle="None", label="Retry")
+        )
+    if "drop" in event_types_present:
+        event_handles.append(
+            Line2D([0], [0], marker="X", color="#e63946", linestyle="None", label="Drop")
+        )
+    if "ack_timeout" in event_types_present:
+        event_handles.append(
+            Line2D([0], [0], marker="D", color="none", markerfacecolor="#264653",
+                   markeredgecolor="#264653", linestyle="None", label="ACK timeout")
+        )
+    if "mac_ack_start" in event_types_present:
+        event_handles.append(
+            Line2D([0], [0], marker="+", color="#457b9d", linestyle="None", label="MAC ACK start")
+        )
+
+    ax.legend(
+        handles=legend_handles + event_handles,
+        fontsize=8,
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0.0,
+        frameon=False,
+    )
+    plt.tight_layout()
+    plt.savefig(str(save_path), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"✓ Saved network tick timeline to {save_path}")
 
 
 def _slice_marl_agent_trajectory(traj: Dict[str, np.ndarray], agent_index: int) -> Dict[str, np.ndarray]:
@@ -1377,6 +1578,11 @@ def main():
         help='Show controller estimates in plots (default: True)'
     )
     parser.add_argument(
+        '--deterministic',
+        action='store_true',
+        help='Force deterministic policy actions (default: False)'
+    )
+    parser.add_argument(
         '--output-dir',
         type=str,
         default='vis',
@@ -1406,6 +1612,25 @@ def main():
         type=int,
         default=1,
         help='Speed multiplier for video (e.g., 2 = 2x speed, default: 1)'
+    )
+
+    # Network trace parameters
+    parser.add_argument(
+        '--network-trace',
+        action='store_true',
+        help='Trace micro-slot network activity and render per-tick timelines'
+    )
+    parser.add_argument(
+        '--trace-interval',
+        type=int,
+        default=50,
+        help='Tick interval for network traces (default: 50)'
+    )
+    parser.add_argument(
+        '--trace-start',
+        type=int,
+        default=1,
+        help='First tick index to trace (default: 1)'
     )
 
     # List heuristic policies
@@ -1544,13 +1769,22 @@ def main():
                     env,
                     n_agents=resolved_n_agents,
                     seed=args.seed,
+                    deterministic=args.deterministic,
                 )
             except Exception as e:
                 env.close()
                 print(f"  ✗ Error loading policy: {e}\n")
                 continue
             print(f"  Running multi-agent episode...")
-            traj = run_episode_multi_agent(env, policy, args.episode_length, seed=args.seed)
+            traj = run_episode_multi_agent(
+                env,
+                policy,
+                args.episode_length,
+                seed=args.seed,
+                network_trace=args.network_trace,
+                trace_interval=args.trace_interval,
+                trace_start=args.trace_start,
+            )
             env.close()
         else:
             try:
@@ -1566,7 +1800,15 @@ def main():
                 print(f"  ✗ Error loading policy: {e}\n")
                 continue
             print(f"  Running episode...")
-            traj = run_episode(env, policy, args.episode_length, deterministic=True)
+            traj = run_episode(
+                env,
+                policy,
+                args.episode_length,
+                deterministic=args.deterministic,
+                network_trace=args.network_trace,
+                trace_interval=args.trace_interval,
+                trace_start=args.trace_start,
+            )
             env.close()
 
         # Print summary statistics
@@ -1580,6 +1822,21 @@ def main():
         print(f"    - Final state error: {final_error:.4f}\n")
 
         trajectories.append(traj)
+        if args.network_trace:
+            tick_traces = traj.get("network_tick_traces", [])
+            if tick_traces:
+                tag = f"p{i+1}_{_sanitize_filename(label)}"
+                trace_path = output_dir / f"{output_prefix}_{tag}_network_trace.jsonl"
+                _write_network_trace_jsonl(tick_traces, trace_path)
+                print(f"    - Saved network trace: {trace_path}")
+                for trace in tick_traces:
+                    tick = trace.get("tick", 0)
+                    plot_path = output_dir / f"{output_prefix}_{tag}_network_tick_{tick}.png"
+                    plot_network_tick_timeline(
+                        trace,
+                        plot_path,
+                        title=f"Network Tick {tick} - {label}",
+                    )
 
     if len(trajectories) == 0:
         print("No successful policy runs. Exiting.")

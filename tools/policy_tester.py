@@ -82,6 +82,15 @@ class EpisodeResult:
     steps: int
     n_agents: int
     episode_length: int
+    tx_attempts: int
+    tx_acked: int
+    tx_dropped: int
+    tx_rewrites: int
+    tx_collisions: int
+    data_delivered: int
+    mac_ack_sent: int
+    mac_ack_collisions: int
+    ack_timeouts: int
 
 
 @dataclass(frozen=True)
@@ -146,6 +155,39 @@ def _format_seed_range(seeds: Sequence[int]) -> str:
     if len(seeds) == 1:
         return str(seeds[0])
     return f"{seeds[0]}..{seeds[-1]}"
+
+
+def _sum_network_stat(network_stats: Dict[str, Any], key: str) -> int:
+    values = network_stats.get(key)
+    if isinstance(values, list):
+        return int(sum(int(x) for x in values))
+    if values is None:
+        return 0
+    try:
+        return int(values)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _extract_network_totals(info: Dict[str, Any]) -> Dict[str, int]:
+    network_stats = info.get("network_stats", {})
+    return {
+        "tx_attempts": _sum_network_stat(network_stats, "tx_attempts"),
+        "tx_acked": _sum_network_stat(network_stats, "tx_acked"),
+        "tx_dropped": _sum_network_stat(network_stats, "tx_dropped"),
+        "tx_rewrites": _sum_network_stat(network_stats, "tx_rewrites"),
+        "tx_collisions": _sum_network_stat(network_stats, "tx_collisions"),
+        "data_delivered": _sum_network_stat(network_stats, "data_delivered"),
+        "mac_ack_sent": _sum_network_stat(network_stats, "mac_ack_sent"),
+        "mac_ack_collisions": _sum_network_stat(network_stats, "mac_ack_collisions"),
+        "ack_timeouts": _sum_network_stat(network_stats, "ack_timeouts"),
+    }
+
+
+def _safe_rate(numerator: float, denominator: float) -> float:
+    if denominator <= 0:
+        return 0.0
+    return float(numerator) / float(denominator)
 
 
 def _write_perfect_comm_config(config: Dict[str, Any], output_path: Path) -> Path:
@@ -298,6 +340,7 @@ def _run_single_agent_episode(
     final_error = float(np.linalg.norm(states[0])) if states.size else 0.0
     send_rate = float(send_count) / float(max(1, steps))
     mean_reward = total_reward / float(max(1, steps))
+    network_totals = _extract_network_totals(last_info)
     return EpisodeResult(
         policy_label="",
         policy_type="",
@@ -309,6 +352,7 @@ def _run_single_agent_episode(
         steps=steps,
         n_agents=1,
         episode_length=episode_length,
+        **network_totals,
     )
 
 
@@ -346,6 +390,7 @@ def _run_multi_agent_episode(
         final_error = 0.0
     mean_reward = total_reward / float(max(1, steps * n_agents))
     send_rate = float(send_count) / float(max(1, steps * n_agents))
+    network_totals = _extract_network_totals(last_info)
     return EpisodeResult(
         policy_label="",
         policy_type="",
@@ -357,6 +402,7 @@ def _run_multi_agent_episode(
         steps=steps,
         n_agents=n_agents,
         episode_length=episode_length,
+        **network_totals,
     )
 
 
@@ -366,6 +412,36 @@ def _summarize_results(results: List[EpisodeResult]) -> Dict[str, float]:
     send_rates = np.array([r.send_rate for r in results], dtype=float)
     steps = np.array([r.steps for r in results], dtype=float)
     mean_rewards = np.array([r.mean_reward for r in results], dtype=float)
+    tx_attempts = np.array([r.tx_attempts for r in results], dtype=float)
+    tx_acked = np.array([r.tx_acked for r in results], dtype=float)
+    tx_dropped = np.array([r.tx_dropped for r in results], dtype=float)
+    tx_rewrites = np.array([r.tx_rewrites for r in results], dtype=float)
+    tx_collisions = np.array([r.tx_collisions for r in results], dtype=float)
+    data_delivered = np.array([r.data_delivered for r in results], dtype=float)
+    mac_ack_sent = np.array([r.mac_ack_sent for r in results], dtype=float)
+    mac_ack_collisions = np.array([r.mac_ack_collisions for r in results], dtype=float)
+    ack_timeouts = np.array([r.ack_timeouts for r in results], dtype=float)
+    success_rates = np.array(
+        [_safe_rate(r.tx_acked, r.tx_attempts) for r in results], dtype=float
+    )
+    delivery_rates = np.array(
+        [_safe_rate(r.data_delivered, r.tx_attempts) for r in results], dtype=float
+    )
+    collision_rates = np.array(
+        [_safe_rate(r.tx_collisions, r.tx_attempts) for r in results], dtype=float
+    )
+    drop_rates = np.array(
+        [_safe_rate(r.tx_dropped, r.tx_attempts) for r in results], dtype=float
+    )
+    rewrite_rates = np.array(
+        [_safe_rate(r.tx_rewrites, r.tx_attempts) for r in results], dtype=float
+    )
+    ack_collision_rates = np.array(
+        [_safe_rate(r.mac_ack_collisions, r.mac_ack_sent) for r in results], dtype=float
+    )
+    ack_timeout_rates = np.array(
+        [_safe_rate(r.ack_timeouts, r.tx_attempts) for r in results], dtype=float
+    )
     episode_length = results[0].episode_length if results else 0
     completion_rate = float(np.mean(steps == episode_length)) if results else 0.0
     return {
@@ -380,6 +456,38 @@ def _summarize_results(results: List[EpisodeResult]) -> Dict[str, float]:
         "mean_reward_per_step": float(np.mean(mean_rewards)) if results else 0.0,
         "std_reward_per_step": float(np.std(mean_rewards)) if results else 0.0,
         "completion_rate": completion_rate,
+        "mean_tx_attempts": float(np.mean(tx_attempts)) if results else 0.0,
+        "std_tx_attempts": float(np.std(tx_attempts)) if results else 0.0,
+        "mean_tx_acked": float(np.mean(tx_acked)) if results else 0.0,
+        "std_tx_acked": float(np.std(tx_acked)) if results else 0.0,
+        "mean_tx_dropped": float(np.mean(tx_dropped)) if results else 0.0,
+        "std_tx_dropped": float(np.std(tx_dropped)) if results else 0.0,
+        "mean_tx_rewrites": float(np.mean(tx_rewrites)) if results else 0.0,
+        "std_tx_rewrites": float(np.std(tx_rewrites)) if results else 0.0,
+        "mean_tx_collisions": float(np.mean(tx_collisions)) if results else 0.0,
+        "std_tx_collisions": float(np.std(tx_collisions)) if results else 0.0,
+        "mean_data_delivered": float(np.mean(data_delivered)) if results else 0.0,
+        "std_data_delivered": float(np.std(data_delivered)) if results else 0.0,
+        "mean_mac_ack_sent": float(np.mean(mac_ack_sent)) if results else 0.0,
+        "std_mac_ack_sent": float(np.std(mac_ack_sent)) if results else 0.0,
+        "mean_mac_ack_collisions": float(np.mean(mac_ack_collisions)) if results else 0.0,
+        "std_mac_ack_collisions": float(np.std(mac_ack_collisions)) if results else 0.0,
+        "mean_ack_timeouts": float(np.mean(ack_timeouts)) if results else 0.0,
+        "std_ack_timeouts": float(np.std(ack_timeouts)) if results else 0.0,
+        "mean_tx_success_rate": float(np.mean(success_rates)) if results else 0.0,
+        "std_tx_success_rate": float(np.std(success_rates)) if results else 0.0,
+        "mean_data_delivery_rate": float(np.mean(delivery_rates)) if results else 0.0,
+        "std_data_delivery_rate": float(np.std(delivery_rates)) if results else 0.0,
+        "mean_collision_rate": float(np.mean(collision_rates)) if results else 0.0,
+        "std_collision_rate": float(np.std(collision_rates)) if results else 0.0,
+        "mean_drop_rate": float(np.mean(drop_rates)) if results else 0.0,
+        "std_drop_rate": float(np.std(drop_rates)) if results else 0.0,
+        "mean_rewrite_rate": float(np.mean(rewrite_rates)) if results else 0.0,
+        "std_rewrite_rate": float(np.std(rewrite_rates)) if results else 0.0,
+        "mean_ack_collision_rate": float(np.mean(ack_collision_rates)) if results else 0.0,
+        "std_ack_collision_rate": float(np.std(ack_collision_rates)) if results else 0.0,
+        "mean_ack_timeout_rate": float(np.mean(ack_timeout_rates)) if results else 0.0,
+        "std_ack_timeout_rate": float(np.std(ack_timeout_rates)) if results else 0.0,
     }
 
 
@@ -389,6 +497,10 @@ def _write_csv(path: Path, fieldnames: Sequence[str], rows: Iterable[Dict[str, A
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def _filter_rows(rows: List[Dict[str, Any]], fieldnames: Sequence[str]) -> List[Dict[str, Any]]:
+    return [{name: row.get(name, "") for name in fieldnames} for row in rows]
 
 
 def _extract_env_signature(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -520,6 +632,22 @@ def _write_policy_results(
                 "steps": result.steps,
                 "n_agents": result.n_agents,
                 "episode_length": result.episode_length,
+                "tx_attempts": result.tx_attempts,
+                "tx_acked": result.tx_acked,
+                "tx_dropped": result.tx_dropped,
+                "tx_rewrites": result.tx_rewrites,
+                "tx_collisions": result.tx_collisions,
+                "data_delivered": result.data_delivered,
+                "mac_ack_sent": result.mac_ack_sent,
+                "mac_ack_collisions": result.mac_ack_collisions,
+                "ack_timeouts": result.ack_timeouts,
+                "tx_success_rate": _safe_rate(result.tx_acked, result.tx_attempts),
+                "data_delivery_rate": _safe_rate(result.data_delivered, result.tx_attempts),
+                "collision_rate": _safe_rate(result.tx_collisions, result.tx_attempts),
+                "drop_rate": _safe_rate(result.tx_dropped, result.tx_attempts),
+                "rewrite_rate": _safe_rate(result.tx_rewrites, result.tx_attempts),
+                "ack_collision_rate": _safe_rate(result.mac_ack_collisions, result.mac_ack_sent),
+                "ack_timeout_rate": _safe_rate(result.ack_timeouts, result.tx_attempts),
             }
         )
 
@@ -545,6 +673,22 @@ def _write_policy_results(
             "steps",
             "n_agents",
             "episode_length",
+            "tx_attempts",
+            "tx_acked",
+            "tx_dropped",
+            "tx_rewrites",
+            "tx_collisions",
+            "data_delivered",
+            "mac_ack_sent",
+            "mac_ack_collisions",
+            "ack_timeouts",
+            "tx_success_rate",
+            "data_delivery_rate",
+            "collision_rate",
+            "drop_rate",
+            "rewrite_rate",
+            "ack_collision_rate",
+            "ack_timeout_rate",
         ],
         per_seed_rows,
     )
@@ -565,6 +709,38 @@ def _write_policy_results(
             "mean_reward_per_step",
             "std_reward_per_step",
             "completion_rate",
+            "mean_tx_attempts",
+            "std_tx_attempts",
+            "mean_tx_acked",
+            "std_tx_acked",
+            "mean_tx_dropped",
+            "std_tx_dropped",
+            "mean_tx_rewrites",
+            "std_tx_rewrites",
+            "mean_tx_collisions",
+            "std_tx_collisions",
+            "mean_data_delivered",
+            "std_data_delivered",
+            "mean_mac_ack_sent",
+            "std_mac_ack_sent",
+            "mean_mac_ack_collisions",
+            "std_mac_ack_collisions",
+            "mean_ack_timeouts",
+            "std_ack_timeouts",
+            "mean_tx_success_rate",
+            "std_tx_success_rate",
+            "mean_data_delivery_rate",
+            "std_data_delivery_rate",
+            "mean_collision_rate",
+            "std_collision_rate",
+            "mean_drop_rate",
+            "std_drop_rate",
+            "mean_rewrite_rate",
+            "std_rewrite_rate",
+            "mean_ack_collision_rate",
+            "std_ack_collision_rate",
+            "mean_ack_timeout_rate",
+            "std_ack_timeout_rate",
         ],
         [summary_row],
     )
@@ -591,7 +767,51 @@ def _write_leaderboard(path: Path, rows: List[Dict[str, Any]]) -> None:
         "std_reward_per_step",
         "completion_rate",
     ]
-    _write_csv(path, fieldnames, rows)
+    _write_csv(path, fieldnames, _filter_rows(rows, fieldnames))
+
+
+def _write_network_stats_leaderboard(path: Path, rows: List[Dict[str, Any]]) -> None:
+    fieldnames = [
+        "rank",
+        "model_name",
+        "checkpoint",
+        "policy_label",
+        "policy_type",
+        "num_seeds",
+        "mean_tx_attempts",
+        "std_tx_attempts",
+        "mean_tx_acked",
+        "std_tx_acked",
+        "mean_tx_dropped",
+        "std_tx_dropped",
+        "mean_tx_rewrites",
+        "std_tx_rewrites",
+        "mean_tx_collisions",
+        "std_tx_collisions",
+        "mean_data_delivered",
+        "std_data_delivered",
+        "mean_mac_ack_sent",
+        "std_mac_ack_sent",
+        "mean_mac_ack_collisions",
+        "std_mac_ack_collisions",
+        "mean_ack_timeouts",
+        "std_ack_timeouts",
+        "mean_tx_success_rate",
+        "std_tx_success_rate",
+        "mean_data_delivery_rate",
+        "std_data_delivery_rate",
+        "mean_collision_rate",
+        "std_collision_rate",
+        "mean_drop_rate",
+        "std_drop_rate",
+        "mean_rewrite_rate",
+        "std_rewrite_rate",
+        "mean_ack_collision_rate",
+        "std_ack_collision_rate",
+        "mean_ack_timeout_rate",
+        "std_ack_timeout_rate",
+    ]
+    _write_csv(path, fieldnames, _filter_rows(rows, fieldnames))
 
 
 def _smooth_rewards(rewards: np.ndarray, window_size: int) -> np.ndarray:
@@ -1220,6 +1440,9 @@ def main() -> int:
     leaderboard_path = models_root / "leaderboard.csv"
     _write_leaderboard(leaderboard_path, ranked_rows)
     _log(f"Leaderboard: {leaderboard_path}")
+    network_stats_path = models_root / "leaderboard_network_stats.csv"
+    _write_network_stats_leaderboard(network_stats_path, ranked_rows)
+    _log(f"Network stats: {network_stats_path}")
     return 0
 
 

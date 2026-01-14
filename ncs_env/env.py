@@ -132,6 +132,10 @@ class NCS_Env(gym.Env):
 
         self._initialize_systems()
         self._initialize_tracking_structures()
+        self.network_trace_enabled = False
+        self.network_trace_interval = 50
+        self.network_trace_start = 1
+        self.last_network_tick_trace: Optional[Dict[str, Any]] = None
 
         # Compute reward normalization statistics after systems are initialized
         self._setup_reward_normalization()
@@ -236,7 +240,6 @@ class NCS_Env(gym.Env):
             n_agents=self.n_agents,
             data_rate_kbps=network_cfg.get("data_rate_kbps", 250.0),
             data_packet_size=network_cfg.get("data_packet_size", 50),
-            ack_packet_size=network_cfg.get("ack_packet_size", 10),
             slots_per_step=network_cfg.get("slots_per_step", 32),
             mac_min_be=network_cfg.get("mac_min_be", 3),
             mac_max_be=network_cfg.get("mac_max_be", 5),
@@ -321,6 +324,7 @@ class NCS_Env(gym.Env):
         self.network.reset()
         self._initialize_tracking_structures()
         self._reset_running_returns()
+        self.last_network_tick_trace = None
         for idx in range(self.n_agents):
             self.last_measurements[idx] = self.plants[idx].get_state().copy()
 
@@ -333,6 +337,8 @@ class NCS_Env(gym.Env):
     def step(self, actions: Dict[str, int]):
         """Execute one timestep of the environment."""
         self.timestep += 1
+        self.last_network_tick_trace = None
+        self.network.trace_enabled = bool(self.network_trace_enabled)
 
         # State index is the time index of the current plant state
         # After reset: timestep=0, state is x[0]
@@ -370,6 +376,9 @@ class NCS_Env(gym.Env):
                     self._record_decision(i, status=0)
         else:
             delivered_controller_ids = set()
+            trace_this_tick = self._should_trace_network_tick(self.timestep)
+            if trace_this_tick:
+                self.network.start_tick_trace(self.timestep)
             for i in range(self.n_agents):
                 action = actions[f"agent_{i}"]
                 if action == 1:
@@ -437,6 +446,8 @@ class NCS_Env(gym.Env):
                         entry = self.pending_transmissions[sensor_id].pop(measurement_timestamp, None)
                         if entry is not None:
                             entry["status"] = 3
+            if trace_this_tick:
+                self.last_network_tick_trace = self.network.finish_tick_trace()
 
         # Compute control and update plants
         for i in range(self.n_agents):
@@ -547,6 +558,15 @@ class NCS_Env(gym.Env):
         observations = self._get_observations()
         infos = self._get_info()
         return observations, rewards, terminated, truncated, infos
+
+    def _should_trace_network_tick(self, tick: int) -> bool:
+        if not self.network_trace_enabled:
+            return False
+        if self.network_trace_interval <= 0:
+            return False
+        if tick < self.network_trace_start:
+            return False
+        return (tick - self.network_trace_start) % self.network_trace_interval == 0
 
     def _record_decision(self, agent_idx: int, status: int) -> Dict[str, int]:
         """Append a new decision outcome to the history."""
@@ -931,7 +951,27 @@ class NCS_Env(gym.Env):
             if self.perfect_communication
             else [int(x) for x in self.network.collisions_per_agent]
         )
-        return {
+        data_delivered = (
+            [int(x) for x in self.net_tx_acks]
+            if self.perfect_communication
+            else [int(x) for x in self.network.data_delivered_per_agent]
+        )
+        mac_ack_sent = (
+            [0 for _ in range(self.n_agents)]
+            if self.perfect_communication
+            else [int(x) for x in self.network.mac_ack_sent_per_agent]
+        )
+        mac_ack_collisions = (
+            [0 for _ in range(self.n_agents)]
+            if self.perfect_communication
+            else [int(x) for x in self.network.mac_ack_collisions_per_agent]
+        )
+        ack_timeouts = (
+            [0 for _ in range(self.n_agents)]
+            if self.perfect_communication
+            else [int(x) for x in self.network.ack_timeouts_per_agent]
+        )
+        info = {
             "timestep": self.timestep,
             "channel_state": "PERFECT" if self.perfect_communication else self.network.channel_state.name,
             "states": [plant.get_state() for plant in self.plants],
@@ -944,12 +984,19 @@ class NCS_Env(gym.Env):
                 "tx_dropped": [int(x) for x in self.net_tx_drops],
                 "tx_rewrites": [int(x) for x in self.net_tx_rewrites],
                 "tx_collisions": collisions,
+                "data_delivered": data_delivered,
+                "mac_ack_sent": mac_ack_sent,
+                "mac_ack_collisions": mac_ack_collisions,
+                "ack_timeouts": ack_timeouts,
             },
             "reward_components": {k: v.copy() for k, v in self.last_reward_components.items()},
             "termination_reasons": list(self.last_termination_reasons),
             "termination_agents": list(self.last_termination_agents),
             "bad_termination": bool(self.last_bad_termination),
         }
+        if self.last_network_tick_trace is not None:
+            info["network_tick_trace"] = self.last_network_tick_trace
+        return info
 
     def render(self):
         """Render environment (not implemented)."""

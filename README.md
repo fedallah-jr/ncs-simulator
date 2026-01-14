@@ -52,7 +52,7 @@ Observations are laid out as `[current_state, current_throughput, prev_states...
 
 ### `network`
 - `data_rate_kbps`: Physical-layer rate used to convert packet sizes into transmission durations.
-- `data_packet_size`, `ack_packet_size`: Sensor/ACK payload sizes in bytes. Larger packets hold the channel for more timesteps.
+- `data_packet_size`: Sensor payload size in bytes. Larger packets hold the channel for more timesteps.
 - `perfect_communication`: When `true`, disables CSMA behavior entirely—measurements reach controllers instantly, collisions/throughput bookkeeping is skipped, and decision histories record immediate successes for every transmission attempt.
 - `slots_per_step`: Number of micro-slots simulated inside each 10 ms environment step (default 32, ≈312 µs per slot).
 - `mac_min_be` / `mac_max_be`: CSMA/CA backoff exponent bounds (defaults 3/5).

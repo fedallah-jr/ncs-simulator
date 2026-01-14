@@ -67,6 +67,19 @@ python -m tools.visualize_policy \
 
 **Note**: For MP4 format, you need to install FFmpeg: `sudo apt-get install ffmpeg` (Linux) or `brew install ffmpeg` (Mac). GIF format works without additional dependencies.
 
+#### Trace Micro-slot Network Activity
+
+```bash
+python -m tools.visualize_policy \
+    --config configs/marl_mixed_plants.json \
+    --policy path/to/latest_model.pt \
+    --policy-type marl_torch \
+    --episode-length 500 \
+    --network-trace \
+    --trace-interval 50 \
+    --trace-start 1
+```
+
 ### Command-Line Arguments
 
 **Required:**
@@ -88,6 +101,10 @@ python -m tools.visualize_policy \
 - `--show-estimates`: Show controller estimates in plots (default: True)
 - `--output-dir`: Directory for saving visualizations (default: `vis/`)
 - `--output-prefix`: Prefix for output filenames (default: timestamp)
+- `--deterministic`: Force deterministic policy actions (default: False)
+- `--network-trace`: Trace micro-slot network activity and render per-tick timelines
+- `--trace-interval`: Tick interval for network traces (default: 50)
+- `--trace-start`: First tick index to trace (default: 1)
 - `--list-heuristics`: List available heuristic policies and exit
 
 **Video/Animation:**
@@ -111,6 +128,10 @@ The tool generates the following files in the output directory:
    - State magnitude changing over time
    - Transmission decisions as they occur
    - Current timestep indicator
+
+**Generated when `--network-trace` is used:**
+5. **`{prefix}_{tag}_network_trace.jsonl`**: Micro-slot trace data (one JSON object per traced tick)
+6. **`{prefix}_{tag}_network_tick_{tick}.png`**: Per-tick timeline plot of micro-slot activity
 
 ## Heuristic Policies
 
