@@ -78,7 +78,6 @@ class NCS_Env(gym.Env):
         reward_override: Optional[Dict[str, Any]] = None,
         termination_override: Optional[Dict[str, Any]] = None,
         freeze_running_normalization: bool = False,
-        **kwargs,  # Accept deprecated parameters like comm_cost
     ):
         super().__init__()
         self.n_agents = n_agents
@@ -179,7 +178,7 @@ class NCS_Env(gym.Env):
         self.K = self.K_list[0]
 
         base_reward_cfg = self.config.get("reward", {})
-        reward_cfg = self._merge_reward_override(base_reward_cfg, self.reward_override)
+        reward_cfg = self._merge_config_override(base_reward_cfg, self.reward_override)
         self.reward_normalization_gamma = float(reward_cfg.get("normalization_gamma", 0.99))
         self.state_cost_matrix = np.array(
             reward_cfg.get("state_cost_matrix", np.eye(self.state_dim))
@@ -202,7 +201,7 @@ class NCS_Env(gym.Env):
         self.comm_throughput_floor = float(reward_cfg.get("comm_throughput_floor", 1e-3))
         self._running_reward_returns: Optional[List[float]] = None
         base_termination_cfg = self.config.get("termination", {})
-        termination_cfg = self._merge_termination_override(base_termination_cfg, self.termination_override)
+        termination_cfg = self._merge_config_override(base_termination_cfg, self.termination_override)
         self.termination_enabled = bool(termination_cfg.get("enabled", False))
         self.termination_error_max = None
         if self.termination_enabled:
@@ -667,26 +666,14 @@ class NCS_Env(gym.Env):
         return scale_min, scale_max
 
     @staticmethod
-    def _merge_reward_override(
-        base_reward_cfg: Dict[str, Any], reward_override: Optional[Dict[str, Any]]
+    def _merge_config_override(
+        base_cfg: Dict[str, Any], override: Optional[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Merge reward override dict onto the base reward config."""
-        if reward_override is None:
-            return dict(base_reward_cfg)
-        merged = dict(base_reward_cfg)
-        merged.update(reward_override)
-        return merged
-
-    @staticmethod
-    def _merge_termination_override(
-        base_termination_cfg: Dict[str, Any],
-        termination_override: Optional[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """Merge termination override dict onto the base termination config."""
-        if termination_override is None:
-            return dict(base_termination_cfg)
-        merged = dict(base_termination_cfg)
-        merged.update(termination_override)
+        """Merge an override dict onto a base config dict."""
+        if override is None:
+            return dict(base_cfg)
+        merged = dict(base_cfg)
+        merged.update(override)
         return merged
 
     def _build_reward_definition(

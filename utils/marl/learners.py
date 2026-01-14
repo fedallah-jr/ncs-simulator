@@ -67,6 +67,11 @@ def _make_optimizer(
     return torch.optim.Adam(params, lr=lr)
 
 
+def _maybe_append_id(obs: torch.Tensor, n_agents: int, use_agent_id: bool) -> torch.Tensor:
+    """Conditionally append one-hot agent IDs to observations."""
+    return append_agent_id(obs, n_agents) if use_agent_id else obs
+
+
 class IQLLearner:
     def __init__(
         self,
@@ -100,13 +105,10 @@ class IQLLearner:
         self.optimizer = _make_optimizer(self.agent.parameters(), lr=float(lr), optimizer_type=optimizer_type)
         self.train_steps = 0
 
-    def _maybe_append_id(self, obs: torch.Tensor) -> torch.Tensor:
-        return append_agent_id(obs, self.n_agents) if self.use_agent_id else obs
-
     def update(self, batch: MARLBatch) -> LearnerStats:
         self.train_steps += 1
-        obs = self._maybe_append_id(batch.obs)
-        next_obs = self._maybe_append_id(batch.next_obs)
+        obs = _maybe_append_id(batch.obs, self.n_agents, self.use_agent_id)
+        next_obs = _maybe_append_id(batch.next_obs, self.n_agents, self.use_agent_id)
         actions = batch.actions
         rewards = batch.rewards
         dones = batch.dones
@@ -183,13 +185,10 @@ class VDNLearner:
         self.optimizer = _make_optimizer(self.agent.parameters(), lr=float(lr), optimizer_type=optimizer_type)
         self.train_steps = 0
 
-    def _maybe_append_id(self, obs: torch.Tensor) -> torch.Tensor:
-        return append_agent_id(obs, self.n_agents) if self.use_agent_id else obs
-
     def update(self, batch: MARLBatch) -> LearnerStats:
         self.train_steps += 1
-        obs = self._maybe_append_id(batch.obs)
-        next_obs = self._maybe_append_id(batch.next_obs)
+        obs = _maybe_append_id(batch.obs, self.n_agents, self.use_agent_id)
+        next_obs = _maybe_append_id(batch.next_obs, self.n_agents, self.use_agent_id)
         actions = batch.actions
         rewards = batch.rewards
         dones = batch.dones
@@ -271,13 +270,10 @@ class QMIXLearner:
         self.optimizer = _make_optimizer(params, lr=float(lr), optimizer_type=optimizer_type)
         self.train_steps = 0
 
-    def _maybe_append_id(self, obs: torch.Tensor) -> torch.Tensor:
-        return append_agent_id(obs, self.n_agents) if self.use_agent_id else obs
-
     def update(self, batch: MARLBatch) -> LearnerStats:
         self.train_steps += 1
-        obs = self._maybe_append_id(batch.obs)
-        next_obs = self._maybe_append_id(batch.next_obs)
+        obs = _maybe_append_id(batch.obs, self.n_agents, self.use_agent_id)
+        next_obs = _maybe_append_id(batch.next_obs, self.n_agents, self.use_agent_id)
         actions = batch.actions
         rewards = batch.rewards
         dones = batch.dones
@@ -362,13 +358,10 @@ class QPLEXLearner:
         self.optimizer = _make_optimizer(params, lr=float(lr), optimizer_type=optimizer_type)
         self.train_steps = 0
 
-    def _maybe_append_id(self, obs: torch.Tensor) -> torch.Tensor:
-        return append_agent_id(obs, self.n_agents) if self.use_agent_id else obs
-
     def update(self, batch: MARLBatch) -> LearnerStats:
         self.train_steps += 1
-        obs = self._maybe_append_id(batch.obs)
-        next_obs = self._maybe_append_id(batch.next_obs)
+        obs = _maybe_append_id(batch.obs, self.n_agents, self.use_agent_id)
+        next_obs = _maybe_append_id(batch.next_obs, self.n_agents, self.use_agent_id)
         actions = batch.actions
         rewards = batch.rewards
         dones = batch.dones

@@ -21,14 +21,12 @@ class NCSParallelEnv(ParallelEnv):
         self,
         n_agents: int = 3,
         episode_length: int = 1000,
-        comm_cost: float = 0.01,
         config_path: Optional[str] = None,
         seed: Optional[int] = None,
     ):
         self._env = NCS_Env(
             n_agents=n_agents,
             episode_length=episode_length,
-            comm_cost=comm_cost,
             config_path=config_path,
             seed=seed,
         )

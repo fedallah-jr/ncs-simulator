@@ -8,6 +8,28 @@ from torch import nn
 from torch.nn import functional as F
 
 
+def _get_activation(name: str) -> nn.Module:
+    """Return an activation module instance by name."""
+    if name == "relu":
+        return nn.ReLU()
+    elif name == "tanh":
+        return nn.Tanh()
+    elif name == "elu":
+        return nn.ELU()
+    raise ValueError("activation must be one of: relu, tanh, elu")
+
+
+def _get_activation_class(name: str) -> type[nn.Module]:
+    """Return an activation module class by name."""
+    if name == "relu":
+        return nn.ReLU
+    elif name == "tanh":
+        return nn.Tanh
+    elif name == "elu":
+        return nn.ELU
+    raise ValueError("activation must be one of: relu, tanh, elu")
+
+
 def append_agent_id(obs: torch.Tensor, n_agents: int) -> torch.Tensor:
     """
     Append a one-hot agent id to observations.
@@ -43,16 +65,7 @@ class MLPAgent(nn.Module):
         if not hidden_dims:
             raise ValueError("hidden_dims must be non-empty")
 
-        act: nn.Module
-        if activation == "relu":
-            act = nn.ReLU()
-        elif activation == "tanh":
-            act = nn.Tanh()
-        elif activation == "elu":
-            act = nn.ELU()
-        else:
-            raise ValueError("activation must be one of: relu, tanh, elu")
-
+        act = _get_activation(activation)
         layers: list[nn.Module] = []
         last_dim = input_dim
         for hidden_dim in hidden_dims:
@@ -94,15 +107,7 @@ class DuelingMLPAgent(nn.Module):
         if not hidden_dims:
             raise ValueError("hidden_dims must be non-empty")
 
-        act_fn: type[nn.Module]
-        if activation == "relu":
-            act_fn = nn.ReLU
-        elif activation == "tanh":
-            act_fn = nn.Tanh
-        elif activation == "elu":
-            act_fn = nn.ELU
-        else:
-            raise ValueError("activation must be one of: relu, tanh, elu")
+        act_fn = _get_activation_class(activation)
 
         # Shared feature extractor
         feature_layers: list[nn.Module] = []
@@ -153,16 +158,7 @@ class CentralValueMLP(nn.Module):
         if not hidden_dims:
             raise ValueError("hidden_dims must be non-empty")
 
-        act: nn.Module
-        if activation == "relu":
-            act = nn.ReLU()
-        elif activation == "tanh":
-            act = nn.Tanh()
-        elif activation == "elu":
-            act = nn.ELU()
-        else:
-            raise ValueError("activation must be one of: relu, tanh, elu")
-
+        act = _get_activation(activation)
         layers: list[nn.Module] = []
         last_dim = input_dim
         for hidden_dim in hidden_dims:
