@@ -75,6 +75,7 @@ class EpisodeResult:
     seed: int
     total_reward: float
     mean_reward: float
+    mean_state_error: float
     final_state_error: float
     send_rate: float
     steps: int
@@ -314,6 +315,7 @@ def _run_multi_agent_episode(
     n_agents = int(env.n_agents)
 
     total_reward = 0.0
+    total_state_error = 0.0
     send_count = 0
     steps = 0
     last_info = info
@@ -322,6 +324,14 @@ def _run_multi_agent_episode(
         obs_dict, rewards, terminated, truncated, info = env.step(action_dict)
         total_reward += float(sum(rewards.values()))
         send_count += int(sum(action_dict.values()))
+
+        # Track state error separately from rewards
+        states = np.asarray(info.get("states", []), dtype=float)
+        if states.size > 0:
+            for state in states:
+                state_error = env._compute_state_error(state)
+                total_state_error += float(state_error)
+
         steps += 1
         last_info = info
         done = any(bool(terminated[f"agent_{i}"]) or bool(truncated[f"agent_{i}"]) for i in range(n_agents))
@@ -334,6 +344,7 @@ def _run_multi_agent_episode(
     else:
         final_error = 0.0
     mean_reward = total_reward / float(max(1, steps * n_agents))
+    mean_state_error = total_state_error / float(max(1, steps * n_agents))
     send_rate = float(send_count) / float(max(1, steps * n_agents))
     network_totals = _extract_network_totals(last_info)
     return EpisodeResult(
@@ -342,6 +353,7 @@ def _run_multi_agent_episode(
         seed=int(seed),
         total_reward=total_reward,
         mean_reward=mean_reward,
+        mean_state_error=mean_state_error,
         final_state_error=final_error,
         send_rate=send_rate,
         steps=steps,
@@ -353,6 +365,7 @@ def _run_multi_agent_episode(
 
 def _summarize_results(results: List[EpisodeResult]) -> Dict[str, float]:
     totals = np.array([r.total_reward for r in results], dtype=float)
+    mean_state_errors = np.array([r.mean_state_error for r in results], dtype=float)
     final_errors = np.array([r.final_state_error for r in results], dtype=float)
     send_rates = np.array([r.send_rate for r in results], dtype=float)
     steps = np.array([r.steps for r in results], dtype=float)
@@ -392,6 +405,8 @@ def _summarize_results(results: List[EpisodeResult]) -> Dict[str, float]:
     return {
         "mean_total_reward": float(np.mean(totals)) if results else 0.0,
         "std_total_reward": float(np.std(totals)) if results else 0.0,
+        "mean_state_error": float(np.mean(mean_state_errors)) if results else 0.0,
+        "std_state_error": float(np.std(mean_state_errors)) if results else 0.0,
         "mean_final_error": float(np.mean(final_errors)) if results else 0.0,
         "std_final_error": float(np.std(final_errors)) if results else 0.0,
         "mean_send_rate": float(np.mean(send_rates)) if results else 0.0,
@@ -550,6 +565,7 @@ def _write_policy_results(
                 "seed": result.seed,
                 "total_reward": result.total_reward,
                 "mean_reward": result.mean_reward,
+                "mean_state_error": result.mean_state_error,
                 "final_state_error": result.final_state_error,
                 "send_rate": result.send_rate,
                 "steps": result.steps,
@@ -591,6 +607,7 @@ def _write_policy_results(
             "seed",
             "total_reward",
             "mean_reward",
+            "mean_state_error",
             "final_state_error",
             "send_rate",
             "steps",
@@ -623,6 +640,8 @@ def _write_policy_results(
             "num_seeds",
             "mean_total_reward",
             "std_total_reward",
+            "mean_state_error",
+            "std_state_error",
             "mean_final_error",
             "std_final_error",
             "mean_send_rate",
@@ -680,6 +699,8 @@ def _write_leaderboard(path: Path, rows: List[Dict[str, Any]]) -> None:
         "num_seeds",
         "mean_total_reward",
         "std_total_reward",
+        "mean_state_error",
+        "std_state_error",
         "mean_final_error",
         "std_final_error",
         "mean_send_rate",
@@ -1097,6 +1118,7 @@ def main() -> int:
                         "seed": result.seed,
                         "total_reward": result.total_reward,
                         "mean_reward": result.mean_reward,
+                        "mean_state_error": result.mean_state_error,
                         "final_state_error": result.final_state_error,
                         "send_rate": result.send_rate,
                         "steps": result.steps,
@@ -1122,6 +1144,7 @@ def main() -> int:
                 "seed",
                 "total_reward",
                 "mean_reward",
+                "mean_state_error",
                 "final_state_error",
                 "send_rate",
                 "steps",
@@ -1138,6 +1161,8 @@ def main() -> int:
                 "num_seeds",
                 "mean_total_reward",
                 "std_total_reward",
+                "mean_state_error",
+                "std_state_error",
                 "mean_final_error",
                 "std_final_error",
                 "mean_send_rate",
