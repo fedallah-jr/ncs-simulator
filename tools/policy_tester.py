@@ -11,7 +11,9 @@ import argparse
 import copy
 import csv
 import json
+import os
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
@@ -511,6 +513,66 @@ def _infer_policy_type(model_path: Path) -> str:
     raise ValueError(f"Unsupported model extension: {model_path}")
 
 
+def _chunk_seeds(seeds: Sequence[int], num_chunks: int) -> List[List[int]]:
+    if not seeds:
+        return []
+    if num_chunks <= 1:
+        return [list(seeds)]
+    total = len(seeds)
+    num_chunks = min(num_chunks, total)
+    base, extra = divmod(total, num_chunks)
+    chunks: List[List[int]] = []
+    start = 0
+    for idx in range(num_chunks):
+        size = base + (1 if idx < extra else 0)
+        end = start + size
+        chunks.append(list(seeds[start:end]))
+        start = end
+    return chunks
+
+
+def _evaluate_policy_for_seeds(
+    spec: PolicySpec,
+    config_path: Path,
+    episode_length: int,
+    n_agents: int,
+    seeds: Sequence[int],
+    termination_override: Optional[Dict[str, Any]],
+) -> List[EpisodeResult]:
+    if not seeds:
+        return []
+    results: List[EpisodeResult] = []
+    cached_policy: Optional[Any] = None
+    env = _build_env(
+        config_path, episode_length, n_agents, int(seeds[0]), termination_override
+    )
+    try:
+        for seed in seeds:
+            if spec.policy_type.lower() == "heuristic":
+                policy = _load_policy(spec, env, seed=int(seed))
+            else:
+                if cached_policy is None:
+                    policy = _load_policy(spec, env, seed=int(seed))
+                    cached_policy = policy
+                else:
+                    policy = cached_policy
+
+            episode = _run_multi_agent_episode(
+                env,
+                policy,
+                seed=int(seed),
+                episode_length=episode_length,
+            )
+            episode.policy_label = spec.label
+            episode.policy_type = spec.policy_type
+            results.append(episode)
+    finally:
+        if hasattr(env, "close"):
+            env.close()
+
+    return results
+
+
 def _evaluate_policy(
     spec: PolicySpec,
     *,
@@ -519,35 +581,51 @@ def _evaluate_policy(
     n_agents: int,
     seeds: Sequence[int],
     termination_override: Optional[Dict[str, Any]],
+    num_workers: int = 1,
 ) -> List[EpisodeResult]:
-    results: List[EpisodeResult] = []
-    cached_policy: Optional[Any] = None
+    if not seeds:
+        return []
+    worker_count = max(1, int(num_workers))
+    if worker_count == 1 or len(seeds) == 1:
+        results = _evaluate_policy_for_seeds(
+            spec,
+            config_path=config_path,
+            episode_length=episode_length,
+            n_agents=n_agents,
+            seeds=seeds,
+            termination_override=termination_override,
+        )
+        results.sort(key=lambda r: r.seed)
+        return results
 
-    for seed in seeds:
-        env = _build_env(config_path, episode_length, n_agents, seed, termination_override)
-        try:
-            if spec.policy_type.lower() == "heuristic":
-                policy = _load_policy(spec, env, seed=seed)
-            else:
-                if cached_policy is None:
-                    policy = _load_policy(spec, env, seed=seed)
-                    cached_policy = policy
-                else:
-                    policy = cached_policy
+    chunks = _chunk_seeds(seeds, worker_count)
+    if len(chunks) <= 1:
+        results = _evaluate_policy_for_seeds(
+            spec,
+            config_path=config_path,
+            episode_length=episode_length,
+            n_agents=n_agents,
+            seeds=seeds,
+            termination_override=termination_override,
+        )
+        results.sort(key=lambda r: r.seed)
+        return results
 
-            episode = _run_multi_agent_episode(
-                env,
-                policy,
-                seed=seed,
-                episode_length=episode_length,
+    with ProcessPoolExecutor(max_workers=len(chunks)) as executor:
+        results_by_chunk = list(
+            executor.map(
+                _evaluate_policy_for_seeds,
+                [spec] * len(chunks),
+                [config_path] * len(chunks),
+                [episode_length] * len(chunks),
+                [n_agents] * len(chunks),
+                chunks,
+                [termination_override] * len(chunks),
             )
-            episode.policy_label = spec.label
-            episode.policy_type = spec.policy_type
-            results.append(episode)
-        finally:
-            if hasattr(env, "close"):
-                env.close()
+        )
 
+    results = [episode for chunk in results_by_chunk for episode in chunk]
+    results.sort(key=lambda r: r.seed)
     return results
 
 
@@ -1022,6 +1100,13 @@ def main() -> int:
         help="Optional override for agent count (default: read from checkpoint or config)",
     )
     parser.add_argument("--num-seeds", type=int, default=50, help="Number of seeds to evaluate")
+    default_workers = os.cpu_count() or 1
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=default_workers,
+        help="Number of parallel workers for evaluation (default: CPU count)",
+    )
     parser.add_argument(
         "--seed-start",
         type=int,
@@ -1037,6 +1122,8 @@ def main() -> int:
 
     if args.num_seeds < 1:
         raise ValueError("--num-seeds must be >= 1")
+    if args.num_workers < 1:
+        raise ValueError("--num-workers must be >= 1")
     if args.seed_start < TRAINING_EVAL_SEED_COUNT:
         raise ValueError(
             "Seed range overlaps training evaluation seeds (0-10). "
@@ -1092,6 +1179,8 @@ def main() -> int:
         _log("Policy tester (single policy)")
         _log(f"Config: {config_path}")
         _log(f"Seeds: {_format_seed_range(seeds)} ({len(seeds)})")
+        if args.num_workers > 1:
+            _log(f"Workers: {args.num_workers}")
         _log("Evaluation: raw absolute reward; comm/termination from config.")
         _log("Policies:")
         for spec in policy_specs:
@@ -1109,6 +1198,7 @@ def main() -> int:
                 n_agents=resolved_n_agents,
                 seeds=seeds,
                 termination_override=termination_override,
+                num_workers=int(args.num_workers),
             )
             for result in results:
                 per_seed_rows.append(
@@ -1280,6 +1370,8 @@ def main() -> int:
     _log(f"Models: {total_models}")
     _log(f"Checkpoints: {total_checkpoints}")
     _log(f"Seeds: {_format_seed_range(seeds)} ({len(seeds)})")
+    if args.num_workers > 1:
+        _log(f"Workers: {args.num_workers}")
     _log("Evaluation: raw absolute reward; comm/termination from config.")
 
     for model_idx, (model_name, specs) in enumerate(model_specs_by_run.items(), start=1):
@@ -1296,6 +1388,7 @@ def main() -> int:
                 n_agents=resolved_n_agents,
                 seeds=seeds,
                 termination_override=termination_override,
+                num_workers=int(args.num_workers),
             )
             run_dir = models_root / model_name / "policy_tests" / f"{checkpoint_name}_eval"
             summary_row = _write_policy_results(run_dir, spec, results)
@@ -1339,6 +1432,7 @@ def main() -> int:
             n_agents=resolved_n_agents,
             seeds=seeds,
             termination_override=termination_override,
+            num_workers=int(args.num_workers),
         )
         run_dir = models_root / "heuristics" / f"{heuristic_name}_eval"
         summary_row = _write_policy_results(run_dir, spec, results)
@@ -1365,6 +1459,7 @@ def main() -> int:
         n_agents=resolved_n_agents,
         seeds=seeds,
         termination_override=termination_override,
+        num_workers=int(args.num_workers),
     )
     perfect_comm_dir = perfect_comm_root / "policy_tests" / "always_send_eval"
     perfect_comm_summary = _write_policy_results(perfect_comm_dir, perfect_comm_spec, perfect_comm_results)
