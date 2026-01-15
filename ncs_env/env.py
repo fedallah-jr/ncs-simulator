@@ -173,10 +173,6 @@ class NCS_Env(gym.Env):
                 for (A_i, B_i) in agent_matrices
             ]
 
-        # For single-agent compatibility, store first agent's gain
-        # (For finite-horizon, this will be the list of gains; for infinite-horizon, a single matrix)
-        self.K = self.K_list[0]
-
         base_reward_cfg = self.config.get("reward", {})
         reward_cfg = self._merge_config_override(base_reward_cfg, self.reward_override)
         self.reward_normalization_gamma = float(reward_cfg.get("normalization_gamma", 0.99))

@@ -2,12 +2,9 @@
 Policy Visualization Tool for Networked Control Systems
 
 This tool visualizes the state evolution of policies trained or defined in the NCS simulator.
-It supports both learned policies (Stable-Baselines3, OpenAI-ES) and heuristic policies.
+It supports learned policies (OpenAI-ES, MARL torch) and heuristic policies.
 
 Usage:
-    # Visualize a trained PPO policy
-    python -m tools.visualize_policy --config configs/perfect_comm.json --policy path/to/model.zip --policy-type sb3
-
     # Visualize an ES policy
     python -m tools.visualize_policy --config configs/perfect_comm.json --policy path/to/model.npz --policy-type es
 
@@ -25,10 +22,10 @@ Usage:
         --generate-video --per-agent-videos
 
     # Compare multiple policies
-    python -m tools.visualize_policy --config configs/perfect_comm.json \
-        --policies path/to/ppo.zip always_send send_every_5 \
-        --policy-types sb3 heuristic heuristic \
-        --labels "PPO" "Always Send" "Send Every 5"
+    python -m tools.visualize_policy --config configs/marl_mixed_plants.json \
+        --policies path/to/latest_model.pt always_send send_every_5 \
+        --policy-types marl_torch heuristic heuristic \
+        --labels "MARL" "Always Send" "Send Every 5"
 """
 
 from __future__ import annotations
@@ -36,7 +33,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Dict, Any
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
@@ -54,7 +51,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from ncs_env.env import NCS_Env
 from ncs_env.config import load_config
-from utils.wrapper import SingleAgentWrapper
 from tools.heuristic_policies import get_heuristic_policy, HEURISTIC_POLICIES
 
 
@@ -115,8 +111,6 @@ def _read_es_n_agents(model_path: Path) -> Optional[int]:
 
 def _infer_policy_n_agents(policy_path: str, policy_type: str) -> Optional[int]:
     policy_type_norm = policy_type.lower()
-    if policy_type_norm == "sb3":
-        return 1
     if policy_type_norm in {"es", "openai_es"}:
         return _read_es_n_agents(Path(policy_path))
     if policy_type_norm == "marl_torch":
@@ -154,59 +148,19 @@ def _resolve_run_n_agents(
     config_n_agents = config.get("system", {}).get("n_agents")
     if config_n_agents is not None:
         return int(config_n_agents)
-    return 1
+    raise ValueError("n_agents could not be resolved; set system.n_agents or pass --n-agents")
 
 
-def load_sb3_policy(model_path: str, env: Any):
-    """
-    Load a Stable-Baselines3 policy.
-
-    Args:
-        model_path: Path to the saved model (.zip file)
-        env: Environment instance
-
-    Returns:
-        Loaded model
-
-    Raises:
-        ImportError: If stable-baselines3 is not installed
-        FileNotFoundError: If model file doesn't exist
-    """
-    model_path_p = Path(model_path)
-    if not model_path_p.exists():
-        raise FileNotFoundError(f"Model file not found: {model_path_p}")
-
-    try:
-        # Try to import stable-baselines3
-        from stable_baselines3 import PPO, DQN, A2C, SAC, TD3
-    except ImportError:
-        raise ImportError(
-            "stable-baselines3 is required to load trained policies. "
-            "Install with: pip install stable-baselines3"
-        )
-
-    # Try to load with different algorithms
-    for algorithm in [PPO, DQN, A2C, SAC, TD3]:
-        try:
-            model = algorithm.load(str(model_path_p), env=env)
-            print(f"✓ Loaded {algorithm.__name__} model from {model_path_p}")
-            return model
-        except Exception:
-            continue
-
-    raise ValueError(f"Could not load model from {model_path} with any SB3 algorithm")
-
-
-def load_es_policy(model_path: str, env: Any):
+def load_es_policy(model_path: str, env: NCS_Env):
     """
     Load an OpenAI-ES policy (JAX/Flax).
 
     Args:
         model_path: Path to the saved model (.npz file)
-        env: Environment instance
+        env: Multi-agent environment instance
 
     Returns:
-        Policy object with predict() method
+        Policy object with act() method
     """
     model_path_p = Path(model_path)
     if not model_path_p.exists():
@@ -245,19 +199,18 @@ def load_es_policy(model_path: str, env: Any):
     except Exception as e:
         raise ValueError(f"Could not load numpy data from {model_path_p}: {e}")
 
-    # Reconstruct model structure to get reshaper
-    # env is a SingleAgentWrapper, so env.action_space is Discrete(2)
-    if hasattr(env, "action_space") and hasattr(env.action_space, "n"):
-        action_dim = env.action_space.n
+    if hasattr(env, "action_space") and hasattr(env.action_space, "spaces"):
+        action_dim = int(env.action_space.spaces["agent_0"].n)
     else:
-        # Fallback for unwrapped envs if necessary
-        action_dim = 2 
+        raise ValueError("Environment must expose per-agent action spaces.")
 
-    if hasattr(env, "observation_space") and hasattr(env.observation_space, "shape"):
-        obs_dim = env.observation_space.shape[0]
+    if hasattr(env, "observation_space") and hasattr(env.observation_space, "spaces"):
+        obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
     else:
-        raise ValueError("Environment must have a valid observation space.")
-    env_n_agents = int(getattr(env, "n_agents", getattr(env, "_n_agents", 1)))
+        raise ValueError("Environment must expose per-agent observation spaces.")
+    env_n_agents = int(getattr(env, "n_agents", 0))
+    if env_n_agents < 1:
+        raise ValueError("Environment must define n_agents for ES policies.")
     n_agents = int(saved_n_agents) if saved_n_agents is not None else env_n_agents
 
     if saved_n_agents is not None and env_n_agents != n_agents:
@@ -277,27 +230,29 @@ def load_es_policy(model_path: str, env: Any):
     _, unravel_fn = flatten_util.ravel_pytree(dummy_params)
     params = unravel_fn(flat_params)
 
-    class ESPolicyWrapper:
+    class ESMultiAgentPolicy:
         def __init__(self, model, params, n_agents: int, use_agent_id: bool):
             self.model = model
             self.params = params
             self.n_agents = int(n_agents)
             self.use_agent_id = bool(use_agent_id)
 
-        def predict(self, observation, deterministic=True):
-            # Observation is (obs_dim,) numpy array
-            # Add batch dim and convert to JAX array
-            obs = np.asarray(observation, dtype=np.float32)
-            if self.use_agent_id:
-                onehot = np.zeros(self.n_agents, dtype=obs.dtype)
-                onehot[0] = 1.0
-                obs = np.concatenate([obs, onehot], axis=0)
-            obs = jnp.array(obs[np.newaxis, :])
-            logits = self.model.apply(self.params, obs)
-            action = jnp.argmax(logits).item()
-            return action, None
+        def reset(self) -> None:
+            return None
 
-    return ESPolicyWrapper(model, params, n_agents=n_agents, use_agent_id=use_agent_id)
+        def act(self, obs_dict: Dict[str, np.ndarray]) -> Dict[str, int]:
+            obs_batch = np.stack(
+                [np.asarray(obs_dict[f"agent_{i}"], dtype=np.float32) for i in range(self.n_agents)],
+                axis=0,
+            )
+            if self.use_agent_id:
+                agent_ids = np.eye(self.n_agents, dtype=obs_batch.dtype)
+                obs_batch = np.concatenate([obs_batch, agent_ids], axis=1)
+            logits = self.model.apply(self.params, jnp.array(obs_batch))
+            actions = np.argmax(np.asarray(logits), axis=1)
+            return {f"agent_{i}": int(actions[i]) for i in range(self.n_agents)}
+
+    return ESMultiAgentPolicy(model, params, n_agents=n_agents, use_agent_id=use_agent_id)
 
 
 def load_marl_torch_multi_agent_policy(model_path: str, env: NCS_Env) -> MARLTorchMultiAgentPolicy:
@@ -320,68 +275,6 @@ def load_marl_torch_multi_agent_policy(model_path: str, env: NCS_Env) -> MARLTor
     return MARLTorchMultiAgentPolicy(agent_or_agents, meta, device=torch.device("cpu"))
 
 
-class MARLTorchSingleAgentPolicy:
-    def __init__(self, agent_or_agents: Any, metadata: Any, agent_index: int) -> None:
-        self.agent_or_agents = agent_or_agents
-        self.metadata = metadata
-        self.agent_index = int(agent_index)
-        if self.agent_index < 0 or self.agent_index >= int(self.metadata.n_agents):
-            raise ValueError("marl_agent_index must be within [0, n_agents)")
-
-        import torch
-        from utils.marl.networks import DuelingMLPAgent, MLPAgent
-
-        self.device = torch.device("cpu")
-        if isinstance(self.agent_or_agents, (MLPAgent, DuelingMLPAgent)):
-            self.agent_or_agents.to(self.device)
-        else:
-            for net in self.agent_or_agents:
-                net.to(self.device)
-
-    def predict(self, observation: np.ndarray, deterministic: bool = True) -> Tuple[int, None]:
-        import torch
-        from utils.marl.networks import DuelingMLPAgent, MLPAgent, append_agent_id
-
-        obs = np.asarray(observation, dtype=np.float32)
-        if getattr(self.metadata, "obs_normalizer", None) is not None:
-            obs = self.metadata.obs_normalizer.normalize(obs, update=False)
-        obs_t = torch.as_tensor(obs, device=self.device, dtype=torch.float32).unsqueeze(0)
-        full_obs = torch.zeros(
-            (1, int(self.metadata.n_agents), obs_t.shape[-1]),
-            device=self.device,
-            dtype=torch.float32,
-        )
-        full_obs[:, self.agent_index, :] = obs_t
-        if bool(self.metadata.use_agent_id):
-            full_obs = append_agent_id(full_obs, int(self.metadata.n_agents))
-
-        if isinstance(self.agent_or_agents, (MLPAgent, DuelingMLPAgent)):
-            q = self.agent_or_agents(full_obs.view(int(self.metadata.n_agents), -1))
-            q_agent = q[self.agent_index]
-        else:
-            if len(self.agent_or_agents) != int(self.metadata.n_agents):
-                raise ValueError("Independent agents sequence length must equal n_agents")
-            q_agent = self.agent_or_agents[self.agent_index](full_obs[:, self.agent_index, :]).squeeze(0)
-        action = int(torch.argmax(q_agent).item())
-        return action, None
-
-
-def load_marl_torch_policy(model_path: str, env: Any, marl_agent_index: int = 0) -> MARLTorchSingleAgentPolicy:
-    from utils.marl.torch_policy import load_marl_torch_agents_from_checkpoint
-
-    agent_or_agents, meta = load_marl_torch_agents_from_checkpoint(Path(model_path))
-    env_obs_dim = None
-    if hasattr(env, "observation_space"):
-        space = env.observation_space
-        if hasattr(space, "spaces") and "agent_0" in space.spaces:
-            env_obs_dim = int(space.spaces["agent_0"].shape[0])
-        elif hasattr(space, "shape") and space.shape:
-            env_obs_dim = int(space.shape[0])
-    if env_obs_dim is not None and env_obs_dim != meta.obs_dim:
-        raise ValueError(f"Env obs_dim={env_obs_dim} does not match checkpoint obs_dim={meta.obs_dim}")
-    return MARLTorchSingleAgentPolicy(agent_or_agents, meta, agent_index=marl_agent_index)
-
-
 def load_multi_agent_policy(
     policy_path: str,
     policy_type: str,
@@ -393,6 +286,8 @@ def load_multi_agent_policy(
 ):
     if policy_type == "marl_torch":
         return load_marl_torch_multi_agent_policy(policy_path, env)
+    if policy_type in {"es", "openai_es"}:
+        return load_es_policy(policy_path, env)
     if policy_type == "heuristic":
         return MultiAgentHeuristicPolicy(
             policy_path,
@@ -400,152 +295,9 @@ def load_multi_agent_policy(
             seed=seed,
             deterministic=deterministic,
         )
-    raise ValueError("Multi-agent visualization supports only 'marl_torch' and 'heuristic' policies.")
-
-
-def load_policy(
-    policy_path: str,
-    policy_type: str,
-    env: Any,
-    n_agents: int = 1,
-    seed: Optional[int] = None,
-):
-    """
-    Load a policy (SB3, ES, or heuristic).
-
-    Args:
-        policy_path: Path to model file or policy name
-        policy_type: 'sb3', 'es', or 'heuristic'
-        env: Environment instance
-        n_agents: Number of agents (for heuristic policies)
-        seed: Random seed
-
-    Returns:
-        Policy object with predict() method
-    """
-    if policy_type.lower() == 'sb3':
-        return load_sb3_policy(policy_path, env)
-    elif policy_type.lower() == 'es' or policy_type.lower() == 'openai_es':
-        return load_es_policy(policy_path, env)
-    elif policy_type.lower() == 'heuristic':
-        return get_heuristic_policy(policy_path, n_agents=n_agents, seed=seed)
-    else:
-        raise ValueError(f"Unknown policy type: {policy_type}. Use 'sb3', 'es', or 'heuristic'")
-
-
-def run_episode(
-    env: Any,
-    policy: Any,
-    episode_length: int,
-    deterministic: bool = True,
-    *,
-    network_trace: bool = False,
-    trace_interval: int = 50,
-    trace_start: int = 1,
-) -> Dict[str, Any]:
-    """
-    Run a single episode and collect trajectory data.
-
-    Args:
-        env: Environment instance (single-agent wrapped)
-        policy: Policy with predict() method
-        episode_length: Number of timesteps to run
-        deterministic: Whether to use deterministic policy
-
-    Returns:
-        Dictionary containing:
-            - states: Array of shape (episode_length+1, state_dim) with plant states
-            - estimates: Array of shape (episode_length+1, state_dim) with controller estimates
-            - actions: Array of shape (episode_length,) with actions taken
-            - rewards: Array of shape (episode_length,) with rewards received
-            - controls: Array of shape (episode_length, control_dim) with control inputs
-            - state_errors: Array of shape (episode_length+1,) with state error magnitudes
-    """
-    # Reset policy if it has a reset method
-    if hasattr(policy, 'reset'):
-        policy.reset()
-
-    # Reset environment
-    obs, info = env.reset()
-
-    # Get the underlying NCS_Env (SingleAgentWrapper stores it in env.env)
-    ncs_env = env.env
-
-    # Get state dimension from environment
-    state_dim = ncs_env.state_dim
-    network_tick_traces: List[Dict[str, Any]] = []
-
-    _configure_network_trace_env(
-        ncs_env,
-        enabled=network_trace,
-        trace_interval=trace_interval,
-        trace_start=trace_start,
+    raise ValueError(
+        "Multi-agent visualization supports only 'marl_torch', 'es', and 'heuristic' policies."
     )
-
-    # Initialize data storage
-    states = np.zeros((episode_length + 1, state_dim))
-    estimates = np.zeros((episode_length + 1, state_dim))
-    actions = np.zeros(episode_length)
-    rewards = np.zeros(episode_length)
-    controls = np.zeros((episode_length, ncs_env.control_dim))
-    state_errors = np.zeros(episode_length + 1)
-
-    # Store initial state
-    states[0] = ncs_env.plants[0].get_state()
-    estimates[0] = ncs_env.controllers[0].x_hat
-    state_errors[0] = np.linalg.norm(states[0])
-
-    # Run episode
-    for t in range(episode_length):
-        # Get action from policy
-        action, _ = policy.predict(obs, deterministic=deterministic)
-
-        # Step environment
-        obs, reward, terminated, truncated, info = env.step(action)
-
-        # Store data
-        states[t + 1] = ncs_env.plants[0].get_state()
-        estimates[t + 1] = ncs_env.controllers[0].x_hat
-        actions[t] = action
-        rewards[t] = reward
-        controller = ncs_env.controllers[0]
-        if hasattr(controller, "last_u"):
-            controls[t] = controller.last_u
-        elif hasattr(controller, "last_control"):
-            controls[t] = controller.last_control
-        else:
-            controls[t] = 0.0
-        state_errors[t + 1] = np.linalg.norm(states[t + 1])
-        if network_trace:
-            tick_trace = info.get("network_tick_trace")
-            if isinstance(tick_trace, dict):
-                network_tick_traces.append(tick_trace)
-
-        # Break if episode ended early (shouldn't happen normally)
-        if terminated or truncated:
-            # Episode ended before completing all timesteps
-            # t is 0-indexed, so if t < episode_length-1, it ended early
-            if t < episode_length - 1:
-                print(f"Warning: Episode ended early at timestep {t} (expected {episode_length})")
-            # Trim arrays
-            states = states[:t + 2]
-            estimates = estimates[:t + 2]
-            actions = actions[:t + 1]
-            rewards = rewards[:t + 1]
-            controls = controls[:t + 1]
-            state_errors = state_errors[:t + 2]
-            break
-
-    return {
-        'states': states,
-        'estimates': estimates,
-        'actions': actions,
-        'rewards': rewards,
-        'controls': controls,
-        'state_errors': state_errors,
-        'timesteps': np.arange(len(states)),
-        'network_tick_traces': network_tick_traces,
-    }
 
 
 def _sanitize_filename(value: str) -> str:
@@ -931,352 +683,6 @@ def plot_marl_comparison_summary(
     print(f"✓ Saved MARL summary plot to {save_path}")
 
 
-def plot_state_evolution_2d(
-    trajectories: List[Dict[str, np.ndarray]],
-    labels: List[str],
-    save_path: str,
-    title: str = "State Evolution (2D)",
-    show_estimates: bool = True,
-):
-    """
-    Plot 2D state evolution for multiple policies.
-
-    Args:
-        trajectories: List of trajectory dictionaries from run_episode()
-        labels: List of labels for each trajectory
-        save_path: Path to save the plot
-        title: Plot title
-        show_estimates: Whether to show controller estimates
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-
-    # Define colors for different policies
-    colors = plt.cm.tab10(np.linspace(0, 1, len(trajectories)))
-
-    # Plot 1: State trajectory in state space
-    ax1: Axes = axes[0]
-    for i, (traj, label) in enumerate(zip(trajectories, labels)):
-        states = traj['states']
-        # Plot state trajectory
-        ax1.plot(states[:, 0], states[:, 1], '-', color=colors[i], alpha=0.7,
-                 linewidth=2, label=f"{label} (actual)")
-        ax1.plot(states[0, 0], states[0, 1], 'o', color=colors[i],
-                 markersize=10, label=f"{label} (start)")
-        ax1.plot(states[-1, 0], states[-1, 1], 's', color=colors[i],
-                 markersize=10, label=f"{label} (end)")
-
-        # Plot estimates if requested
-        if show_estimates:
-            estimates = traj['estimates']
-            ax1.plot(estimates[:, 0], estimates[:, 1], '--', color=colors[i],
-                     alpha=0.5, linewidth=1.5, label=f"{label} (estimate)")
-
-    ax1.plot(0, 0, 'r*', markersize=15, label='Target (origin)')
-    ax1.set_xlabel('State Dimension 1', fontsize=12)
-    ax1.set_ylabel('State Dimension 2', fontsize=12)
-    ax1.set_title('State Space Trajectory', fontsize=14, fontweight='bold')
-    ax1.grid(True, alpha=0.3)
-    ax1.legend(fontsize=8, loc='best')
-    ax1.axis('equal')
-
-    # Plot 2: State magnitude over time
-    ax2: Axes = axes[1]
-    for i, (traj, label) in enumerate(zip(trajectories, labels)):
-        state_errors = traj['state_errors']
-        timesteps = traj['timesteps']
-        ax2.plot(timesteps, state_errors, '-', color=colors[i],
-                 linewidth=2, label=label)
-
-    ax2.set_xlabel('Timestep', fontsize=12)
-    ax2.set_ylabel('State Magnitude ||x||', fontsize=12)
-    ax2.set_title('State Magnitude Evolution', fontsize=14, fontweight='bold')
-    ax2.grid(True, alpha=0.3)
-    ax2.legend(fontsize=10, loc='best')
-
-    fig.suptitle(title, fontsize=16, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"✓ Saved state evolution plot to {save_path}")
-    plt.close()
-
-
-def plot_detailed_analysis(
-    trajectories: List[Dict[str, np.ndarray]],
-    labels: List[str],
-    save_path: str,
-    title: str = "Detailed Policy Analysis",
-):
-    """
-    Plot detailed analysis including actions, rewards, and controls.
-
-    Args:
-        trajectories: List of trajectory dictionaries from run_episode()
-        labels: List of labels for each trajectory
-        save_path: Path to save the plot
-        title: Plot title
-    """
-    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
-
-    colors = plt.cm.tab10(np.linspace(0, 1, len(trajectories)))
-
-    # Plot 1: Actions over time
-    ax1: Axes = axes[0, 0]
-    for i, (traj, label) in enumerate(zip(trajectories, labels)):
-        actions = traj['actions']
-        timesteps = np.arange(len(actions))
-        # Plot as step function
-        ax1.step(timesteps, actions, where='post', color=colors[i],
-                 linewidth=2, alpha=0.7, label=label)
-
-    ax1.set_xlabel('Timestep', fontsize=12)
-    ax1.set_ylabel('Action (0=No Send, 1=Send)', fontsize=12)
-    ax1.set_title('Transmission Decisions', fontsize=14, fontweight='bold')
-    ax1.set_ylim([-0.1, 1.1])
-    ax1.grid(True, alpha=0.3)
-    ax1.legend(fontsize=10, loc='best')
-
-    # Plot 2: Rewards over time
-    ax2: Axes = axes[0, 1]
-    for i, (traj, label) in enumerate(zip(trajectories, labels)):
-        rewards = traj['rewards']
-        timesteps = np.arange(len(rewards))
-        # Plot cumulative reward
-        cumulative_rewards = np.cumsum(rewards)
-        ax2.plot(timesteps, cumulative_rewards, '-', color=colors[i],
-                 linewidth=2, alpha=0.7, label=label)
-
-    ax2.set_xlabel('Timestep', fontsize=12)
-    ax2.set_ylabel('Cumulative Reward', fontsize=12)
-    ax2.set_title('Cumulative Reward', fontsize=14, fontweight='bold')
-    ax2.grid(True, alpha=0.3)
-    ax2.legend(fontsize=10, loc='best')
-
-    # Plot 3: State components over time
-    ax3: Axes = axes[1, 0]
-    for i, (traj, label) in enumerate(zip(trajectories, labels)):
-        states = traj['states']
-        timesteps = traj['timesteps']
-        # Plot each state dimension
-        ax3.plot(timesteps, states[:, 0], '-', color=colors[i],
-                 linewidth=2, alpha=0.7, label=f"{label} (dim 1)")
-        if states.shape[1] > 1:
-            ax3.plot(timesteps, states[:, 1], '--', color=colors[i],
-                     linewidth=2, alpha=0.7, label=f"{label} (dim 2)")
-
-    ax3.set_xlabel('Timestep', fontsize=12)
-    ax3.set_ylabel('State Value', fontsize=12)
-    ax3.set_title('State Components Over Time', fontsize=14, fontweight='bold')
-    ax3.grid(True, alpha=0.3)
-    ax3.legend(fontsize=8, loc='best')
-
-    # Plot 4: Transmission statistics
-    ax4: Axes = axes[1, 1]
-    tx_counts = []
-    avg_rewards = []
-    final_errors = []
-    for i, (traj, label) in enumerate(zip(trajectories, labels)):
-        tx_count = np.sum(traj['actions'])
-        avg_reward = np.mean(traj['rewards'])
-        final_error = traj['state_errors'][-1]
-
-        tx_counts.append(tx_count)
-        avg_rewards.append(avg_reward)
-        final_errors.append(final_error)
-
-    x = np.arange(len(labels))
-    width = 0.25
-
-    ax4_twin1 = ax4.twinx()
-    ax4_twin2 = ax4.twinx()
-    ax4_twin2.spines['right'].set_position(('outward', 60))
-
-    p1 = ax4.bar(x - width, tx_counts, width, label='Transmissions', color='steelblue', alpha=0.8)
-    p2 = ax4_twin1.bar(x, avg_rewards, width, label='Avg Reward', color='forestgreen', alpha=0.8)
-    p3 = ax4_twin2.bar(x + width, final_errors, width, label='Final Error', color='coral', alpha=0.8)
-
-    ax4.set_xlabel('Policy', fontsize=12)
-    ax4.set_ylabel('Transmission Count', fontsize=12, color='steelblue')
-    ax4_twin1.set_ylabel('Avg Reward', fontsize=12, color='forestgreen')
-    ax4_twin2.set_ylabel('Final State Error', fontsize=12, color='coral')
-    ax4.set_title('Policy Statistics', fontsize=14, fontweight='bold')
-    ax4.set_xticks(x)
-    ax4.set_xticklabels(labels, rotation=15, ha='right')
-    ax4.tick_params(axis='y', labelcolor='steelblue')
-    ax4_twin1.tick_params(axis='y', labelcolor='forestgreen')
-    ax4_twin2.tick_params(axis='y', labelcolor='coral')
-
-    # Combine legends
-    lines1, labels1 = ax4.get_legend_handles_labels()
-    lines2, labels2 = ax4_twin1.get_legend_handles_labels()
-    lines3, labels3 = ax4_twin2.get_legend_handles_labels()
-    ax4.legend(lines1 + lines2 + lines3, labels1 + labels2 + labels3, fontsize=10, loc='upper left')
-
-    fig.suptitle(title, fontsize=16, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"✓ Saved detailed analysis plot to {save_path}")
-    plt.close()
-
-
-def create_state_evolution_animation(
-    trajectories: List[Dict[str, np.ndarray]],
-    labels: List[str],
-    save_path: str,
-    title: str = "State Evolution Animation",
-    fps: int = 30,
-    speedup: int = 1,
-    show_estimates: bool = True,
-):
-    """
-    Create an animated visualization of 2D state evolution.
-
-    Args:
-        trajectories: List of trajectory dictories from run_episode()
-        labels: List of labels for each trajectory
-        save_path: Path to save the animation (MP4)
-        title: Animation title
-        fps: Frames per second for the video
-        speedup: Speed multiplier (e.g., 2 = 2x speed)
-        show_estimates: Whether to show controller estimates
-    """
-    print(f"  Creating animation...")
-
-    # Define colors for different policies
-    colors = plt.cm.tab10(np.linspace(0, 1, len(trajectories)))
-
-    # Determine the longest trajectory
-    max_len = max(len(traj['states']) for traj in trajectories)
-
-    # Set up the figure - single panel for state space
-    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
-
-    # Compute global axis limits for state space
-    all_states = np.vstack([traj['states'] for traj in trajectories])
-    if show_estimates:
-        all_estimates = np.vstack([traj['estimates'] for traj in trajectories])
-        all_points = np.vstack([all_states, all_estimates])
-    else:
-        all_points = all_states
-
-    # Compute limits with appropriate margin
-    x_min, x_max = all_points[:, 0].min(), all_points[:, 0].max()
-    y_min, y_max = all_points[:, 1].min(), all_points[:, 1].max()
-
-    # Calculate ranges
-    x_range = x_max - x_min
-    y_range = y_max - y_min
-
-    # Use larger margin if range is very small
-    if x_range < 0.1:
-        x_range = 0.1
-    if y_range < 0.1:
-        y_range = 0.1
-
-    margin = 0.15
-    x_min -= margin * x_range
-    x_max += margin * x_range
-    y_min -= margin * y_range
-    y_max += margin * y_range
-
-    # Make axes equal by using the larger range
-    max_range = max(x_range, y_range) * (1 + 2 * margin)
-    x_center = (x_min + x_max) / 2
-    y_center = (y_min + y_max) / 2
-
-    x_min = x_center - max_range / 2
-    x_max = x_center + max_range / 2
-    y_min = y_center - max_range / 2
-    y_max = y_center + max_range / 2
-
-    # Initialize plot elements
-    state_lines = []
-    estimate_lines = []
-    state_points = []
-    estimate_points = []
-
-    for i, (traj, label) in enumerate(zip(trajectories, labels)):
-        # State space trajectory
-        line, = ax.plot([], [], '-', color=colors[i], alpha=0.8, linewidth=2.5, label=f"{label}")
-        state_lines.append(line)
-        point, = ax.plot([], [], 'o', color=colors[i], markersize=14, zorder=5)
-        state_points.append(point)
-
-        if show_estimates:
-            est_line, = ax.plot([], [], '--', color=colors[i], alpha=0.5, linewidth=2, label=f"{label} (est.)")
-            estimate_lines.append(est_line)
-            est_point, = ax.plot([], [], 's', color=colors[i], markersize=10, alpha=0.7, zorder=5)
-            estimate_points.append(est_point)
-
-    # Target point
-    ax.plot(0, 0, 'r*', markersize=25, label='Target', zorder=10)
-
-    # Configure axes
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
-    ax.set_xlabel('State Dimension 1', fontsize=16, fontweight='bold')
-    ax.set_ylabel('State Dimension 2', fontsize=16, fontweight='bold')
-    ax.set_title(title, fontsize=20, fontweight='bold', pad=20)
-    ax.grid(True, alpha=0.3, linewidth=1.5)
-    ax.legend(fontsize=14, loc='best', framealpha=0.9)
-    ax.set_aspect('equal', adjustable='box')
-    ax.tick_params(labelsize=12)
-
-    # Time text
-    time_text = ax.text(0.02, 0.98, '', transform=ax.transAxes,
-                        fontsize=16, verticalalignment='top', fontweight='bold',
-                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.9))
-
-    def init():
-        """Initialize animation"""
-        for line in state_lines + estimate_lines:
-            line.set_data([], [])
-        for point in state_points + estimate_points:
-            point.set_data([], [])
-        time_text.set_text('')
-        return state_lines + estimate_lines + state_points + estimate_points + [time_text]
-
-    def animate(frame):
-        """Update animation for given frame"""
-        t = frame * speedup
-        time_text.set_text(f'Timestep: {t}')
-
-        for i, traj in enumerate(trajectories):
-            # Handle case where trajectory is shorter than max_len
-            idx = min(t, len(traj['states']) - 1)
-
-            # Update state trajectory
-            state_lines[i].set_data(traj['states'][:idx+1, 0], traj['states'][:idx+1, 1])
-            state_points[i].set_data([traj['states'][idx, 0]], [traj['states'][idx, 1]])
-
-            # Update estimates if shown
-            if show_estimates and i < len(estimate_lines):
-                estimate_lines[i].set_data(traj['estimates'][:idx+1, 0], traj['estimates'][:idx+1, 1])
-                estimate_points[i].set_data([traj['estimates'][idx, 0]], [traj['estimates'][idx, 1]])
-
-        artists = state_lines + state_points + [time_text]
-        if show_estimates:
-            artists += estimate_lines + estimate_points
-        return artists
-
-    # Create animation
-    num_frames = (max_len - 1) // speedup + 1
-    anim = FuncAnimation(fig, animate, init_func=init, frames=num_frames,
-                        interval=1000/fps, blit=True, repeat=True)
-
-    # Save animation as MP4
-    try:
-        writer = FFMpegWriter(fps=fps, bitrate=2400, codec='libx264')
-        anim.save(save_path, writer=writer)
-        print(f"  ✓ Saved animation to {save_path}")
-    except Exception as e:
-        print(f"  ✗ Error saving animation: {e}")
-        print(f"  Make sure FFmpeg is installed:")
-        print(f"    - Linux: sudo apt-get install ffmpeg")
-        print(f"    - Mac: brew install ffmpeg")
-    finally:
-        plt.close(fig)
-
-
 def create_marl_state_evolution_animation(
     traj: Dict[str, np.ndarray],
     label: str,
@@ -1515,13 +921,13 @@ def main():
     parser.add_argument(
         '--policy',
         type=str,
-        help='Path to policy file (SB3/ES) or policy name (heuristic)'
+        help='Path to policy file (ES/MARL torch) or policy name (heuristic)'
     )
     parser.add_argument(
         '--policy-type',
         type=str,
-        choices=['sb3', 'es', 'heuristic', 'marl_torch'],
-        help='Type of policy: sb3, es, heuristic, or marl_torch'
+        choices=['es', 'openai_es', 'heuristic', 'marl_torch'],
+        help='Type of policy: es, openai_es, heuristic, or marl_torch'
     )
 
     # Multi-policy comparison mode
@@ -1535,7 +941,7 @@ def main():
         '--policy-types',
         type=str,
         nargs='+',
-        choices=['sb3', 'es', 'heuristic', 'marl_torch'],
+        choices=['es', 'openai_es', 'heuristic', 'marl_torch'],
         help='List of policy types corresponding to --policies'
     )
     parser.add_argument(
@@ -1697,22 +1103,21 @@ def main():
         print("✓ Using evaluation reward/termination overrides")
     print()
 
-    resolved_n_agents = _resolve_run_n_agents(
-        list(policies_to_load),
-        list(policy_types_norm),
-        config=config,
-        explicit_n_agents=args.n_agents,
-    )
-    multi_agent_types = {"marl_torch", "heuristic"}
-    use_multi_agent = all(policy_type in multi_agent_types for policy_type in policy_types_norm) and (
-        any(policy_type == "marl_torch" for policy_type in policy_types_norm) or resolved_n_agents > 1
-    )
-    if use_multi_agent and resolved_n_agents < 1:
-        parser.error("Resolved n_agents must be >= 1 for multi-agent policies")
-    if use_multi_agent and not all(policy_type in multi_agent_types for policy_type in policy_types_norm):
-        parser.error("Multi-agent visualization supports only marl_torch and heuristic policies in one run")
-    if args.per_agent_videos and not use_multi_agent:
-        parser.error("--per-agent-videos is only supported for multi-agent policies")
+    allowed_policy_types = {"marl_torch", "heuristic", "es", "openai_es"}
+    if not all(policy_type in allowed_policy_types for policy_type in policy_types_norm):
+        parser.error("Supported policy types: marl_torch, es, openai_es, heuristic")
+
+    try:
+        resolved_n_agents = _resolve_run_n_agents(
+            list(policies_to_load),
+            list(policy_types_norm),
+            config=config,
+            explicit_n_agents=args.n_agents,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    if resolved_n_agents < 1:
+        parser.error("Resolved n_agents must be >= 1")
 
     # Create output directory
     output_dir = Path(args.output_dir)
@@ -1740,16 +1145,10 @@ def main():
     temp_env = make_env()
     state_dim = int(temp_env.state_dim)
     temp_env.close()
-    if use_multi_agent:
-        print(
-            f"✓ Environment created (multi-agent, n_agents={resolved_n_agents}, "
-            f"state_dim={state_dim}, episode_length={args.episode_length})\n"
-        )
-    else:
-        print(
-            f"✓ Environment created (n_agents={resolved_n_agents}, "
-            f"state_dim={state_dim}, episode_length={args.episode_length})\n"
-        )
+    print(
+        f"✓ Environment created (multi-agent, n_agents={resolved_n_agents}, "
+        f"state_dim={state_dim}, episode_length={args.episode_length})\n"
+    )
 
     # Load policies and run episodes
     trajectories = []
@@ -1760,64 +1159,39 @@ def main():
         print(f"  Type: {policy_type}")
         print(f"  Path/Name: {policy_path}")
 
-        env: Any = make_env() if use_multi_agent else SingleAgentWrapper(make_env)
-        if use_multi_agent:
-            try:
-                policy = load_multi_agent_policy(
-                    policy_path,
-                    policy_type.lower(),
-                    env,
-                    n_agents=resolved_n_agents,
-                    seed=args.seed,
-                    deterministic=args.deterministic,
-                )
-            except Exception as e:
-                env.close()
-                print(f"  ✗ Error loading policy: {e}\n")
-                continue
-            print(f"  Running multi-agent episode...")
-            traj = run_episode_multi_agent(
+        env: Any = make_env()
+        try:
+            policy = load_multi_agent_policy(
+                policy_path,
+                policy_type.lower(),
                 env,
-                policy,
-                args.episode_length,
+                n_agents=resolved_n_agents,
                 seed=args.seed,
-                network_trace=args.network_trace,
-                trace_interval=args.trace_interval,
-                trace_start=args.trace_start,
-            )
-            env.close()
-        else:
-            try:
-                policy = load_policy(
-                    policy_path,
-                    policy_type,
-                    env,
-                    n_agents=resolved_n_agents,
-                    seed=args.seed,
-                )
-            except Exception as e:
-                env.close()
-                print(f"  ✗ Error loading policy: {e}\n")
-                continue
-            print(f"  Running episode...")
-            traj = run_episode(
-                env,
-                policy,
-                args.episode_length,
                 deterministic=args.deterministic,
-                network_trace=args.network_trace,
-                trace_interval=args.trace_interval,
-                trace_start=args.trace_start,
             )
+        except Exception as e:
             env.close()
+            print(f"  ✗ Error loading policy: {e}\n")
+            continue
+        print("  Running multi-agent episode...")
+        traj = run_episode_multi_agent(
+            env,
+            policy,
+            args.episode_length,
+            seed=args.seed,
+            network_trace=args.network_trace,
+            trace_interval=args.trace_interval,
+            trace_start=args.trace_start,
+        )
+        env.close()
 
         # Print summary statistics
         total_reward = float(np.sum(traj["rewards"]))
         tx_count = float(np.sum(traj["actions"]))
-        final_error = float(np.mean(traj["state_errors"][-1])) if use_multi_agent else float(traj["state_errors"][-1])
+        final_error = float(np.mean(traj["state_errors"][-1]))
         print(f"  ✓ Episode complete")
         print(f"    - Total reward: {total_reward:.2f}")
-        denom = args.episode_length * (resolved_n_agents if use_multi_agent else 1)
+        denom = args.episode_length * resolved_n_agents
         print(f"    - Transmissions: {int(tx_count)}/{denom}")
         print(f"    - Final state error: {final_error:.4f}\n")
 
@@ -1845,86 +1219,56 @@ def main():
     # Generate plots
     print(f"Generating visualizations...\n")
 
-    if use_multi_agent:
-        summary_plot_path = output_dir / f"{output_prefix}_marl_summary.png"
-        plot_marl_comparison_summary(
-            trajectories,
-            policy_labels[:len(trajectories)],
-            summary_plot_path,
-            title="MARL Summary (Mean state error + mean action rate)",
-        )
+    summary_plot_path = output_dir / f"{output_prefix}_marl_summary.png"
+    plot_marl_comparison_summary(
+        trajectories,
+        policy_labels[:len(trajectories)],
+        summary_plot_path,
+        title="MARL Summary (Mean state error + mean action rate)",
+    )
 
-        for idx, (label, traj) in enumerate(zip(policy_labels[:len(trajectories)], trajectories)):
-            tag = f"p{idx+1}_{_sanitize_filename(label)}"
-            raster_path = output_dir / f"{output_prefix}_{tag}_actions.png"
-            plot_marl_action_raster(traj, label=label, save_path=raster_path)
-            if state_dim >= 2:
-                state_space_path = output_dir / f"{output_prefix}_{tag}_state_space.png"
-                plot_marl_state_space_2d(
-                    traj,
-                    label=label,
-                    save_path=state_space_path,
-                    show_estimates=args.show_estimates,
-                )
-    else:
-        plot1_path = output_dir / f"{output_prefix}_state_evolution.png"
-        plot_state_evolution_2d(
-            trajectories,
-            policy_labels[:len(trajectories)],
-            str(plot1_path),
-            title="State Evolution in 2D State Space",
-            show_estimates=args.show_estimates,
-        )
-
-        plot2_path = output_dir / f"{output_prefix}_detailed_analysis.png"
-        plot_detailed_analysis(
-            trajectories,
-            policy_labels[:len(trajectories)],
-            str(plot2_path),
-            title="Detailed Policy Analysis",
-        )
+    for idx, (label, traj) in enumerate(zip(policy_labels[:len(trajectories)], trajectories)):
+        tag = f"p{idx+1}_{_sanitize_filename(label)}"
+        raster_path = output_dir / f"{output_prefix}_{tag}_actions.png"
+        plot_marl_action_raster(traj, label=label, save_path=raster_path)
+        if state_dim >= 2:
+            state_space_path = output_dir / f"{output_prefix}_{tag}_state_space.png"
+            plot_marl_state_space_2d(
+                traj,
+                label=label,
+                save_path=state_space_path,
+                show_estimates=args.show_estimates,
+            )
 
     # Generate video animation if requested
     if args.generate_video:
         print(f"\nGenerating animation...\n")
-        if use_multi_agent:
-            for idx, (label, traj) in enumerate(zip(policy_labels[:len(trajectories)], trajectories)):
-                tag = f"p{idx+1}_{_sanitize_filename(label)}"
-                video_path = output_dir / f"{output_prefix}_{tag}_animation.mp4"
-                create_marl_state_evolution_animation(
-                    traj,
-                    label=label,
-                    save_path=video_path,
-                    title="MARL State Evolution (All Agents)",
-                    fps=args.video_fps,
-                    speedup=args.video_speedup,
-                    show_estimates=args.show_estimates,
-                )
-                if args.per_agent_videos:
-                    n_agents = int(traj["states"].shape[1])
-                    for agent_idx in range(n_agents):
-                        agent_video_path = output_dir / f"{output_prefix}_{tag}_agent_{agent_idx}.mp4"
-                        create_marl_agent_state_evolution_animation(
-                            traj,
-                            label=label,
-                            agent_index=agent_idx,
-                            save_path=agent_video_path,
-                            title="Agent State Evolution",
-                            fps=args.video_fps,
-                            speedup=args.video_speedup,
-                            show_estimates=args.show_estimates,
-                        )
-        else:
-            video_path = output_dir / f"{output_prefix}_animation.mp4"
-            create_state_evolution_animation(
-                trajectories,
-                policy_labels[:len(trajectories)],
-                str(video_path),
-                title="State Evolution Animation",
+        for idx, (label, traj) in enumerate(zip(policy_labels[:len(trajectories)], trajectories)):
+            tag = f"p{idx+1}_{_sanitize_filename(label)}"
+            video_path = output_dir / f"{output_prefix}_{tag}_animation.mp4"
+            create_marl_state_evolution_animation(
+                traj,
+                label=label,
+                save_path=video_path,
+                title="MARL State Evolution (All Agents)",
                 fps=args.video_fps,
                 speedup=args.video_speedup,
                 show_estimates=args.show_estimates,
             )
+            if args.per_agent_videos:
+                n_agents = int(traj["states"].shape[1])
+                for agent_idx in range(n_agents):
+                    agent_video_path = output_dir / f"{output_prefix}_{tag}_agent_{agent_idx}.mp4"
+                    create_marl_agent_state_evolution_animation(
+                        traj,
+                        label=label,
+                        agent_index=agent_idx,
+                        save_path=agent_video_path,
+                        title="Agent State Evolution",
+                        fps=args.video_fps,
+                        speedup=args.video_speedup,
+                        show_estimates=args.show_estimates,
+                    )
 
     # Save summary statistics to JSON
     summary_path = output_dir / f"{output_prefix}_summary.json"
@@ -1940,49 +1284,37 @@ def main():
         actions = np.asarray(traj["actions"], dtype=np.float32)
         state_errors = np.asarray(traj["state_errors"], dtype=np.float32)
 
-        if use_multi_agent:
-            network_stats = traj.get("network_stats", {})
-            tx_attempts = network_stats.get("tx_attempts", [])
-            tx_acked = network_stats.get("tx_acked", [])
-            tx_dropped = network_stats.get("tx_dropped", [])
-            tx_rewrites = network_stats.get("tx_rewrites", [])
-            tx_collisions = network_stats.get("tx_collisions", [])
-            policy_summary = {
-                "label": label,
-                "n_agents": int(state_errors.shape[1]),
-                "total_reward": float(rewards.sum()),
-                "avg_reward_per_agent_step": float(rewards.mean()),
-                "transmission_count": int(actions.sum()),
-                "transmission_rate_per_agent_step": float(actions.mean()),
-                "network_stats": {
-                    "tx_attempts": [int(x) for x in tx_attempts],
-                    "tx_acked": [int(x) for x in tx_acked],
-                    "tx_dropped": [int(x) for x in tx_dropped],
-                    "tx_rewrites": [int(x) for x in tx_rewrites],
-                    "tx_collisions": [int(x) for x in tx_collisions],
-                    "tx_attempts_total": int(np.sum(tx_attempts)) if tx_attempts else 0,
-                    "tx_acked_total": int(np.sum(tx_acked)) if tx_acked else 0,
-                    "tx_dropped_total": int(np.sum(tx_dropped)) if tx_dropped else 0,
-                    "tx_rewrites_total": int(np.sum(tx_rewrites)) if tx_rewrites else 0,
-                    "tx_collisions_total": int(np.sum(tx_collisions)) if tx_collisions else 0,
-                },
-                "initial_state_error_mean": float(state_errors[0].mean()),
-                "final_state_error_mean": float(state_errors[-1].mean()),
-                "avg_state_error_mean": float(state_errors.mean(axis=1).mean()),
-                "initial_state_error_per_agent": [float(x) for x in state_errors[0]],
-                "final_state_error_per_agent": [float(x) for x in state_errors[-1]],
-            }
-        else:
-            policy_summary = {
-                "label": label,
-                "total_reward": float(rewards.sum()),
-                "avg_reward": float(rewards.mean()),
-                "transmission_count": int(actions.sum()),
-                "transmission_rate": float(actions.mean()),
-                "initial_state_error": float(state_errors[0]),
-                "final_state_error": float(state_errors[-1]),
-                "avg_state_error": float(state_errors.mean()),
-            }
+        network_stats = traj.get("network_stats", {})
+        tx_attempts = network_stats.get("tx_attempts", [])
+        tx_acked = network_stats.get("tx_acked", [])
+        tx_dropped = network_stats.get("tx_dropped", [])
+        tx_rewrites = network_stats.get("tx_rewrites", [])
+        tx_collisions = network_stats.get("tx_collisions", [])
+        policy_summary = {
+            "label": label,
+            "n_agents": int(state_errors.shape[1]),
+            "total_reward": float(rewards.sum()),
+            "avg_reward_per_agent_step": float(rewards.mean()),
+            "transmission_count": int(actions.sum()),
+            "transmission_rate_per_agent_step": float(actions.mean()),
+            "network_stats": {
+                "tx_attempts": [int(x) for x in tx_attempts],
+                "tx_acked": [int(x) for x in tx_acked],
+                "tx_dropped": [int(x) for x in tx_dropped],
+                "tx_rewrites": [int(x) for x in tx_rewrites],
+                "tx_collisions": [int(x) for x in tx_collisions],
+                "tx_attempts_total": int(np.sum(tx_attempts)) if tx_attempts else 0,
+                "tx_acked_total": int(np.sum(tx_acked)) if tx_acked else 0,
+                "tx_dropped_total": int(np.sum(tx_dropped)) if tx_dropped else 0,
+                "tx_rewrites_total": int(np.sum(tx_rewrites)) if tx_rewrites else 0,
+                "tx_collisions_total": int(np.sum(tx_collisions)) if tx_collisions else 0,
+            },
+            "initial_state_error_mean": float(state_errors[0].mean()),
+            "final_state_error_mean": float(state_errors[-1].mean()),
+            "avg_state_error_mean": float(state_errors.mean(axis=1).mean()),
+            "initial_state_error_per_agent": [float(x) for x in state_errors[0]],
+            "final_state_error_per_agent": [float(x) for x in state_errors[-1]],
+        }
         summary['policies'].append(policy_summary)
 
     with summary_path.open("w", encoding="utf-8") as f:

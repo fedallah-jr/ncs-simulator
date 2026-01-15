@@ -3,7 +3,7 @@ Heuristic policies for networked control systems.
 
 This module provides simple baseline policies that can be used for
 comparison with learned policies. All policies follow the same interface
-as stable-baselines3 policies for easy integration with the visualization tool.
+used by the visualization tools for easy integration.
 """
 
 from __future__ import annotations

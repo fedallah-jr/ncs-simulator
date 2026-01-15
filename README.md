@@ -69,8 +69,6 @@ Adjusting these parameters lets you explore different plant dynamics, estimator 
 
 Learning-based baselines live under `algorithms/`:
 
-- PPO (single agent, SB3): `python -m algorithms.ppo_single --config configs/perfect_comm.json --total-timesteps 200000`
-- DQN (single agent, SB3): `python -m algorithms.deep_q_learning --config configs/perfect_comm.json --total-timesteps 200000`
 - OpenAI-ES (shared policy, JAX): `python -m algorithms.openai_es --config configs/perfect_comm.json --generations 1000 --popsize 128`
   - Uses `system.n_agents` from the config and appends a one-hot agent id for parameter sharing when `n_agents > 1`.
   - Enable a meta-population search over initializations with `--meta-population-size 4 --truncation-percentage 0.25 --pbt-interval 10`, which periodically copies top-performing strategies into the worst ones.
@@ -96,10 +94,9 @@ All MARL algorithms (IQL, VDN, QMIX, QPLEX, MAPPO) support observation normaliza
 CLI flags let you change environment parameters. Use `--output-root` (defaults to `outputs/`) to control where training artifacts land. Each run calls `utils.run_utils.prepare_run_directory(...)`, which creates a sequentially numbered folder for the algorithm (e.g., `iql_0`, `iql_1`, `vdn_0`, etc.). All training details are preserved in the saved config file. That directory always contains:
 
 - **Model Checkpoints:**
-  - For SB3 (PPO/DQN): `best_model.zip`, `latest_model.zip`, and `evaluations.npz` (from `EvalCallback`).
   - For OpenAI-ES: `best_model.npz` (flattened params of best individual) and `latest_model.npz`.
   - For MARL (IQL/VDN/QMIX/MAPPO): `best_model.pt` and `latest_model.pt`.
-- `training_rewards.csv`: A simple CSV table tracking performance. For SB3 this logs `[episode, reward]`; for OpenAI-ES it logs `[generation, mean_reward, max_reward, time]`.
+- `training_rewards.csv`: A simple CSV table tracking performance. For OpenAI-ES it logs `[generation, mean_reward, max_reward, time]`.
 - **`config.json`**, which combines the full environment configuration with a `training_run` section containing the algorithm name, timestamp, source config path, and all hyperparameters from the run. 
 
 Configuration presets live under `configs/`. `configs/perfect_comm.json` mirrors the default plant/network settings but forces `network.perfect_communication` to `true`, which is useful for debugging algorithms without channel contention.
@@ -123,8 +120,7 @@ Each script writes to a timestamped `outputs/exp_*` folder and renames the per-r
 
 Post-training visualization lives in `tools/visualize_policy.py`.
 
-- Single-agent (SB3 / ES / heuristics) visualization: `python -m tools.visualize_policy --config configs/perfect_comm.json --policy outputs/.../best_model.zip --policy-type sb3`
-- True MARL visualization (all agents act): `python -m tools.visualize_policy --config configs/marl_mixed_plants.json --policy outputs/.../best_model.pt --policy-type marl_torch --generate-video --per-agent-videos`
+- MARL visualization (all agents act): `python -m tools.visualize_policy --config configs/marl_mixed_plants.json --policy outputs/.../best_model.pt --policy-type marl_torch --generate-video --per-agent-videos`
   - Outputs include a coordination action raster, a combined state-space plot, a summary plot, and optional combined/per-agent MP4s (FFmpeg required).
 - Visualization uses reward/termination `evaluation` overrides from the config when provided.
 
@@ -132,7 +128,6 @@ Post-training visualization lives in `tools/visualize_policy.py`.
 
 Policy testing lives in `tools/policy_tester.py` and evaluates a target policy against a fixed heuristic set (default: `zero_wait`, `always_send`, `random_50`) over multiple seeds. The evaluator forces raw absolute reward (no normalization/mixing) while keeping communication penalties and termination settings from the config.
 
-- Example (single-agent): `python -m tools.policy_tester --config configs/perfect_comm.json --policy outputs/.../best_model.zip --policy-type sb3 --num-seeds 30`
 - Example (MARL): `python -m tools.policy_tester --config configs/marl_mixed_plants.json --policy outputs/.../best_model.pt --policy-type marl_torch --num-seeds 30`
 - Example (batch): `python -m tools.policy_tester --models-root outputs --num-seeds 30`
   - Expects subfolders like `model_1/config.json`, `model_1/best_model.pt`, `model_1/latest_model.pt`.
@@ -152,7 +147,7 @@ The `config.json` file saved in each run directory preserves the complete enviro
   "controller": { ... },
   "training_run": {
     "timestamp": "2025-11-20T12:34:56Z",
-    "algorithm": "dqn",
+    "algorithm": "qmix",
     "source_config_path": "/path/to/original/config.json",
     "hyperparameters": {
       "total_timesteps": 200000,

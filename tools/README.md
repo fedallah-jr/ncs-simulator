@@ -20,23 +20,34 @@ The `visualize_policy.py` script allows you to visualize how policies control th
 
 ### Basic Usage
 
-#### Visualize a Single Heuristic Policy
+#### Visualize a Heuristic Policy (Multi-Agent)
 
 ```bash
 python -m tools.visualize_policy \
-    --config configs/perfect_comm.json \
+    --config configs/marl_mixed_plants.json \
     --policy always_send \
     --policy-type heuristic \
     --episode-length 500
 ```
 
-#### Visualize a Trained SB3 Policy
+#### Visualize a Trained MARL Policy
 
 ```bash
 python -m tools.visualize_policy \
-    --config configs/perfect_comm.json \
-    --policy path/to/ppo_model.zip \
-    --policy-type sb3 \
+    --config configs/marl_mixed_plants.json \
+    --policy path/to/latest_model.pt \
+    --policy-type marl_torch \
+    --episode-length 500 \
+    --generate-video --per-agent-videos
+```
+
+#### Visualize an OpenAI-ES Policy
+
+```bash
+python -m tools.visualize_policy \
+    --config configs/marl_mixed_plants.json \
+    --policy path/to/latest_model.npz \
+    --policy-type es \
     --episode-length 500
 ```
 
@@ -44,10 +55,10 @@ python -m tools.visualize_policy \
 
 ```bash
 python -m tools.visualize_policy \
-    --config configs/perfect_comm.json \
-    --policies always_send never_send send_every_5 path/to/ppo_model.zip \
-    --policy-types heuristic heuristic heuristic sb3 \
-    --labels "Always Send" "Never Send" "Send Every 5" "PPO" \
+    --config configs/marl_mixed_plants.json \
+    --policies always_send never_send send_every_5 path/to/latest_model.pt \
+    --policy-types heuristic heuristic heuristic marl_torch \
+    --labels "Always Send" "Never Send" "Send Every 5" "MARL" \
     --episode-length 500
 ```
 
@@ -55,17 +66,16 @@ python -m tools.visualize_policy \
 
 ```bash
 python -m tools.visualize_policy \
-    --config configs/perfect_comm.json \
+    --config configs/marl_mixed_plants.json \
     --policies always_send threshold_1.0 \
     --policy-types heuristic heuristic \
     --labels "Always Send" "Threshold 1.0" \
     --episode-length 300 \
     --generate-video \
-    --video-format gif \
-    --video-speedup 2
+    --video-speedup 2 \
+    --per-agent-videos
 ```
-
-**Note**: For MP4 format, you need to install FFmpeg: `sudo apt-get install ffmpeg` (Linux) or `brew install ffmpeg` (Mac). GIF format works without additional dependencies.
+**Note**: Generating MP4s requires FFmpeg (`sudo apt-get install ffmpeg` on Linux, `brew install ffmpeg` on Mac).
 
 #### Trace Micro-slot Network Activity
 
@@ -90,7 +100,7 @@ python -m tools.visualize_policy \
 - `--policies`: Multiple policies to compare (requires `--policy-types`)
 
 **Policy Type:**
-- `--policy-type`: Type of single policy (`sb3` or `heuristic`)
+- `--policy-type`: Type of single policy (`marl_torch`, `es`, `openai_es`, or `heuristic`)
 - `--policy-types`: Types of multiple policies (space-separated)
 
 **Optional:**
@@ -109,7 +119,6 @@ python -m tools.visualize_policy \
 
 **Video/Animation:**
 - `--generate-video`: Generate animated video of state evolution
-- `--video-format`: Video format - `mp4` (requires FFmpeg) or `gif` (default: `mp4`)
 - `--video-fps`: Frames per second for video (default: 30)
 - `--video-speedup`: Speed multiplier (e.g., 2 = 2x speed, default: 1)
 
@@ -118,20 +127,18 @@ python -m tools.visualize_policy \
 The tool generates the following files in the output directory:
 
 **Always generated:**
-1. **`{prefix}_state_evolution.png`**: 2D state space trajectory and magnitude plot
-2. **`{prefix}_detailed_analysis.png`**: Comprehensive analysis including actions, rewards, and statistics
-3. **`{prefix}_summary.json`**: Numerical summary statistics
+1. **`{prefix}_marl_summary.png`**: Mean state error and mean action rate summary
+2. **`{prefix}_{tag}_actions.png`**: Per-agent action raster for each policy
+3. **`{prefix}_{tag}_state_space.png`**: Combined multi-agent 2D state space (when `state_dim >= 2`)
+4. **`{prefix}_summary.json`**: Numerical summary statistics
 
 **Generated when `--generate-video` is used:**
-4. **`{prefix}_animation.mp4`** or **`{prefix}_animation.gif`**: Animated visualization showing:
-   - Real-time state evolution in 2D space
-   - State magnitude changing over time
-   - Transmission decisions as they occur
-   - Current timestep indicator
+5. **`{prefix}_{tag}_animation.mp4`**: Animated visualization of all agents
+6. **`{prefix}_{tag}_agent_{i}.mp4`**: Optional per-agent videos when `--per-agent-videos` is set
 
 **Generated when `--network-trace` is used:**
-5. **`{prefix}_{tag}_network_trace.jsonl`**: Micro-slot trace data (one JSON object per traced tick)
-6. **`{prefix}_{tag}_network_tick_{tick}.png`**: Per-tick timeline plot of micro-slot activity
+7. **`{prefix}_{tag}_network_trace.jsonl`**: Micro-slot trace data (one JSON object per traced tick)
+8. **`{prefix}_{tag}_network_tick_{tick}.png`**: Per-tick timeline plot of micro-slot activity
 
 ## Heuristic Policies
 
@@ -175,13 +182,13 @@ python -m tools.visualize_policy --list-heuristics
 ### Using Heuristic Policies in Code
 
 ```python
-from tools.heuristic_policies import get_heuristic_policy
+from tools.visualize_policy import MultiAgentHeuristicPolicy
 
-# Get a policy by name
-policy = get_heuristic_policy('always_send', n_agents=1)
+# Create a multi-agent heuristic wrapper
+policy = MultiAgentHeuristicPolicy("always_send", n_agents=4, seed=0, deterministic=True)
 
 # Use the policy
-action, _ = policy.predict(observation, deterministic=True)
+actions = policy.act(obs_dict)
 ```
 
 ### Creating Custom Heuristic Policies
@@ -205,7 +212,7 @@ class MyCustomPolicy(BaseHeuristicPolicy):
 
 ```bash
 python -m tools.visualize_policy \
-    --config configs/perfect_comm.json \
+    --config configs/marl_mixed_plants.json \
     --policies send_every_2 send_every_5 send_every_10 \
     --policy-types heuristic heuristic heuristic \
     --labels "Every 2 steps" "Every 5 steps" "Every 10 steps" \
@@ -216,30 +223,30 @@ python -m tools.visualize_policy \
 
 ```bash
 python -m tools.visualize_policy \
-    --config configs/perfect_comm.json \
+    --config configs/marl_mixed_plants.json \
     --policies threshold_0.5 threshold_1.0 threshold_2.0 always_send \
     --policy-types heuristic heuristic heuristic heuristic \
     --labels "Threshold 0.5" "Threshold 1.0" "Threshold 2.0" "Always Send" \
     --episode-length 300
 ```
 
-### Example 3: Evaluate Trained PPO vs Baselines
+### Example 3: Evaluate Trained MARL vs Baselines
 
 ```bash
 python -m tools.visualize_policy \
-    --config configs/perfect_comm.json \
-    --policies outputs/ppo_model.zip always_send adaptive \
-    --policy-types sb3 heuristic heuristic \
-    --labels "Trained PPO" "Always Send" "Adaptive" \
+    --config configs/marl_mixed_plants.json \
+    --policies outputs/latest_model.pt always_send adaptive \
+    --policy-types marl_torch heuristic heuristic \
+    --labels "Trained MARL" "Always Send" "Adaptive" \
     --episode-length 500 \
-    --output-prefix "ppo_comparison"
+    --output-prefix "marl_comparison"
 ```
 
 ### Example 4: Custom Output Directory
 
 ```bash
 python -m tools.visualize_policy \
-    --config configs/perfect_comm_low_noise.json \
+    --config configs/marl_mixed_plants.json \
     --policy threshold_1.0 \
     --policy-type heuristic \
     --episode-length 1000 \
@@ -250,74 +257,38 @@ python -m tools.visualize_policy \
 ### Example 5: Generate Animation Video
 
 ```bash
-# Generate GIF animation (no FFmpeg required)
-python -m tools.visualize_policy \
-    --config configs/perfect_comm.json \
-    --policies always_send adaptive \
-    --policy-types heuristic heuristic \
-    --labels "Always Send" "Adaptive Policy" \
-    --episode-length 200 \
-    --generate-video \
-    --video-format gif \
-    --video-fps 30 \
-    --video-speedup 2
-```
-
-```bash
 # Generate MP4 animation (requires FFmpeg)
 python -m tools.visualize_policy \
-    --config configs/perfect_comm.json \
-    --policy outputs/ppo_model.zip \
-    --policy-type sb3 \
-    --episode-length 500 \
+    --config configs/marl_mixed_plants.json \
+    --policy outputs/latest_model.pt \
+    --policy-type marl_torch \
+    --episode-length 200 \
     --generate-video \
-    --video-format mp4 \
     --video-fps 60 \
     --video-speedup 5
 ```
 
 ## Understanding the Plots
 
-### State Evolution Plot
+### MARL Summary Plot
 
-- **Left panel**: Shows the 2D state space trajectory
-  - Solid lines: Actual plant states
-  - Dashed lines: Controller's estimates (if `--show-estimates` is enabled)
-  - Circle markers: Starting points
-  - Square markers: Ending points
-  - Red star: Target (origin)
+- **Top panel**: Mean state error across agents over time
+- **Bottom panel**: Mean action rate across agents
 
-- **Right panel**: State magnitude over time
-  - Shows ||x|| (Euclidean norm of state vector)
-  - Lower values indicate better control performance
+### Action Raster
 
-### Detailed Analysis Plot
+- Rows correspond to agents, columns to timesteps
+- Filled cells indicate transmission actions (1)
 
-- **Top-left**: Transmission decisions (0 = no send, 1 = send)
-- **Top-right**: Cumulative reward over time
-- **Bottom-left**: Individual state dimensions over time
-- **Bottom-right**: Bar chart comparing:
-  - Total transmission count
-  - Average reward
-  - Final state error
+### State Space Plot
+
+- 2D trajectories for all agents (and estimates if `--show-estimates` is enabled)
+- Useful for spotting coordination patterns and divergence between agents
 
 ### Animation Video
 
-The animated video (when `--generate-video` is used) shows three synchronized panels:
-
-- **Left panel**: 2D state space with moving points showing current position
-  - Trajectories build up over time
-  - Circle markers show current state position
-  - Square markers show current estimate position (if enabled)
-  - Timestep counter displayed in top-left
-
-- **Middle panel**: State magnitude evolution
-  - Line graph builds up over time showing ||x||
-  - Shows how well the system is being controlled
-
-- **Right panel**: Transmission decisions
-  - Step plot showing when transmissions occur
-  - Helps understand the policy's decision-making pattern
+- Animated 2D state space showing all agents simultaneously
+- Optional per-agent videos via `--per-agent-videos`
 
 ## Tips
 
@@ -335,12 +306,11 @@ The animated video (when `--generate-video` is used) shows three synchronized pa
    - Transmission count = communication overhead
 
 4. **Config Selection**:
-   - Use `perfect_comm.json` to isolate policy behavior without network effects
-   - Use default config to see policy performance with realistic network conditions
+   - Use `configs/marl_mixed_plants.json` to evaluate with representative multi-agent setups
+   - If a config does not define `system.n_agents`, pass `--n-agents` explicitly
 
 5. **Video Generation**:
-   - Use GIF format if FFmpeg is not installed (works everywhere, larger file size)
-   - Use MP4 format for smaller files and better quality (requires FFmpeg)
+   - Install FFmpeg for MP4 generation
    - Adjust `--video-speedup` for longer episodes (2-5x recommended for episodes >200 steps)
    - Keep FPS at 30 for smooth playback, or increase to 60 for very detailed analysis
    - Shorter episodes (100-300 steps) work best for animations
@@ -350,7 +320,7 @@ The animated video (when `--generate-video` is used) shows three synchronized pa
 
 ### Adding New Visualizations
 
-You can extend the visualization tool by adding new plotting functions. Follow the pattern in `plot_state_evolution_2d()` and `plot_detailed_analysis()`.
+You can extend the visualization tool by adding new plotting functions. Follow the pattern in `plot_marl_comparison_summary()` and `plot_marl_action_raster()`.
 
 ### Adding New Heuristic Policies
 
@@ -361,12 +331,6 @@ You can extend the visualization tool by adding new plotting functions. Follow t
 
 ## Troubleshooting
 
-**Issue**: `ModuleNotFoundError: No module named 'stable_baselines3'`
-- **Solution**: Install stable-baselines3: `pip install stable-baselines3`
-
-**Issue**: `FileNotFoundError` when loading SB3 model
-- **Solution**: Check the model path is correct and the `.zip` file exists
-
 **Issue**: Plots look cluttered with many policies
 - **Solution**: Reduce the number of policies or create separate comparisons
 
@@ -374,7 +338,7 @@ You can extend the visualization tool by adding new plotting functions. Follow t
 - **Solution**: This is normal if the episode reaches the configured length. The warning can be safely ignored.
 
 **Issue**: FFmpeg error when generating MP4 videos
-- **Solution**: Install FFmpeg or use `--video-format gif` instead
+- **Solution**: Install FFmpeg and retry
   - Linux: `sudo apt-get install ffmpeg`
   - Mac: `brew install ffmpeg`
   - Windows: Download from https://ffmpeg.org/download.html
@@ -383,13 +347,6 @@ You can extend the visualization tool by adding new plotting functions. Follow t
 - **Solution**:
   - Use `--video-speedup` to skip frames (e.g., `--video-speedup 2` for 2x speed)
   - Reduce `--episode-length` for faster generation
-  - Use GIF format which is faster than MP4
-
-**Issue**: GIF file is too large
-- **Solution**:
-  - Use MP4 format instead (requires FFmpeg, much smaller files)
-  - Increase `--video-speedup` to reduce total frames
-  - Reduce `--episode-length`
 
 ## Requirements
 
@@ -397,7 +354,8 @@ You can extend the visualization tool by adding new plotting functions. Follow t
 - NumPy
 - Matplotlib
 - Gymnasium
-- stable-baselines3 (only for loading SB3 policies)
+- torch (for marl_torch checkpoints)
+- jax/jaxlib/flax (for ES checkpoints)
 - filterpy (for Kalman filter)
 - FFmpeg (optional, only for MP4 video generation)
 

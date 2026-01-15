@@ -46,7 +46,7 @@ def save_config_with_hyperparameters(
     Args:
         run_dir: Directory where the config will be saved
         config_path: Path to the original config file (or None for default)
-        algorithm: Algorithm name (e.g., 'dqn', 'ppo')
+        algorithm: Algorithm name (e.g., 'iql', 'mappo')
         hyperparams: Dictionary of hyperparameters for this run
     """
     from ncs_env.config import load_config, DEFAULT_CONFIG_PATH

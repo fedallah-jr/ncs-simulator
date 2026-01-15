@@ -2,7 +2,7 @@
 Policy testing tool for the NCS simulator.
 
 Evaluates a target policy against a fixed set of heuristic baselines across multiple seeds,
-using raw absolute reward (no normalization).
+using raw absolute reward (no normalization) in multi-agent environments.
 """
 
 from __future__ import annotations
@@ -29,11 +29,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from ncs_env.config import load_config
 from ncs_env.env import NCS_Env
 from tools.heuristic_policies import get_heuristic_policy
-from utils.wrapper import SingleAgentWrapper
 from tools.visualize_policy import (
     load_es_policy,
     load_marl_torch_multi_agent_policy,
-    load_sb3_policy,
 )
 
 # Heuristic policies to compare against (edit as needed).
@@ -226,8 +224,6 @@ def _read_es_n_agents(model_path: Path) -> Optional[int]:
 
 def _infer_policy_n_agents(spec: PolicySpec) -> Optional[int]:
     policy_type = spec.policy_type.lower()
-    if policy_type == "sb3":
-        return 1
     if policy_type == "marl_torch":
         return _read_marl_torch_n_agents(Path(spec.policy_path))
     if policy_type in {"es", "openai_es"}:
@@ -263,7 +259,7 @@ def _resolve_n_agents(
     config_n_agents = config.get("system", {}).get("n_agents")
     if config_n_agents is not None:
         return int(config_n_agents)
-    return 1
+    raise ValueError("n_agents could not be resolved; set system.n_agents or pass --n-agents")
 
 
 def _build_env(
@@ -288,72 +284,21 @@ def _load_policy(
     env: Any,
     *,
     seed: int,
-    use_multi_agent: bool,
 ) -> Any:
     policy_type = spec.policy_type.lower()
     if policy_type == "heuristic":
         deterministic = not _is_stochastic_heuristic(spec.policy_path)
-        if use_multi_agent:
-            return MultiAgentHeuristicPolicy(
-                spec.policy_path,
-                n_agents=getattr(env, "n_agents", 1),
-                seed=seed,
-                deterministic=deterministic,
-            )
-        return get_heuristic_policy(spec.policy_path, n_agents=1, seed=seed)
-    if policy_type == "sb3":
-        return load_sb3_policy(spec.policy_path, env)
+        return MultiAgentHeuristicPolicy(
+            spec.policy_path,
+            n_agents=getattr(env, "n_agents", 1),
+            seed=seed,
+            deterministic=deterministic,
+        )
     if policy_type in {"es", "openai_es"}:
         return load_es_policy(spec.policy_path, env)
     if policy_type == "marl_torch":
         return load_marl_torch_multi_agent_policy(spec.policy_path, env)
     raise ValueError(f"Unknown policy type: {spec.policy_type}")
-
-
-def _run_single_agent_episode(
-    env: SingleAgentWrapper,
-    policy: Any,
-    *,
-    seed: int,
-    episode_length: int,
-    deterministic: bool,
-) -> EpisodeResult:
-    if hasattr(policy, "reset"):
-        policy.reset()
-    obs, info = env.reset(seed=seed)
-
-    total_reward = 0.0
-    send_count = 0
-    steps = 0
-    last_info = info
-    for _ in range(episode_length):
-        action, _ = policy.predict(obs, deterministic=deterministic)
-        obs, reward, terminated, truncated, info = env.step(action)
-        total_reward += float(reward)
-        send_count += int(action)
-        steps += 1
-        last_info = info
-        if terminated or truncated:
-            break
-
-    states = np.asarray(last_info.get("states", []), dtype=float)
-    final_error = float(np.linalg.norm(states[0])) if states.size else 0.0
-    send_rate = float(send_count) / float(max(1, steps))
-    mean_reward = total_reward / float(max(1, steps))
-    network_totals = _extract_network_totals(last_info)
-    return EpisodeResult(
-        policy_label="",
-        policy_type="",
-        seed=int(seed),
-        total_reward=total_reward,
-        mean_reward=mean_reward,
-        final_state_error=final_error,
-        send_rate=send_rate,
-        steps=steps,
-        n_agents=1,
-        episode_length=episode_length,
-        **network_totals,
-    )
 
 
 def _run_multi_agent_episode(
@@ -546,8 +491,6 @@ def _infer_policy_type(model_path: Path) -> str:
     suffix = model_path.suffix.lower()
     if suffix == ".pt":
         return "marl_torch"
-    if suffix == ".zip":
-        return "sb3"
     if suffix == ".npz":
         return "es"
     raise ValueError(f"Unsupported model extension: {model_path}")
@@ -560,49 +503,29 @@ def _evaluate_policy(
     episode_length: int,
     n_agents: int,
     seeds: Sequence[int],
-    use_multi_agent: bool,
     termination_override: Optional[Dict[str, Any]],
 ) -> List[EpisodeResult]:
     results: List[EpisodeResult] = []
     cached_policy: Optional[Any] = None
 
     for seed in seeds:
-        if use_multi_agent:
-            env = _build_env(config_path, episode_length, n_agents, seed, termination_override)
-        else:
-            env = SingleAgentWrapper(
-                lambda seed=seed: _build_env(
-                    config_path, episode_length, n_agents, seed, termination_override
-                )
-            )
+        env = _build_env(config_path, episode_length, n_agents, seed, termination_override)
         try:
             if spec.policy_type.lower() == "heuristic":
-                policy = _load_policy(spec, env, seed=seed, use_multi_agent=use_multi_agent)
+                policy = _load_policy(spec, env, seed=seed)
             else:
                 if cached_policy is None:
-                    policy = _load_policy(
-                        spec, env, seed=seed, use_multi_agent=use_multi_agent
-                    )
+                    policy = _load_policy(spec, env, seed=seed)
                     cached_policy = policy
                 else:
                     policy = cached_policy
 
-            if use_multi_agent:
-                episode = _run_multi_agent_episode(
-                    env,
-                    policy,
-                    seed=seed,
-                    episode_length=episode_length,
-                )
-            else:
-                deterministic = not _is_stochastic_heuristic(spec.policy_path) if spec.policy_type == "heuristic" else True
-                episode = _run_single_agent_episode(
-                    env,
-                    policy,
-                    seed=seed,
-                    episode_length=episode_length,
-                    deterministic=deterministic,
-                )
+            episode = _run_multi_agent_episode(
+                env,
+                policy,
+                seed=seed,
+                episode_length=episode_length,
+            )
             episode.policy_label = spec.label
             episode.policy_type = spec.policy_type
             results.append(episode)
@@ -1066,7 +989,7 @@ def main() -> int:
     parser.add_argument("--policy", help="Path to policy file or heuristic name")
     parser.add_argument(
         "--policy-type",
-        choices=["sb3", "es", "openai_es", "heuristic", "marl_torch"],
+        choices=["es", "openai_es", "heuristic", "marl_torch"],
         help="Policy type for the target policy",
     )
     parser.add_argument("--policy-label", default=None, help="Label for the target policy")
@@ -1139,10 +1062,9 @@ def main() -> int:
 
         resolved_n_agents = _resolve_n_agents(config, policy_specs, args.n_agents)
         policy_type_names = [spec.policy_type.lower() for spec in policy_specs]
-        multi_agent_types = {"marl_torch", "heuristic"}
-        use_multi_agent = all(policy in multi_agent_types for policy in policy_type_names) and (
-            any(policy == "marl_torch" for policy in policy_type_names) or resolved_n_agents > 1
-        )
+        allowed_policy_types = {"marl_torch", "heuristic", "es", "openai_es"}
+        if not all(policy in allowed_policy_types for policy in policy_type_names):
+            raise ValueError("Supported policy types: marl_torch, es, openai_es, heuristic")
         if resolved_n_agents < 1:
             raise ValueError("Resolved n_agents must be >= 1.")
 
@@ -1165,7 +1087,6 @@ def main() -> int:
                 episode_length=int(args.episode_length),
                 n_agents=resolved_n_agents,
                 seeds=seeds,
-                use_multi_agent=use_multi_agent,
                 termination_override=termination_override,
             )
             for result in results:
@@ -1313,9 +1234,9 @@ def main() -> int:
         raise ValueError("No model checkpoints found under the specified root.")
 
     unique_policy_types = sorted(set(policy_types))
-    if "marl_torch" in unique_policy_types and len(unique_policy_types) > 1:
-        raise ValueError("Batch mode does not support mixing marl_torch with single-agent policies.")
-    use_multi_agent = "marl_torch" in unique_policy_types
+    allowed_policy_types = {"marl_torch", "es"}
+    if not set(unique_policy_types).issubset(allowed_policy_types):
+        raise ValueError("Batch mode supports only marl_torch and es checkpoints.")
 
     resolved_n_agents = _resolve_n_agents(
         reference_config,
@@ -1349,7 +1270,6 @@ def main() -> int:
                 episode_length=int(args.episode_length),
                 n_agents=resolved_n_agents,
                 seeds=seeds,
-                use_multi_agent=use_multi_agent,
                 termination_override=termination_override,
             )
             run_dir = models_root / model_name / "policy_tests" / f"{checkpoint_name}_eval"
@@ -1393,7 +1313,6 @@ def main() -> int:
             episode_length=int(args.episode_length),
             n_agents=resolved_n_agents,
             seeds=seeds,
-            use_multi_agent=use_multi_agent,
             termination_override=termination_override,
         )
         run_dir = models_root / "heuristics" / f"{heuristic_name}_eval"
@@ -1420,7 +1339,6 @@ def main() -> int:
         episode_length=int(args.episode_length),
         n_agents=resolved_n_agents,
         seeds=seeds,
-        use_multi_agent=use_multi_agent,
         termination_override=termination_override,
     )
     perfect_comm_dir = perfect_comm_root / "policy_tests" / "always_send_eval"
