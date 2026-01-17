@@ -80,6 +80,7 @@ class EpisodeResult:
     mean_state_error: float
     final_state_error: float
     send_rate: float
+    mean_true_goodput_kbps: float
     steps: int
     n_agents: int
     episode_length: int
@@ -279,6 +280,7 @@ def _build_env(
         seed=seed,
         reward_override=EVAL_REWARD_OVERRIDE,
         termination_override=termination_override,
+        track_true_goodput=True,
     )
 
 
@@ -320,6 +322,8 @@ def _run_multi_agent_episode(
     total_state_error = 0.0
     send_count = 0
     steps = 0
+    true_goodput_sum = 0.0
+    true_goodput_steps = 0
     last_info = info
     for _ in range(episode_length):
         action_dict = policy.act(obs_dict)
@@ -336,6 +340,9 @@ def _run_multi_agent_episode(
 
         steps += 1
         last_info = info
+        if "true_goodput_kbps_total" in info:
+            true_goodput_sum += float(info["true_goodput_kbps_total"])
+            true_goodput_steps += 1
         done = any(bool(terminated[f"agent_{i}"]) or bool(truncated[f"agent_{i}"]) for i in range(n_agents))
         if done:
             break
@@ -348,6 +355,7 @@ def _run_multi_agent_episode(
     mean_reward = total_reward / float(max(1, steps * n_agents))
     mean_state_error = total_state_error / float(max(1, steps * n_agents))
     send_rate = float(send_count) / float(max(1, steps * n_agents))
+    mean_true_goodput_kbps = true_goodput_sum / float(max(1, true_goodput_steps))
     network_totals = _extract_network_totals(last_info)
     return EpisodeResult(
         policy_label="",
@@ -358,6 +366,7 @@ def _run_multi_agent_episode(
         mean_state_error=mean_state_error,
         final_state_error=final_error,
         send_rate=send_rate,
+        mean_true_goodput_kbps=mean_true_goodput_kbps,
         steps=steps,
         n_agents=n_agents,
         episode_length=episode_length,
@@ -372,6 +381,7 @@ def _summarize_results(results: List[EpisodeResult]) -> Dict[str, float]:
     send_rates = np.array([r.send_rate for r in results], dtype=float)
     steps = np.array([r.steps for r in results], dtype=float)
     mean_rewards = np.array([r.mean_reward for r in results], dtype=float)
+    true_goodputs = np.array([r.mean_true_goodput_kbps for r in results], dtype=float)
     tx_attempts = np.array([r.tx_attempts for r in results], dtype=float)
     tx_acked = np.array([r.tx_acked for r in results], dtype=float)
     tx_dropped = np.array([r.tx_dropped for r in results], dtype=float)
@@ -413,6 +423,8 @@ def _summarize_results(results: List[EpisodeResult]) -> Dict[str, float]:
         "std_final_error": float(np.std(final_errors)) if results else 0.0,
         "mean_send_rate": float(np.mean(send_rates)) if results else 0.0,
         "std_send_rate": float(np.std(send_rates)) if results else 0.0,
+        "mean_true_goodput_kbps": float(np.mean(true_goodputs)) if results else 0.0,
+        "std_true_goodput_kbps": float(np.std(true_goodputs)) if results else 0.0,
         "mean_steps": float(np.mean(steps)) if results else 0.0,
         "std_steps": float(np.std(steps)) if results else 0.0,
         "mean_reward_per_step": float(np.mean(mean_rewards)) if results else 0.0,
@@ -646,6 +658,7 @@ def _write_policy_results(
                 "mean_state_error": result.mean_state_error,
                 "final_state_error": result.final_state_error,
                 "send_rate": result.send_rate,
+                "mean_true_goodput_kbps": result.mean_true_goodput_kbps,
                 "steps": result.steps,
                 "n_agents": result.n_agents,
                 "episode_length": result.episode_length,
@@ -688,6 +701,7 @@ def _write_policy_results(
             "mean_state_error",
             "final_state_error",
             "send_rate",
+            "mean_true_goodput_kbps",
             "steps",
             "n_agents",
             "episode_length",
@@ -724,6 +738,8 @@ def _write_policy_results(
             "std_final_error",
             "mean_send_rate",
             "std_send_rate",
+            "mean_true_goodput_kbps",
+            "std_true_goodput_kbps",
             "mean_steps",
             "std_steps",
             "mean_reward_per_step",
@@ -812,6 +828,8 @@ def _write_network_stats_leaderboard(path: Path, rows: List[Dict[str, Any]]) -> 
         "std_tx_collisions",
         "mean_data_delivered",
         "std_data_delivered",
+        "mean_true_goodput_kbps",
+        "std_true_goodput_kbps",
         "mean_mac_ack_sent",
         "std_mac_ack_sent",
         "mean_mac_ack_collisions",

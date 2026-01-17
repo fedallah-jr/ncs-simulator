@@ -354,7 +354,7 @@ def run_episode_multi_agent(
     states[0] = np.asarray(info.get("states", states[0]), dtype=np.float32)
     estimates[0] = np.asarray(info.get("estimates", estimates[0]), dtype=np.float32)
     state_errors[0] = np.linalg.norm(states[0], axis=1).astype(np.float32)
-    throughputs[0] = float(info.get("throughput_kbps", 0.0))
+    throughputs[0] = float(info.get("true_goodput_kbps_total", info.get("throughput_kbps", 0.0)))
     collided_packets[0] = float(info.get("collided_packets", 0.0))
     if "network_stats" in info:
         network_stats = {k: [int(x) for x in v] for k, v in info["network_stats"].items()}
@@ -368,7 +368,7 @@ def run_episode_multi_agent(
         states[t + 1] = np.asarray(info.get("states", states[t + 1]), dtype=np.float32)
         estimates[t + 1] = np.asarray(info.get("estimates", estimates[t + 1]), dtype=np.float32)
         state_errors[t + 1] = np.linalg.norm(states[t + 1], axis=1).astype(np.float32)
-        throughputs[t + 1] = float(info.get("throughput_kbps", 0.0))
+        throughputs[t + 1] = float(info.get("true_goodput_kbps_total", info.get("throughput_kbps", 0.0)))
         collided_packets[t + 1] = float(info.get("collided_packets", 0.0))
         if "network_stats" in info:
             network_stats = {k: [int(x) for x in v] for k, v in info["network_stats"].items()}
@@ -1139,6 +1139,7 @@ def main():
             seed=args.seed,
             reward_override=reward_override,
             termination_override=termination_override,
+            track_true_goodput=True,
         )
 
     print(f"Creating environment...")

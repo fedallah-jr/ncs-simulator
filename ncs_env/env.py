@@ -78,6 +78,7 @@ class NCS_Env(gym.Env):
         reward_override: Optional[Dict[str, Any]] = None,
         termination_override: Optional[Dict[str, Any]] = None,
         freeze_running_normalization: bool = False,
+        track_true_goodput: bool = False,
     ):
         super().__init__()
         self.n_agents = n_agents
@@ -85,6 +86,7 @@ class NCS_Env(gym.Env):
         self.reward_override = reward_override
         self.termination_override = termination_override
         self.freeze_running_normalization = bool(freeze_running_normalization)
+        self.track_true_goodput = bool(track_true_goodput)
 
         self.config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
         self.config = load_config(str(self.config_path))
@@ -264,10 +266,6 @@ class NCS_Env(gym.Env):
                 state_hist.append(np.zeros(self.state_dim, dtype=float))
             self.state_history.append(state_hist)
 
-        self.throughput_history: deque = deque(maxlen=self.history_window)
-        for _ in range(self.history_window):
-            self.throughput_history.append(0.0)
-
         self.pending_transmissions: List[Dict[int, Dict[str, int]]] = [
             {} for _ in range(self.n_agents)
         ]
@@ -275,7 +273,18 @@ class NCS_Env(gym.Env):
         self.net_tx_acks = np.zeros(self.n_agents, dtype=np.int64)
         self.net_tx_drops = np.zeros(self.n_agents, dtype=np.int64)
         self.net_tx_rewrites = np.zeros(self.n_agents, dtype=np.int64)
-        self.throughput_records: deque = deque()
+        self.observed_goodput_records: List[deque] = [deque() for _ in range(self.n_agents)]
+        self.observed_goodput_seen: List[set] = [set() for _ in range(self.n_agents)]
+        self.throughput_history: List[deque] = [
+            deque([0.0 for _ in range(self.history_window)], maxlen=self.history_window)
+            for _ in range(self.n_agents)
+        ]
+        if self.track_true_goodput:
+            self.true_goodput_records: Optional[List[deque]] = [deque() for _ in range(self.n_agents)]
+            self.true_goodput_seen: Optional[List[set]] = [set() for _ in range(self.n_agents)]
+        else:
+            self.true_goodput_records = None
+            self.true_goodput_seen = None
         self.comm_success_records: List[deque] = [deque() for _ in range(self.n_agents)]
         self.last_measurements: List[np.ndarray] = [
             np.zeros(self.state_dim, dtype=float) for _ in range(self.n_agents)
@@ -407,6 +416,11 @@ class NCS_Env(gym.Env):
                     measurement_timestamp = packet.payload["timestamp"]
                     age_steps = max(0, int(state_index - int(measurement_timestamp)))
 
+                    if self.track_true_goodput:
+                        sensor_id = int(packet.source_id)
+                        if 0 <= sensor_id < self.n_agents:
+                            self._record_true_goodput(sensor_id, int(measurement_timestamp))
+
                     self.controllers[controller_id].delayed_update(measurement, measurement_timestamp)
                     self.last_measurements[controller_id] = measurement
                     delivered_controller_ids.add(controller_id)
@@ -419,17 +433,14 @@ class NCS_Env(gym.Env):
                     measurement_timestamp = mac_ack.get("measurement_timestamp")
                     if sensor_id is None or measurement_timestamp is None:
                         continue
-                    if 0 <= int(sensor_id) < self.n_agents:
-                        self.net_tx_acks[int(sensor_id)] += 1
+                    sensor_id = int(sensor_id)
+                    measurement_timestamp = int(measurement_timestamp)
+                    if 0 <= sensor_id < self.n_agents:
+                        self.net_tx_acks[sensor_id] += 1
+                        self._record_observed_goodput(sensor_id, measurement_timestamp)
                     entry = self.pending_transmissions[sensor_id].pop(measurement_timestamp, None)
                     if entry is not None:
                         entry["status"] = 1
-                        self.throughput_records.append(
-                            {
-                                "timestamp": self.timestep,
-                                "bits": self.network.data_packet_size * 8,
-                            }
-                        )
                         self._log_successful_comm(sensor_id, measurement_timestamp, self.timestep)
 
                 for packet in network_result["dropped_packets"]:
@@ -700,23 +711,74 @@ class NCS_Env(gym.Env):
         step = self.quantization_step
         return np.round(state / step) * step
 
-    def _compute_throughput(self) -> float:
-        """Compute throughput (kbps) over the sliding window."""
+    def _record_observed_goodput(self, agent_idx: int, measurement_timestamp: int) -> None:
+        if not 0 <= agent_idx < self.n_agents:
+            return
+        seen = self.observed_goodput_seen[agent_idx]
+        if measurement_timestamp in seen:
+            return
+        seen.add(measurement_timestamp)
+        self.observed_goodput_records[agent_idx].append(
+            {
+                "timestamp": self.timestep,
+                "bits": self.network.data_packet_size * 8,
+            }
+        )
+
+    def _record_true_goodput(self, agent_idx: int, measurement_timestamp: int) -> None:
+        if not self.track_true_goodput:
+            return
+        if not 0 <= agent_idx < self.n_agents:
+            return
+        records = self.true_goodput_records
+        seen = self.true_goodput_seen
+        if records is None or seen is None:
+            return
+        agent_seen = seen[agent_idx]
+        if measurement_timestamp in agent_seen:
+            return
+        agent_seen.add(measurement_timestamp)
+        records[agent_idx].append(
+            {
+                "timestamp": self.timestep,
+                "bits": self.network.data_packet_size * 8,
+            }
+        )
+
+    def _compute_agent_goodput_kbps(self, records: deque) -> float:
+        """Compute goodput (kbps) over the sliding window for one agent."""
         if self.perfect_communication:
             return 0.0
         if self.timestep <= 0:
             return 0.0
         window_start = self.timestep - self.throughput_window + 1
-        while self.throughput_records and self.throughput_records[0]["timestamp"] < window_start:
-            self.throughput_records.popleft()
+        while records and records[0]["timestamp"] < window_start:
+            records.popleft()
 
-        total_bits = sum(record["bits"] for record in self.throughput_records)
+        total_bits = sum(record["bits"] for record in records)
         effective_steps = min(self.throughput_window, self.timestep)
         window_duration = effective_steps * self.timestep_duration
         if window_duration == 0:
             return 0.0
         throughput_kbps = (total_bits / window_duration) / 1000.0
         return throughput_kbps
+
+    def _compute_observed_goodput_kbps(self, agent_idx: int) -> float:
+        """Compute ACK-observed goodput (kbps) for a single agent."""
+        return self._compute_agent_goodput_kbps(self.observed_goodput_records[agent_idx])
+
+    def _compute_true_goodput_kbps(self, agent_idx: int) -> float:
+        """Compute delivered goodput (kbps) for a single agent."""
+        if not self.track_true_goodput:
+            return 0.0
+        records = self.true_goodput_records
+        if records is None:
+            return 0.0
+        return self._compute_agent_goodput_kbps(records[agent_idx])
+
+    def _compute_throughput(self) -> float:
+        """Compute total ACK-observed goodput (kbps) over the sliding window."""
+        return float(sum(self._compute_observed_goodput_kbps(i) for i in range(self.n_agents)))
 
     def _sample_measurement_noise(self) -> np.ndarray:
         """Return measurement noise vector (zero when disabled)."""
@@ -884,7 +946,7 @@ class NCS_Env(gym.Env):
     def _get_observations(self) -> Dict[str, np.ndarray]:
         """Construct observations for all agents."""
         observations = {}
-        throughput = self._compute_throughput()
+        current_throughputs: List[float] = []
 
         for i in range(self.n_agents):
             status_history = list(self.decision_history[i])[-self.history_window :]
@@ -903,10 +965,11 @@ class NCS_Env(gym.Env):
             for state_vec in prev_states:
                 prev_states_flat.extend([float(x) for x in state_vec])
 
-            prev_throughputs = list(self.throughput_history)[-self.history_window :]
+            prev_throughputs = list(self.throughput_history[i])[-self.history_window :]
             if len(prev_throughputs) < self.history_window:
                 prev_throughputs = [0.0] * (self.history_window - len(prev_throughputs)) + prev_throughputs
 
+            throughput = self._compute_observed_goodput_kbps(i)
             quantized_state = self._quantize_state(self.plants[i].get_state())
             obs_values: List[float] = []
             obs_values.extend([float(x) for x in quantized_state])
@@ -916,14 +979,16 @@ class NCS_Env(gym.Env):
             obs_values.extend([float(x) for x in prev_throughputs])
 
             observations[f"agent_{i}"] = np.array(obs_values, dtype=np.float32)
+            current_throughputs.append(float(throughput))
 
-        self._update_history_buffers(throughput)
+        self._update_history_buffers(current_throughputs)
         return observations
 
-    def _update_history_buffers(self, throughput: float) -> None:
+    def _update_history_buffers(self, throughputs: List[float]) -> None:
         """Push current values so they appear in the 'previous k' slice next step."""
-        self.throughput_history.append(float(throughput))
         for i in range(self.n_agents):
+            if i < len(throughputs):
+                self.throughput_history[i].append(float(throughputs[i]))
             quantized_state = self._quantize_state(self.plants[i].get_state())
             self.state_history[i].append(quantized_state)
 
@@ -977,6 +1042,10 @@ class NCS_Env(gym.Env):
             "termination_agents": list(self.last_termination_agents),
             "bad_termination": bool(self.last_bad_termination),
         }
+        if self.track_true_goodput:
+            per_agent_goodput = [self._compute_true_goodput_kbps(i) for i in range(self.n_agents)]
+            info["true_goodput_kbps_per_agent"] = per_agent_goodput
+            info["true_goodput_kbps_total"] = float(sum(per_agent_goodput))
         if self.last_network_tick_trace is not None:
             info["network_tick_trace"] = self.last_network_tick_trace
         return info
