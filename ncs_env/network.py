@@ -22,6 +22,11 @@ class EntityState(Enum):
     WAITING_ACK = 4
 
 
+# Cached enum name lookups to avoid repeated .name property access in hot paths
+_CHANNEL_STATE_NAMES: Dict[ChannelState, str] = {s: s.name for s in ChannelState}
+_ENTITY_STATE_NAMES: Dict[EntityState, str] = {s: s.name for s in EntityState}
+
+
 @dataclass
 class ActiveTransmission:
     entity_idx: int
@@ -279,21 +284,21 @@ class NetworkModel:
             return
         active_transmissions = [
             {
-                "entity_idx": int(tx.entity_idx),
-                "packet_type": str(tx.packet.packet_type),
-                "collided": bool(tx.collided),
-                "end_slot": int(tx.end_slot),
-                "is_mac_ack": bool(tx.is_mac_ack),
+                "entity_idx": tx.entity_idx,
+                "packet_type": tx.packet.packet_type,
+                "collided": tx.collided,
+                "end_slot": tx.end_slot,
+                "is_mac_ack": tx.is_mac_ack,
             }
             for tx in self.active_transmissions
         ]
         slot_entry = {
-            "slot": int(self._trace_slot_index),
-            "global_slot": int(self.current_slot),
-            "channel_state": self.channel_state.name,
-            "entity_states": [entity.state.name for entity in self.entities],
+            "slot": self._trace_slot_index,
+            "global_slot": self.current_slot,
+            "channel_state": _CHANNEL_STATE_NAMES[self.channel_state],
+            "entity_states": [_ENTITY_STATE_NAMES[entity.state] for entity in self.entities],
             "active_transmissions": active_transmissions,
-            "events": list(self._trace_current_events),
+            "events": self._trace_current_events,
         }
         self._trace_slots.append(slot_entry)
         self._trace_current_events = []

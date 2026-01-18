@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from itertools import islice
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -823,7 +824,8 @@ class NCS_Env(gym.Env):
 
     def _recent_transmission_count(self, agent_idx: int) -> int:
         """Count transmissions (ACKed or pending) over the short window."""
-        recent_entries = list(self.decision_history[agent_idx])[-self.comm_recent_window :]
+        dh = self.decision_history[agent_idx]
+        recent_entries = islice(dh, max(0, len(dh) - self.comm_recent_window), None)
         return sum(1 for entry in recent_entries if entry["status"] > 0)
 
     def _setup_reward_normalization(self) -> None:
@@ -949,25 +951,16 @@ class NCS_Env(gym.Env):
         current_throughputs: List[float] = []
 
         for i in range(self.n_agents):
-            status_history = list(self.decision_history[i])[-self.history_window :]
-            if len(status_history) < self.history_window:
-                status_history = [{"timestamp": -1, "status": 0}] * (
-                    self.history_window - len(status_history)
-                ) + status_history
+            # decision_history maxlen may be larger than history_window, so use islice
+            dh = self.decision_history[i]
+            status_history = list(islice(dh, max(0, len(dh) - self.history_window), None))
             status_values = [entry["status"] for entry in status_history]
 
-            prev_states = list(self.state_history[i])[-self.state_history_window :]
-            if len(prev_states) < self.state_history_window:
-                prev_states = [np.zeros(self.state_dim, dtype=float)] * (
-                    self.state_history_window - len(prev_states)
-                ) + prev_states
-            prev_states_flat: List[float] = []
-            for state_vec in prev_states:
-                prev_states_flat.extend([float(x) for x in state_vec])
+            # state_history has maxlen=state_history_window and is pre-filled, always full
+            prev_states_flat = np.concatenate(list(self.state_history[i])).tolist()
 
-            prev_throughputs = list(self.throughput_history[i])[-self.history_window :]
-            if len(prev_throughputs) < self.history_window:
-                prev_throughputs = [0.0] * (self.history_window - len(prev_throughputs)) + prev_throughputs
+            # throughput_history has maxlen=history_window and is pre-filled, always full
+            prev_throughputs = list(self.throughput_history[i])
 
             throughput = self._compute_observed_goodput_kbps(i)
             quantized_state = self._quantize_state(self.plants[i].get_state())
