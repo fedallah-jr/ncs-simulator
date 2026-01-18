@@ -454,11 +454,8 @@ class NetworkModel:
                 tx.collided = True
             for tx in new_transmissions:
                 tx.collided = True
-            collided_entities = [
-                int(tx.entity_idx)
-                for tx in list(self.active_transmissions) + list(new_transmissions)
-                if tx.collided
-            ]
+            collided_entities = [tx.entity_idx for tx in self.active_transmissions if tx.collided]
+            collided_entities.extend(tx.entity_idx for tx in new_transmissions if tx.collided)
             if collided_entities and self._trace_active:
                 self._trace_event({"type": "collision", "entities": collided_entities})
 
