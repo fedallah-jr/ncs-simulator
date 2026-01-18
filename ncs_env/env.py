@@ -391,6 +391,12 @@ class NCS_Env(gym.Env):
                 action = actions[f"agent_{i}"]
                 if action == 1:
                     self.net_tx_attempts[i] += 1
+                    entity = self.network.entities[i]
+                    if entity.pending_packet is not None:
+                        # TL refuses to overwrite an active MAC packet; count as failed attempt.
+                        self.net_tx_drops[i] += 1
+                        self._record_decision(i, status=3)
+                        continue
                     state = self.plants[i].get_state()
                     measurement = state + self._sample_measurement_noise()
                     # Use state_index as the measurement timestamp
