@@ -674,7 +674,8 @@ class NetworkModel:
             return
 
         entity.state = EntityState.BACKING_OFF
-        entity.backoff_exponent = min(self.mac_max_be, entity.backoff_exponent + 1)
+        entity.backoff_exponent = self.mac_min_be
+        entity.csma_backoffs = 0
         entity.backoff_counter = self._draw_backoff(entity.backoff_exponent, entity_idx=entity_idx)
         entity.cca_countdown = 0
         entity.awaiting_ack_until = None
