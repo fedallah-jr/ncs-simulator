@@ -35,7 +35,9 @@ class ActiveTransmission:
     collided: bool
     expects_ack: bool
     is_mac_ack: bool = False
+    is_app_ack: bool = False
     ack_target_idx: Optional[int] = None
+    acked_measurement_timestamp: Optional[int] = None
 
 
 class NetworkEntity:
@@ -77,6 +79,9 @@ class NetworkModel:
         mac_ack_turnaround_us: float = 192.0,
         cca_time_us: float = 128.0,
         mac_ack_size_bytes: int = 5,
+        app_ack_enabled: bool = False,
+        app_ack_packet_size: int = 30,
+        app_ack_max_retries: int = 3,
         rng: np.random.Generator = None,
     ):
         self.n_agents = n_agents
@@ -100,6 +105,11 @@ class NetworkModel:
         self.data_tx_slots = self._compute_tx_slots(self.data_packet_size)
         self.mac_ack_tx_slots = self._compute_tx_slots(self.mac_ack_size_bytes)
 
+        self.app_ack_enabled = app_ack_enabled
+        self.app_ack_packet_size = app_ack_packet_size
+        self.app_ack_max_retries = app_ack_max_retries
+        self.app_ack_tx_slots = self._compute_tx_slots(self.app_ack_packet_size)
+
         self.channel_state = ChannelState.IDLE
         self.current_transmitter: Optional[int] = None
         self.active_transmissions: List[ActiveTransmission] = []
@@ -116,6 +126,15 @@ class NetworkModel:
         self.mac_ack_collisions_per_agent: List[int] = [0 for _ in range(n_agents)]
         self.ack_timeouts_total = 0
         self.ack_timeouts_per_agent: List[int] = [0 for _ in range(n_agents)]
+        self.app_ack_sent_total = 0
+        self.app_ack_sent_per_agent: List[int] = [0] * n_agents
+        self.app_ack_collisions_total = 0
+        self.app_ack_collisions_per_agent: List[int] = [0] * n_agents
+        self.app_ack_drops_total = 0
+        self.app_ack_drops_per_agent: List[int] = [0] * n_agents
+        self.app_ack_delivered_total = 0
+        self.app_ack_delivered_per_agent: List[int] = [0] * n_agents
+        self.delivered_app_acks: List[Dict[str, int]] = []
         self.trace_enabled = False
         self._trace_active = False
         self._trace_tick: Optional[int] = None
@@ -172,6 +191,7 @@ class NetworkModel:
         delivered_data: List[Packet] = []
         dropped_packets: List[Packet] = []
         self.delivered_mac_acks = []
+        self.delivered_app_acks = []
 
         self._complete_transmissions(delivered_data, dropped_packets)
         self._handle_ack_timeouts(dropped_packets)
@@ -191,6 +211,7 @@ class NetworkModel:
             "delivered_data": delivered_data,
             "dropped_packets": dropped_packets,
             "delivered_mac_acks": self.delivered_mac_acks,
+            "delivered_app_acks": self.delivered_app_acks,
         }
 
     def reset(self):
@@ -211,6 +232,15 @@ class NetworkModel:
         self.mac_ack_collisions_per_agent = [0 for _ in range(self.n_agents)]
         self.ack_timeouts_total = 0
         self.ack_timeouts_per_agent = [0 for _ in range(self.n_agents)]
+        self.delivered_app_acks = []
+        self.app_ack_sent_total = 0
+        self.app_ack_sent_per_agent = [0] * self.n_agents
+        self.app_ack_collisions_total = 0
+        self.app_ack_collisions_per_agent = [0] * self.n_agents
+        self.app_ack_drops_total = 0
+        self.app_ack_drops_per_agent = [0] * self.n_agents
+        self.app_ack_delivered_total = 0
+        self.app_ack_delivered_per_agent = [0] * self.n_agents
 
         for entity in self.entities:
             entity.state = EntityState.IDLE
@@ -289,6 +319,7 @@ class NetworkModel:
                 "collided": tx.collided,
                 "end_slot": tx.end_slot,
                 "is_mac_ack": tx.is_mac_ack,
+                "is_app_ack": tx.is_app_ack,
             }
             for tx in self.active_transmissions
         ]
@@ -406,16 +437,25 @@ class NetworkModel:
             )
         if entity.csma_backoffs > self.max_csma_backoffs:
             if entity.pending_packet is not None:
-                dropped_packets.append(entity.pending_packet)
-                if self._trace_active:
-                    self._trace_event(
-                        {
-                            "type": "drop",
-                            "entity_idx": int(entity_idx),
-                            "reason": "csma_backoff",
-                            "csma_backoffs": int(entity.csma_backoffs),
-                        }
-                    )
+                packet_type = entity.pending_packet.packet_type
+                if packet_type == "app_ack":
+                    sensor_id = entity.pending_packet.dest_id
+                    self.app_ack_drops_total += 1
+                    if 0 <= sensor_id < self.n_agents:
+                        self.app_ack_drops_per_agent[sensor_id] += 1
+                    if self._trace_active:
+                        self._trace_event({"type": "app_ack_drop", "entity_idx": int(entity_idx), "reason": "csma_backoff"})
+                else:
+                    dropped_packets.append(entity.pending_packet)
+                    if self._trace_active:
+                        self._trace_event(
+                            {
+                                "type": "drop",
+                                "entity_idx": int(entity_idx),
+                                "reason": "csma_backoff",
+                                "csma_backoffs": int(entity.csma_backoffs),
+                            }
+                        )
             self._clear_entity(entity)
             return
 
@@ -438,6 +478,14 @@ class NetworkModel:
 
             tx_slots = self._get_tx_slots_for_packet(packet.packet_type)
             end_slot = self.current_slot + tx_slots
+
+            is_app_ack = packet.packet_type == "app_ack"
+            if is_app_ack:
+                sensor_id = packet.dest_id
+                self.app_ack_sent_total += 1
+                if 0 <= sensor_id < self.n_agents:
+                    self.app_ack_sent_per_agent[sensor_id] += 1
+
             new_transmissions.append(
                 ActiveTransmission(
                     entity_idx=idx,
@@ -445,6 +493,9 @@ class NetworkModel:
                     end_slot=end_slot,
                     collided=False,
                     expects_ack=entity.expects_ack,
+                    is_app_ack=is_app_ack,
+                    ack_target_idx=packet.dest_id if is_app_ack else None,
+                    acked_measurement_timestamp=packet.payload.get("acked_measurement_timestamp") if is_app_ack and packet.payload else None,
                 )
             )
             entity.state = EntityState.TRANSMITTING
@@ -466,7 +517,7 @@ class NetworkModel:
 
         collided_data = [
             tx for tx in new_transmissions
-            if tx.collided and not tx.is_mac_ack and tx.packet.packet_type == "data"
+            if tx.collided and not tx.is_mac_ack and not tx.is_app_ack and tx.packet.packet_type == "data"
         ]
         self.total_collided_packets += len(collided_data)
         for tx in collided_data:
@@ -482,6 +533,7 @@ class NetworkModel:
                         "entity_idx": int(tx.entity_idx),
                         "packet_type": str(tx.packet.packet_type),
                         "is_mac_ack": bool(tx.is_mac_ack),
+                        "is_app_ack": bool(tx.is_app_ack),
                         "end_slot": int(tx.end_slot),
                         "collided": bool(tx.collided),
                     }
@@ -493,6 +545,8 @@ class NetworkModel:
     def _get_tx_slots_for_packet(self, packet_type: str) -> int:
         if packet_type == "data":
             return self.data_tx_slots
+        if packet_type == "app_ack":
+            return self.app_ack_tx_slots
         return self.mac_ack_tx_slots
 
     def _complete_transmissions(
@@ -524,7 +578,32 @@ class NetworkModel:
                         ack_target_idx = int(tx.ack_target_idx)
                         if 0 <= ack_target_idx < self.n_agents:
                             self.mac_ack_collisions_per_agent[ack_target_idx] += 1
-                    self._clear_entity(entity)
+                    # MAC ACK collisions should not alter controller queue state.
+                elif tx.is_app_ack:
+                    # App ACK collision - retry
+                    sensor_id = tx.packet.dest_id
+                    self.app_ack_collisions_total += 1
+                    if 0 <= sensor_id < self.n_agents:
+                        self.app_ack_collisions_per_agent[sensor_id] += 1
+
+                    entity.retry_count += 1
+                    if entity.retry_count > self.app_ack_max_retries:
+                        # App ACK dropped
+                        self.app_ack_drops_total += 1
+                        if 0 <= sensor_id < self.n_agents:
+                            self.app_ack_drops_per_agent[sensor_id] += 1
+                        self._clear_entity(entity)
+                        if self._trace_active:
+                            self._trace_event({"type": "app_ack_drop", "entity_idx": int(tx.entity_idx), "reason": "max_retries"})
+                    else:
+                        # Retry with backoff
+                        entity.state = EntityState.BACKING_OFF
+                        entity.backoff_exponent = self.mac_min_be
+                        entity.csma_backoffs = 0
+                        entity.backoff_counter = self._draw_backoff(entity.backoff_exponent, entity_idx=tx.entity_idx)
+                        entity.cca_countdown = 0
+                        if self._trace_active:
+                            self._trace_event({"type": "app_ack_retry", "entity_idx": int(tx.entity_idx), "retry_count": int(entity.retry_count)})
                 else:
                     self._handle_failed_tx(tx.entity_idx, entity, dropped_packets)
             elif tx.is_mac_ack:
@@ -539,6 +618,22 @@ class NetworkModel:
                     )
                 if tx.ack_target_idx is not None:
                     self._mark_ack_received(tx.ack_target_idx)
+            elif tx.is_app_ack:
+                # App ACK delivered successfully
+                sensor_id = tx.packet.dest_id
+                measurement_ts = tx.acked_measurement_timestamp
+                if measurement_ts is None and tx.packet.payload:
+                    measurement_ts = tx.packet.payload.get("acked_measurement_timestamp")
+                self.delivered_app_acks.append({
+                    "sensor_id": sensor_id,
+                    "measurement_timestamp": measurement_ts,
+                })
+                if 0 <= sensor_id < self.n_agents:
+                    self.app_ack_delivered_per_agent[sensor_id] += 1
+                    self.app_ack_delivered_total += 1
+                self._clear_entity(entity)
+                if self._trace_active:
+                    self._trace_event({"type": "tx_complete", "entity_idx": int(tx.entity_idx), "packet_type": "app_ack", "is_app_ack": True})
             else:
                 packet = tx.packet
                 if packet.packet_type == "data":
@@ -548,7 +643,14 @@ class NetworkModel:
                         self.data_delivered_per_agent[dest_id] += 1
                         self.data_delivered_total += 1
                     receiver_idx = self.n_agents + packet.dest_id
+                    measurement_timestamp = packet.payload.get("timestamp") if packet.payload else None
+
+                    # MAC ACK always sent
                     self._schedule_mac_ack(receiver_idx, tx.entity_idx)
+
+                    # App ACK also sent if enabled
+                    if self.app_ack_enabled and measurement_timestamp is not None:
+                        self._schedule_app_ack(receiver_idx, tx.entity_idx, measurement_timestamp)
 
                 if self._trace_active:
                     self._trace_event(
@@ -614,6 +716,29 @@ class NetworkModel:
                 "start_slot": start_slot,
             }
         )
+
+    def _schedule_app_ack(self, receiver_idx: int, tx_entity_idx: int, measurement_timestamp: int) -> None:
+        """Queue app ACK - controller goes through full CSMA/CA."""
+        if receiver_idx < 0 or receiver_idx >= len(self.entities):
+            return
+
+        controller_entity = self.entities[receiver_idx]
+
+        # Don't queue if controller is already busy
+        if controller_entity.pending_packet is not None:
+            return
+
+        app_ack_packet = Packet(
+            source_id=receiver_idx,
+            dest_id=tx_entity_idx,  # sensor index
+            packet_type="app_ack",
+            payload={"acked_sensor_id": tx_entity_idx, "acked_measurement_timestamp": measurement_timestamp},
+            size_bytes=self.app_ack_packet_size,
+            timestamp_sent=self.current_slot,
+        )
+
+        controller_entity.pending_packet = app_ack_packet
+        self._prepare_new_packet(receiver_idx, controller_entity, expects_ack=False)
 
     def _handle_ack_timeouts(self, dropped_packets: List[Packet]) -> None:
         for entity_idx, entity in enumerate(self.entities):

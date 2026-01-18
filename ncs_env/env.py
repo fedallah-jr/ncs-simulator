@@ -247,6 +247,9 @@ class NCS_Env(gym.Env):
             mac_ack_turnaround_us=network_cfg.get("mac_ack_turnaround_us", 192.0),
             cca_time_us=network_cfg.get("cca_time_us", 128.0),
             mac_ack_size_bytes=network_cfg.get("mac_ack_size_bytes", 5),
+            app_ack_enabled=network_cfg.get("app_ack_enabled", False),
+            app_ack_packet_size=network_cfg.get("app_ack_packet_size", 30),
+            app_ack_max_retries=network_cfg.get("app_ack_max_retries", 3),
             rng=self.np_random,
         )
 
@@ -443,6 +446,14 @@ class NCS_Env(gym.Env):
                     if entry is not None:
                         entry["status"] = 1
                         self._log_successful_comm(sensor_id, measurement_timestamp, self.timestep)
+
+                # App ACKs delivered - can be used for additional transport-layer tracking
+                # MAC ACK already handled the primary confirmation
+                for app_ack in network_result.get("delivered_app_acks", []):
+                    # App ACK received - tracking only for now
+                    # sensor_id = app_ack.get("sensor_id")
+                    # measurement_timestamp = app_ack.get("measurement_timestamp")
+                    pass
 
                 for packet in network_result["dropped_packets"]:
                     if packet.packet_type == "data":
@@ -1012,6 +1023,26 @@ class NCS_Env(gym.Env):
             if self.perfect_communication
             else [int(x) for x in self.network.ack_timeouts_per_agent]
         )
+        app_ack_sent = (
+            [0 for _ in range(self.n_agents)]
+            if self.perfect_communication
+            else [int(x) for x in self.network.app_ack_sent_per_agent]
+        )
+        app_ack_collisions = (
+            [0 for _ in range(self.n_agents)]
+            if self.perfect_communication
+            else [int(x) for x in self.network.app_ack_collisions_per_agent]
+        )
+        app_ack_drops = (
+            [0 for _ in range(self.n_agents)]
+            if self.perfect_communication
+            else [int(x) for x in self.network.app_ack_drops_per_agent]
+        )
+        app_ack_delivered = (
+            [0 for _ in range(self.n_agents)]
+            if self.perfect_communication
+            else [int(x) for x in self.network.app_ack_delivered_per_agent]
+        )
         info = {
             "timestep": self.timestep,
             "channel_state": "PERFECT" if self.perfect_communication else self.network.channel_state.name,
@@ -1029,6 +1060,10 @@ class NCS_Env(gym.Env):
                 "mac_ack_sent": mac_ack_sent,
                 "mac_ack_collisions": mac_ack_collisions,
                 "ack_timeouts": ack_timeouts,
+                "app_ack_sent": app_ack_sent,
+                "app_ack_collisions": app_ack_collisions,
+                "app_ack_drops": app_ack_drops,
+                "app_ack_delivered": app_ack_delivered,
             },
             "reward_components": {k: v.copy() for k, v in self.last_reward_components.items()},
             "termination_reasons": list(self.last_termination_reasons),
