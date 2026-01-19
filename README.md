@@ -60,6 +60,8 @@ Observations are laid out as `[current_state, current_throughput, prev_states...
 - `max_frame_retries`: How many collided/NAKed frame retries are attempted before drop (default 3).
 - `cca_time_us`, `mac_ack_wait_us`, `mac_ack_turnaround_us`: Timing knobs (µs) for CCA duration, MAC ACK wait, and ACK turnaround.
 - `mac_ack_size_bytes`: Size of the MAC ACK frame (default 5 bytes).
+- `mac_ifs_sifs_us`, `mac_ifs_lifs_us`: Inter-frame spacing (µs) for short/long frames after successful transactions (defaults 192/640).
+- `mac_ifs_max_sifs_frame_size`: Max frame size (bytes) that still uses SIFS (default 18).
 - `app_ack_enabled`: When `true`, controllers send application-level ACKs via CSMA/CA in addition to MAC ACKs (default `false`).
 - `app_ack_packet_size`: Size of app ACK packets in bytes (default 30).
 - `app_ack_max_retries`: Maximum retransmission attempts for app ACKs (default 3).

@@ -56,6 +56,7 @@ class NetworkEntity:
         self.cca_countdown = 0
         self.awaiting_ack_until: Optional[int] = None
         self.expects_ack = False
+        self.ifs_countdown = 0
 
 
 class NetworkModel:
@@ -79,6 +80,9 @@ class NetworkModel:
         mac_ack_turnaround_us: float = 192.0,
         cca_time_us: float = 128.0,
         mac_ack_size_bytes: int = 5,
+        mac_ifs_sifs_us: float = 192.0,
+        mac_ifs_lifs_us: float = 640.0,
+        mac_ifs_max_sifs_frame_size: int = 18,
         app_ack_enabled: bool = False,
         app_ack_packet_size: int = 30,
         app_ack_max_retries: int = 3,
@@ -99,6 +103,13 @@ class NetworkModel:
         self.cca_slots = max(1, self._slots_from_seconds(cca_time_us * 1e-6))
         self.mac_ack_wait_slots = max(1, self._slots_from_seconds(mac_ack_wait_us * 1e-6))
         self.mac_ack_turnaround_slots = max(1, self._slots_from_seconds(mac_ack_turnaround_us * 1e-6))
+        self.mac_ifs_max_sifs_frame_size = mac_ifs_max_sifs_frame_size
+        self.mac_ifs_sifs_slots = (
+            self._slots_from_seconds(mac_ifs_sifs_us * 1e-6) if mac_ifs_sifs_us > 0 else 0
+        )
+        self.mac_ifs_lifs_slots = (
+            self._slots_from_seconds(mac_ifs_lifs_us * 1e-6) if mac_ifs_lifs_us > 0 else 0
+        )
 
         self.rng = rng if rng is not None else np.random.default_rng()
 
@@ -155,6 +166,18 @@ class NetworkModel:
             return 1
         slots = int(np.ceil(duration_seconds / self.slot_duration))
         return max(1, slots)
+
+    def _get_ifs_slots(self, packet_size_bytes: int) -> int:
+        if packet_size_bytes <= self.mac_ifs_max_sifs_frame_size:
+            return self.mac_ifs_sifs_slots
+        return self.mac_ifs_lifs_slots
+
+    def _start_ifs(self, entity: NetworkEntity, packet_size_bytes: int) -> None:
+        ifs_slots = self._get_ifs_slots(packet_size_bytes)
+        if ifs_slots <= 0:
+            return
+        # Offset so the countdown cannot expire in the same slot it starts.
+        entity.ifs_countdown = ifs_slots + 1
 
     def queue_data_packet(
         self, sensor_id: int, state_measurement: np.ndarray, measurement_timestamp: int
@@ -253,6 +276,7 @@ class NetworkModel:
             entity.awaiting_ack_until = None
             entity.cca_countdown = 0
             entity.expects_ack = False
+            entity.ifs_countdown = 0
         self._trace_active = False
         self._trace_tick = None
         self._trace_slot_index = 0
@@ -396,6 +420,9 @@ class NetworkModel:
 
     def _tick_backoffs(self) -> None:
         for entity in self.entities:
+            if entity.ifs_countdown > 0:
+                entity.ifs_countdown -= 1
+                continue
             if entity.state == EntityState.BACKING_OFF and entity.backoff_counter > 0:
                 entity.backoff_counter -= 1
 
@@ -404,6 +431,9 @@ class NetworkModel:
         ready: List[int] = []
         for idx, entity in enumerate(self.entities):
             if entity.pending_packet is None:
+                continue
+
+            if entity.ifs_countdown > 0:
                 continue
 
             if entity.state == EntityState.BACKING_OFF and entity.backoff_counter <= 0:
@@ -647,7 +677,9 @@ class NetworkModel:
                     entity.state = EntityState.WAITING_ACK
                     entity.awaiting_ack_until = self.current_slot + self.mac_ack_wait_slots
                 else:
+                    ifs_packet_size = packet.size_bytes
                     self._clear_entity(entity)
+                    self._start_ifs(entity, ifs_packet_size)
 
         self.active_transmissions = remaining
         self.channel_state = ChannelState.BUSY if self.active_transmissions else ChannelState.IDLE
@@ -749,6 +781,7 @@ class NetworkModel:
     def _mark_ack_received(self, entity_idx: int) -> None:
         """Clear the transmitter once its MAC ACK is received."""
         entity = self.entities[entity_idx]
+        ifs_packet_size: Optional[int] = None
         if entity.pending_packet is not None and entity.pending_packet.packet_type == "data":
             measurement_timestamp = entity.pending_packet.payload.get("timestamp")
             self.delivered_mac_acks.append(
@@ -757,7 +790,11 @@ class NetworkModel:
                     "measurement_timestamp": measurement_timestamp,
                 }
             )
+        if entity.pending_packet is not None:
+            ifs_packet_size = entity.pending_packet.size_bytes
         self._clear_entity(entity)
+        if ifs_packet_size is not None:
+            self._start_ifs(entity, ifs_packet_size)
 
     def _handle_failed_tx(
         self, entity_idx: int, entity: NetworkEntity, dropped_packets: List[Packet]
@@ -837,3 +874,4 @@ class NetworkModel:
         entity.awaiting_ack_until = None
         entity.cca_countdown = 0
         entity.expects_ack = False
+        entity.ifs_countdown = 0
