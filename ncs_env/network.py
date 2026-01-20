@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
@@ -48,6 +49,8 @@ class NetworkEntity:
         self.entity_type = entity_type
         self.state = EntityState.IDLE
         self.pending_packet: Optional[Packet] = None
+        self.data_queue = deque()
+        self.data_queue_bytes = 0
         self.backoff_counter = 0
         self.collision_count = 0
         self.backoff_exponent = 3
@@ -57,6 +60,7 @@ class NetworkEntity:
         self.awaiting_ack_until: Optional[int] = None
         self.expects_ack = False
         self.ifs_countdown = 0
+        self.mac_ack_holdoff = 0
 
 
 class NetworkModel:
@@ -83,6 +87,7 @@ class NetworkModel:
         mac_ifs_sifs_us: float = 192.0,
         mac_ifs_lifs_us: float = 640.0,
         mac_ifs_max_sifs_frame_size: int = 18,
+        tx_buffer_bytes: int = 0,
         app_ack_enabled: bool = False,
         app_ack_packet_size: int = 30,
         app_ack_max_retries: int = 3,
@@ -112,6 +117,8 @@ class NetworkModel:
         )
 
         self.rng = rng if rng is not None else np.random.default_rng()
+
+        self.tx_buffer_bytes = max(0, int(tx_buffer_bytes))
 
         self.data_tx_slots = self._compute_tx_slots(self.data_packet_size)
         self.mac_ack_tx_slots = self._compute_tx_slots(self.mac_ack_size_bytes)
@@ -181,19 +188,10 @@ class NetworkModel:
 
     def queue_data_packet(
         self, sensor_id: int, state_measurement: np.ndarray, measurement_timestamp: int
-    ) -> Optional[Packet]:
-        """Queue a data packet from a sensor.
-
-        Returns:
-            The overwritten packet if one was dropped, None otherwise.
-        """
+    ) -> Tuple[bool, Optional[Packet]]:
+        """Queue a data packet from a sensor."""
         entity_idx = sensor_id
         entity = self.entities[entity_idx]
-
-        overwritten_packet = None
-        if entity.pending_packet is not None:
-            overwritten_packet = entity.pending_packet
-            entity.pending_packet = None
 
         packet = Packet(
             source_id=sensor_id,
@@ -203,11 +201,42 @@ class NetworkModel:
             size_bytes=self.data_packet_size,
             timestamp_sent=self.current_slot,
         )
+        if self.tx_buffer_bytes <= 0:
+            if entity.pending_packet is not None:
+                return False, None
+            entity.pending_packet = packet
+            self._prepare_new_packet(entity_idx, entity, expects_ack=True)
+            return True, None
+
+        if entity.pending_packet is None and not entity.data_queue:
+            entity.pending_packet = packet
+            self._prepare_new_packet(entity_idx, entity, expects_ack=True)
+            return True, None
+
+        if not self._enqueue_data_packet(entity, packet):
+            return False, None
+        if entity.pending_packet is None:
+            self._activate_next_data_packet(entity_idx, entity)
+        return True, None
+
+    def _enqueue_data_packet(self, entity: NetworkEntity, packet: Packet) -> bool:
+        if self.tx_buffer_bytes <= 0:
+            return False
+        if entity.data_queue_bytes + packet.size_bytes > self.tx_buffer_bytes:
+            return False
+        entity.data_queue.append(packet)
+        entity.data_queue_bytes += packet.size_bytes
+        return True
+
+    def _activate_next_data_packet(self, entity_idx: int, entity: NetworkEntity) -> None:
+        if entity.pending_packet is not None:
+            return
+        if not entity.data_queue:
+            return
+        packet = entity.data_queue.popleft()
+        entity.data_queue_bytes = max(0, entity.data_queue_bytes - packet.size_bytes)
         entity.pending_packet = packet
-
         self._prepare_new_packet(entity_idx, entity, expects_ack=True)
-
-        return overwritten_packet
 
     def run_slot(self) -> Dict[str, List[Packet]]:
         """Advance the network by one micro-slot."""
@@ -268,6 +297,8 @@ class NetworkModel:
         for entity in self.entities:
             entity.state = EntityState.IDLE
             entity.pending_packet = None
+            entity.data_queue.clear()
+            entity.data_queue_bytes = 0
             entity.backoff_counter = 0
             entity.collision_count = 0
             entity.backoff_exponent = self.mac_min_be
@@ -277,6 +308,7 @@ class NetworkModel:
             entity.cca_countdown = 0
             entity.expects_ack = False
             entity.ifs_countdown = 0
+            entity.mac_ack_holdoff = 0
         self._trace_active = False
         self._trace_tick = None
         self._trace_slot_index = 0
@@ -420,8 +452,12 @@ class NetworkModel:
 
     def _tick_backoffs(self) -> None:
         for entity in self.entities:
+            if entity.mac_ack_holdoff > 0:
+                entity.mac_ack_holdoff -= 1
             if entity.ifs_countdown > 0:
                 entity.ifs_countdown -= 1
+                continue
+            if entity.mac_ack_holdoff > 0:
                 continue
             if entity.state == EntityState.BACKING_OFF and entity.backoff_counter > 0:
                 entity.backoff_counter -= 1
@@ -431,6 +467,9 @@ class NetworkModel:
         ready: List[int] = []
         for idx, entity in enumerate(self.entities):
             if entity.pending_packet is None:
+                continue
+
+            if entity.mac_ack_holdoff > 0:
                 continue
 
             if entity.ifs_countdown > 0:
@@ -487,6 +526,7 @@ class NetworkModel:
                             }
                         )
             self._clear_entity(entity)
+            self._activate_next_data_packet(entity_idx, entity)
             return
 
         entity.backoff_exponent = min(self.mac_max_be, entity.backoff_exponent + 1)
@@ -615,7 +655,11 @@ class NetworkModel:
                         self.app_ack_collisions_total += 1
                         if 0 <= sensor_id < self.n_agents:
                             self.app_ack_collisions_per_agent[sensor_id] += 1
-                    self._handle_failed_tx(tx.entity_idx, entity, dropped_packets)
+                    if tx.expects_ack:
+                        entity.state = EntityState.WAITING_ACK
+                        entity.awaiting_ack_until = self.current_slot + self.mac_ack_wait_slots
+                    else:
+                        self._handle_failed_tx(tx.entity_idx, entity, dropped_packets)
             elif tx.is_mac_ack:
                 if self._trace_active:
                     self._trace_event(
@@ -721,6 +765,10 @@ class NetworkModel:
     def _schedule_mac_ack(self, receiver_idx: int, tx_entity_idx: int) -> None:
         if receiver_idx < 0 or receiver_idx >= len(self.entities):
             return
+        ack_sender = self.entities[receiver_idx]
+        holdoff_slots = self.mac_ack_turnaround_slots + self.mac_ack_tx_slots
+        if holdoff_slots > ack_sender.mac_ack_holdoff:
+            ack_sender.mac_ack_holdoff = holdoff_slots
         start_slot = self.current_slot + self.mac_ack_turnaround_slots
         self.pending_mac_acks.append(
             {
@@ -795,6 +843,7 @@ class NetworkModel:
         self._clear_entity(entity)
         if ifs_packet_size is not None:
             self._start_ifs(entity, ifs_packet_size)
+        self._activate_next_data_packet(entity_idx, entity)
 
     def _handle_failed_tx(
         self, entity_idx: int, entity: NetworkEntity, dropped_packets: List[Packet]
@@ -875,3 +924,4 @@ class NetworkModel:
         entity.cca_countdown = 0
         entity.expects_ack = False
         entity.ifs_countdown = 0
+        entity.mac_ack_holdoff = 0

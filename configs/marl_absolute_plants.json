@@ -50,6 +50,8 @@
   "network": {
     "data_rate_kbps": 100.0,
     "data_packet_size": 100,
-    "perfect_communication": false
+    "perfect_communication": false,
+    "app_ack_packet_size": 30,
+    "tx_buffer_bytes": 100
   }
 }

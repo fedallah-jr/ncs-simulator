@@ -250,6 +250,7 @@ class NCS_Env(gym.Env):
             mac_ifs_sifs_us=network_cfg.get("mac_ifs_sifs_us", 192.0),
             mac_ifs_lifs_us=network_cfg.get("mac_ifs_lifs_us", 640.0),
             mac_ifs_max_sifs_frame_size=network_cfg.get("mac_ifs_max_sifs_frame_size", 18),
+            tx_buffer_bytes=network_cfg.get("tx_buffer_bytes", 0),
             app_ack_enabled=network_cfg.get("app_ack_enabled", False),
             app_ack_packet_size=network_cfg.get("app_ack_packet_size", 30),
             app_ack_max_retries=network_cfg.get("app_ack_max_retries", 3),
@@ -394,25 +395,17 @@ class NCS_Env(gym.Env):
                 action = actions[f"agent_{i}"]
                 if action == 1:
                     self.net_tx_attempts[i] += 1
-                    entity = self.network.entities[i]
-                    if entity.pending_packet is not None:
-                        # TL refuses to overwrite an active MAC packet; count as failed attempt.
-                        self.net_tx_drops[i] += 1
-                        self._record_decision(i, status=3)
-                        continue
                     state = self.plants[i].get_state()
                     measurement = state + self._sample_measurement_noise()
                     # Use state_index as the measurement timestamp
                     # This clearly indicates measurement is of x[state_index]
                     measurement_timestamp = state_index
-                    overwritten = self.network.queue_data_packet(i, measurement, measurement_timestamp)
-                    # Handle queue overwrite: mark the dropped packet as failed (status=3)
-                    if overwritten is not None and overwritten.packet_type == "data":
-                        self.net_tx_rewrites[i] += 1
-                        dropped_timestamp = overwritten.payload.get("timestamp")
-                        dropped_entry = self.pending_transmissions[i].pop(dropped_timestamp, None)
-                        if dropped_entry is not None:
-                            dropped_entry["status"] = 3
+                    accepted, _ = self.network.queue_data_packet(i, measurement, measurement_timestamp)
+                    if not accepted:
+                        # Buffer full or MAC already busy: count as failed attempt.
+                        self.net_tx_drops[i] += 1
+                        self._record_decision(i, status=3)
+                        continue
                     entry = self._record_decision(i, status=2)
                     entry["send_timestamp"] = measurement_timestamp
                     self.pending_transmissions[i][measurement_timestamp] = entry
@@ -427,6 +420,11 @@ class NCS_Env(gym.Env):
                     controller_id = packet.dest_id
                     measurement = packet.payload["state"]
                     measurement_timestamp = packet.payload["timestamp"]
+                    applied = self.controllers[controller_id].delayed_update(
+                        measurement, measurement_timestamp
+                    )
+                    if not applied:
+                        continue
                     age_steps = max(0, int(state_index - int(measurement_timestamp)))
 
                     if self.track_true_goodput:
@@ -434,7 +432,6 @@ class NCS_Env(gym.Env):
                         if 0 <= sensor_id < self.n_agents:
                             self._record_true_goodput(sensor_id, int(measurement_timestamp))
 
-                    self.controllers[controller_id].delayed_update(measurement, measurement_timestamp)
                     self.last_measurements[controller_id] = measurement
                     delivered_controller_ids.add(controller_id)
                     existing_age = delivered_message_ages.get(controller_id)

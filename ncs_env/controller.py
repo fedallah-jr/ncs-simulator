@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import List, Optional, Union
+from typing import Deque, List, Optional, Set, Union
 
 import numpy as np
 from filterpy.kalman import KalmanFilter
@@ -160,6 +160,9 @@ class Controller:
         self.prior_history: deque = deque(maxlen=max_delay)
         # Stores (timestep, u) for each control applied
         self.control_history: deque = deque(maxlen=max_delay)
+        # Track measurement indices already processed to avoid duplicate updates.
+        self.seen_measurement_indices: Deque[int] = deque()
+        self.seen_measurement_set: Set[int] = set()
 
         # Create filterpy KalmanFilter
         # dim_x: state dimension, dim_z: measurement dimension
@@ -221,12 +224,25 @@ class Controller:
         # filterpy's predict can take control input
         self.kf.predict(u=self.last_u.reshape(-1, 1))
 
-    def update(self, measurement: np.ndarray):
+    def update(self, measurement: np.ndarray) -> None:
         """
         Kalman filter measurement update.
         This is the measurement update step: corrects prediction using measurement.
         """
         self.kf.update(measurement.reshape(-1, 1))
+        self._record_seen_measurement(self.current_state_index)
+
+    def _has_seen_measurement(self, measurement_state_index: int) -> bool:
+        return measurement_state_index in self.seen_measurement_set
+
+    def _record_seen_measurement(self, measurement_state_index: int) -> None:
+        if measurement_state_index in self.seen_measurement_set:
+            return
+        self.seen_measurement_indices.append(measurement_state_index)
+        self.seen_measurement_set.add(measurement_state_index)
+        while len(self.seen_measurement_indices) > self.max_delay:
+            old_index = self.seen_measurement_indices.popleft()
+            self.seen_measurement_set.discard(old_index)
 
     def delayed_update(self, measurement: np.ndarray, measurement_state_index: int) -> bool:
         """
@@ -248,6 +264,9 @@ class Controller:
         bool
             True if update was successful, False if prior not found
         """
+        measurement_state_index = int(measurement_state_index)
+        if self._has_seen_measurement(measurement_state_index):
+            return False
         # Find the prior for the measurement state index
         prior_entry = None
         for entry in self.prior_history:
@@ -257,6 +276,7 @@ class Controller:
 
         if prior_entry is None:
             # Prior not found (too old or not stored); treat as stale and skip update
+            self._record_seen_measurement(measurement_state_index)
             return False
 
         # Restore the prior state
@@ -296,6 +316,7 @@ class Controller:
         # Update the Kalman filter state
         self.kf.x = x_current
         self.kf.P = P_current
+        self._record_seen_measurement(measurement_state_index)
         return True
 
     def compute_control(self) -> np.ndarray:
@@ -329,6 +350,8 @@ class Controller:
         self.current_state_index = 0
         self.prior_history.clear()
         self.control_history.clear()
+        self.seen_measurement_indices.clear()
+        self.seen_measurement_set.clear()
 
         # Reset time counter for finite-horizon mode
         self.time_step = 0

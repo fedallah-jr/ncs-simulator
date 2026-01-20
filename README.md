@@ -65,8 +65,9 @@ Observations are laid out as `[current_state, current_throughput, prev_states...
 - `app_ack_enabled`: When `true`, controllers send application-level ACKs via CSMA/CA in addition to MAC ACKs (default `false`).
 - `app_ack_packet_size`: Size of app ACK packets in bytes (default 30).
 - `app_ack_max_retries`: Maximum retransmission attempts for app ACKs (default 3).
+- `tx_buffer_bytes`: Optional per-sensor TX buffer capacity in bytes for queued data packets (beyond the in-flight packet). Set to `0` to disable buffering (current behavior). When set, packets are queued FIFO until the buffer is full.
 
-Note: `max_queue_size` is not supported yet; the network currently behaves as a fixed single-packet queue with overwrite-on-send. This option may be implemented in a future update.
+Note: `tx_buffer_bytes` applies only to data packets; MAC/app ACKs are still sent immediately and are not buffered.
 
 Adjusting these parameters lets you explore different plant dynamics, estimator fidelity, reward shaping, or network congestion levels without modifying the source code.
 
