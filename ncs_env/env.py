@@ -31,8 +31,11 @@ class RewardDefinition:
     normalizer: Optional[RunningRewardNormalizer] = None
 
     def __post_init__(self) -> None:
-        if self.mode not in {"difference", "absolute", "simple", "simple_penalty"}:
-            raise ValueError("state_error_reward must be 'difference', 'absolute', 'simple', or 'simple_penalty'")
+        if self.mode not in {"difference", "absolute", "absolute_sqrt", "simple", "simple_penalty"}:
+            raise ValueError(
+                "state_error_reward must be 'difference', 'absolute', 'absolute_sqrt', "
+                "'simple', or 'simple_penalty'"
+            )
         if float(self.simple_freshness_decay) < 0.0:
             raise ValueError("simple_freshness_decay must be >= 0")
 
@@ -57,7 +60,7 @@ def _should_normalize_reward(definition: RewardDefinition) -> bool:
     # Automatic detection based on reward type
     # Simple rewards are bounded and well-scaled, don't normalize
     # Absolute/difference rewards are unbounded, do normalize
-    return definition.mode in ["absolute", "difference"]
+    return definition.mode in ["absolute", "absolute_sqrt", "difference"]
 
 
 class NCS_Env(gym.Env):
@@ -930,6 +933,8 @@ class NCS_Env(gym.Env):
             error_reward = prev_error - curr_error
         elif definition.mode == "absolute":
             error_reward = -curr_error
+        elif definition.mode == "absolute_sqrt":
+            error_reward = -float(np.sqrt(max(curr_error, 0.0)))
         elif definition.mode == "simple_penalty":
             # Symmetric version of "simple": 0 if measurement delivered, -1 otherwise
             if info_arrived:
