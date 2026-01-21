@@ -105,6 +105,11 @@ class NCS_Env(gym.Env):
         self.initial_state_scale_min, self.initial_state_scale_max = self._resolve_initial_state_scale_range(
             self.system_cfg, self.state_dim
         )
+        self.initial_state_fixed = bool(self.system_cfg.get("initial_state_fixed", False))
+        self.initial_state_fixed_seed = self.system_cfg.get("initial_state_fixed_seed", None)
+        if self.initial_state_fixed and self.initial_state_fixed_seed is None:
+            self.initial_state_fixed_seed = 0
+        self._fixed_initial_states: Optional[List[np.ndarray]] = None
 
         observation_cfg = self.config.get("observation", {})
         self.history_window = observation_cfg.get("history_window", 10)
@@ -213,9 +218,18 @@ class NCS_Env(gym.Env):
             self.termination_error_max = float(self.termination_error_max)
         self.termination_penalty = float(termination_cfg.get("penalty", 0.0))
 
+        if self.initial_state_fixed:
+            fixed_rng = np.random.default_rng(int(self.initial_state_fixed_seed))
+            self._fixed_initial_states = [
+                self._sample_initial_state(rng=fixed_rng) for _ in range(self.n_agents)
+            ]
+
         self.plants: List[Plant] = []
         for i in range(self.n_agents):
-            x0 = self._sample_initial_state()
+            if self._fixed_initial_states is not None:
+                x0 = self._fixed_initial_states[i].copy()
+            else:
+                x0 = self._sample_initial_state()
             # Pass self.np_random to Plant for isolated RNG
             A_i, B_i = agent_matrices[i]
             self.plants.append(Plant(A_i, B_i, W, x0, rng=self.np_random))
@@ -327,9 +341,12 @@ class NCS_Env(gym.Env):
 
         # Update RNG references in subsystems after super().reset()
         # This ensures all subsystems use the same isolated RNG stream
-        for plant in self.plants:
+        for idx, plant in enumerate(self.plants):
             plant.rng = self.np_random
-            x0 = self._sample_initial_state()
+            if self._fixed_initial_states is not None:
+                x0 = self._fixed_initial_states[idx].copy()
+            else:
+                x0 = self._sample_initial_state()
             plant.reset(x0)
 
         for controller in self.controllers:
@@ -601,15 +618,16 @@ class NCS_Env(gym.Env):
         self.decision_history[agent_idx].append(entry)
         return entry
 
-    def _sample_initial_state(self) -> np.ndarray:
+    def _sample_initial_state(self, rng: Optional[np.random.Generator] = None) -> np.ndarray:
         """
         Sample an initial plant state with magnitude constrained to [scale_min, scale_max]
         per dimension. Sign is chosen uniformly.
         """
+        rng = self.np_random if rng is None else rng
         scale_min = self.initial_state_scale_min
         scale_max = self.initial_state_scale_max
-        magnitudes = self.np_random.uniform(low=scale_min, high=scale_max)
-        signs = self.np_random.choice([-1.0, 1.0], size=self.state_dim)
+        magnitudes = rng.uniform(low=scale_min, high=scale_max)
+        signs = rng.choice([-1.0, 1.0], size=self.state_dim)
         return signs * magnitudes
 
     def _resolve_agent_system_matrices(self) -> List[Tuple[np.ndarray, np.ndarray]]:
