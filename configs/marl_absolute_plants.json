@@ -4,9 +4,9 @@
     "A": [[0.99, 0.01], [0.0, 0.99]],
     "B": [[0.000025], [0.005]],
     "heterogeneous_plants": [
-      { "A": [[0.999, 0.01], [0.0, 0.9985]], "B": [[0.00001], [0.002]] },
-      { "A": [[1, 0.01], [0.0, 1]], "B": [[0.00009], [0.006]] },
-      { "A": [[1.034, 0.01], [0.0, 1.0283]], "B": [[0.0017], [0.035]] }
+      { "A": [[0.9995, 0.01], [0.0, 0.9985]], "B": [[0.000015], [0.0025]] },
+      { "A": [[1.001, 0.01], [0.0, 1.00005]], "B": [[0.00011], [0.0064]] },
+      { "A": [[1.034, 0.01], [0.0, 1.0293]], "B": [[0.0019], [0.04]] }
     ],
     "process_noise_cov": [[0.1, 0.0], [0.0, 0.1]],
     "measurement_noise_cov": [[0.0, 0.0], [0.0, 0.0]],
@@ -35,7 +35,7 @@
   },
   "termination": {
     "enabled": true,
-    "state_error_max": 1000.0,
+    "state_error_max": 1250.0,
     "penalty": -500.0,
     "evaluation": {
       "penalty": -1000000.0
@@ -48,10 +48,11 @@
     "quantization_step": 0
   },
   "network": {
-    "data_rate_kbps": 100.0,
-    "data_packet_size": 100,
+    "data_rate_kbps": 250.0,
+    "data_packet_size": 125,
     "perfect_communication": false,
+    "app_ack_enabled": true,
     "app_ack_packet_size": 30,
-    "tx_buffer_bytes": 100
+    "tx_buffer_bytes": 125
   }
 }
