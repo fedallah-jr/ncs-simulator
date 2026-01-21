@@ -12,7 +12,9 @@
     "measurement_noise_cov": [[0.0, 0.0], [0.0, 0.0]],
     "initial_estimate_cov": [[1.0, 0.0], [0.0, 1.0]],
     "initial_state_scale_min": 0.9,
-    "initial_state_scale_max": 1.0
+    "initial_state_scale_max": 1.0,
+    "initial_state_fixed": true,
+    "initial_state_fixed_seed": 0
   },
   "lqr": {
     "Q": [[1.0, 0.0], [0.0, 1.0]],
