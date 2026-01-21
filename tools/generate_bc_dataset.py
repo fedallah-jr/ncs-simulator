@@ -70,9 +70,11 @@ def main() -> None:
     obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
     n_actions = int(env.action_space.spaces["agent_0"].n)
 
-    obs_records: List[np.ndarray] = []
-    action_records: List[int] = []
-    agent_id_records: List[int] = []
+    step_obs: List[np.ndarray] = []
+    step_actions: List[np.ndarray] = []
+    step_rewards: List[np.ndarray] = []
+    step_dones: List[bool] = []
+    step_episode_ids: List[int] = []
 
     for episode in range(int(args.episodes)):
         episode_seed = None if args.seed is None else int(args.seed) + episode
@@ -86,31 +88,45 @@ def main() -> None:
             actions: List[int] = []
             for i in range(n_agents):
                 action, _ = policies[i].predict(obs[i], deterministic=True)
-                action_int = int(action)
-                actions.append(action_int)
-                obs_records.append(obs[i].astype(np.float32, copy=False))
-                action_records.append(action_int)
-                agent_id_records.append(i)
+                actions.append(int(action))
 
             action_dict = {f"agent_{i}": actions[i] for i in range(n_agents)}
-            obs_dict, _rewards, terminated, truncated, _infos = env.step(action_dict)
+            next_obs_dict, rewards_dict, terminated, truncated, _infos = env.step(action_dict)
+            rewards = np.asarray(
+                [rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32
+            )
             done = all(terminated.values()) or all(truncated.values())
 
-    obs_arr = np.asarray(obs_records, dtype=np.float32)
-    actions_arr = np.asarray(action_records, dtype=np.int64)
-    agent_ids_arr = np.asarray(agent_id_records, dtype=np.int64)
+            step_obs.append(obs.astype(np.float32, copy=False))
+            step_actions.append(np.asarray(actions, dtype=np.int64))
+            step_rewards.append(rewards)
+            step_dones.append(done)
+            step_episode_ids.append(episode)
 
-    if obs_arr.ndim != 2 or actions_arr.ndim != 1 or agent_ids_arr.ndim != 1:
+            obs_dict = next_obs_dict
+
+    obs_arr = np.asarray(step_obs, dtype=np.float32)
+    actions_arr = np.asarray(step_actions, dtype=np.int64)
+    rewards_arr = np.asarray(step_rewards, dtype=np.float32)
+    dones_arr = np.asarray(step_dones, dtype=bool)
+    episode_ids_arr = np.asarray(step_episode_ids, dtype=np.int64)
+
+    if obs_arr.ndim != 3 or actions_arr.ndim != 2 or rewards_arr.ndim != 2:
         raise RuntimeError("Invalid dataset shapes when generating BC data.")
-    if obs_arr.shape[0] != actions_arr.shape[0] or obs_arr.shape[0] != agent_ids_arr.shape[0]:
-        raise RuntimeError("BC dataset arrays must have matching first dimension.")
+    if obs_arr.shape[0] != actions_arr.shape[0] or obs_arr.shape[0] != rewards_arr.shape[0]:
+        raise RuntimeError("BC dataset arrays must align on the first dimension.")
+    if dones_arr.shape[0] != obs_arr.shape[0]:
+        raise RuntimeError("BC dataset dones must align on the first dimension.")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         args.output,
         obs=obs_arr,
         actions=actions_arr,
-        agent_ids=agent_ids_arr,
+        rewards=rewards_arr,
+        dones=dones_arr,
+        episode_ids=episode_ids_arr,
+        format_version=np.array(2, dtype=np.int64),
         n_agents=np.array(n_agents, dtype=np.int64),
         obs_dim=np.array(obs_dim, dtype=np.int64),
         n_actions=np.array(n_actions, dtype=np.int64),
@@ -123,7 +139,7 @@ def main() -> None:
     )
 
     env.close()
-    print(f"Saved {obs_arr.shape[0]} samples to {args.output}")
+    print(f"Saved {obs_arr.shape[0]} steps to {args.output}")
 
 
 if __name__ == "__main__":

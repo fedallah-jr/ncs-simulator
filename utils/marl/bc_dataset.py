@@ -11,23 +11,34 @@ import numpy as np
 class BCDataset:
     obs: np.ndarray
     actions: np.ndarray
-    agent_ids: np.ndarray
+    rewards: np.ndarray
+    dones: np.ndarray
+    episode_ids: np.ndarray
     metadata: Dict[str, Any]
 
     @property
-    def size(self) -> int:
-        return int(self.actions.shape[0])
+    def num_steps(self) -> int:
+        return int(self.obs.shape[0])
 
-    def iter_batches(
+    @property
+    def n_agents(self) -> int:
+        return int(self.obs.shape[1])
+
+    def iter_actor_batches(
         self, batch_size: int, rng: np.random.Generator
     ) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        indices = np.arange(self.size, dtype=np.int64)
+        total_samples = int(self.num_steps * self.n_agents)
+        indices = np.arange(total_samples, dtype=np.int64)
         rng.shuffle(indices)
-        for start in range(0, self.size, batch_size):
+        for start in range(0, total_samples, batch_size):
             batch_idx = indices[start : start + batch_size]
-            yield self.obs[batch_idx], self.actions[batch_idx], self.agent_ids[batch_idx]
+            step_idx = batch_idx // self.n_agents
+            agent_idx = batch_idx % self.n_agents
+            obs_mb = self.obs[step_idx, agent_idx]
+            actions_mb = self.actions[step_idx, agent_idx]
+            yield obs_mb, actions_mb, agent_idx
 
 
 def _read_scalar(data: np.lib.npyio.NpzFile, key: str, default: Any) -> Any:
@@ -45,23 +56,35 @@ def load_bc_dataset(path: Path) -> BCDataset:
     with np.load(path, allow_pickle=False) as data:
         if "obs" not in data or "actions" not in data:
             raise ValueError("BC dataset must contain 'obs' and 'actions' arrays.")
-        if "agent_ids" not in data:
-            raise ValueError("BC dataset must include 'agent_ids' for actor pretraining.")
+        if "rewards" not in data or "dones" not in data:
+            raise ValueError("BC dataset must contain 'rewards' and 'dones' arrays.")
 
         obs = np.asarray(data["obs"], dtype=np.float32)
         actions = np.asarray(data["actions"], dtype=np.int64)
-        agent_ids = np.asarray(data["agent_ids"], dtype=np.int64)
+        rewards = np.asarray(data["rewards"], dtype=np.float32)
+        dones = np.asarray(data["dones"], dtype=bool)
+        episode_ids = (
+            np.asarray(data["episode_ids"], dtype=np.int64)
+            if "episode_ids" in data
+            else np.zeros((obs.shape[0],), dtype=np.int64)
+        )
 
-        if obs.ndim != 2:
-            raise ValueError("BC dataset 'obs' must have shape (N, obs_dim).")
-        if actions.ndim != 1 or agent_ids.ndim != 1:
-            raise ValueError("BC dataset 'actions' and 'agent_ids' must be 1D arrays.")
-        if obs.shape[0] != actions.shape[0] or obs.shape[0] != agent_ids.shape[0]:
+        if obs.ndim != 3:
+            raise ValueError("BC dataset 'obs' must have shape (steps, n_agents, obs_dim).")
+        if actions.ndim != 2 or rewards.ndim != 2:
+            raise ValueError("BC dataset 'actions' and 'rewards' must have shape (steps, n_agents).")
+        if dones.ndim != 1:
+            raise ValueError("BC dataset 'dones' must be shape (steps,).")
+        if obs.shape[0] != actions.shape[0] or obs.shape[0] != rewards.shape[0]:
             raise ValueError("BC dataset arrays must align on the first dimension.")
+        if actions.shape[1] != obs.shape[1] or rewards.shape[1] != obs.shape[1]:
+            raise ValueError("BC dataset n_agents dimension must align across arrays.")
+        if dones.shape[0] != obs.shape[0]:
+            raise ValueError("BC dataset dones must align on the first dimension.")
 
         metadata: Dict[str, Any] = {
             "n_agents": _read_scalar(data, "n_agents", None),
-            "obs_dim": _read_scalar(data, "obs_dim", obs.shape[1]),
+            "obs_dim": _read_scalar(data, "obs_dim", obs.shape[2]),
             "n_actions": _read_scalar(data, "n_actions", None),
             "episodes": _read_scalar(data, "episodes", None),
             "episode_length": _read_scalar(data, "episode_length", None),
@@ -69,6 +92,14 @@ def load_bc_dataset(path: Path) -> BCDataset:
             "policy_name": _read_scalar(data, "policy_name", None),
             "config_path": _read_scalar(data, "config_path", None),
             "use_agent_id": _read_scalar(data, "use_agent_id", None),
+            "format_version": _read_scalar(data, "format_version", None),
         }
 
-    return BCDataset(obs=obs, actions=actions, agent_ids=agent_ids, metadata=metadata)
+    return BCDataset(
+        obs=obs,
+        actions=actions,
+        rewards=rewards,
+        dones=dones,
+        episode_ids=episode_ids,
+        metadata=metadata,
+    )

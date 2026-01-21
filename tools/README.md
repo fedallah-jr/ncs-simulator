@@ -337,8 +337,8 @@ python -m tools.generate_bc_dataset --config configs/marl_mixed_plants.json \
   --episodes 50 --episode-length 500 --output outputs/bc_zero_wait.npz
 ```
 
-The saved `.npz` contains `obs`, `actions`, and `agent_ids` plus metadata such as `n_agents`
-and `obs_dim`, which can be used to pretrain MAPPO with `--bc-dataset`.
+The saved `.npz` contains step-level `obs`, `actions`, `rewards`, and `dones` plus metadata
+such as `n_agents` and `obs_dim`, which can be used to pretrain MAPPO with `--bc-dataset`.
 
 ## Troubleshooting
 

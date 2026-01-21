@@ -182,6 +182,18 @@ def parse_args() -> argparse.Namespace:
         help="BC learning rate (defaults to --learning-rate).",
     )
     parser.add_argument(
+        "--bc-value-epochs",
+        type=int,
+        default=None,
+        help="BC value pretraining epochs (defaults to --bc-epochs).",
+    )
+    parser.add_argument(
+        "--no-bc-pretrain-critic",
+        action="store_false",
+        dest="bc_pretrain_critic",
+        help="Disable critic pretraining during BC.",
+    )
+    parser.add_argument(
         "--bc-only",
         action="store_true",
         help="Run BC pretraining and exit without PPO updates.",
@@ -193,6 +205,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-freq", type=int, default=2500, help="Evaluation frequency in env steps.")
     parser.add_argument("--n-eval-episodes", type=int, default=5, help="Number of evaluation episodes.")
     parser.set_defaults(normalize_obs=True)
+    parser.set_defaults(bc_pretrain_critic=True)
     return parser.parse_args()
 
 
@@ -215,6 +228,21 @@ def _compute_gae(
         advantages[t] = last_adv
     returns = advantages + values
     return advantages, returns
+
+
+def _compute_discounted_returns(
+    rewards: np.ndarray,
+    dones: np.ndarray,
+    gamma: float,
+) -> np.ndarray:
+    returns = np.zeros_like(rewards, dtype=np.float32)
+    running = np.zeros((rewards.shape[1],), dtype=np.float32)
+    for t in range(rewards.shape[0] - 1, -1, -1):
+        if bool(dones[t]):
+            running = np.zeros_like(running)
+        running = rewards[t] + gamma * running
+        returns[t] = running
+    return returns
 
 
 def _append_agent_id_flat(obs_flat: torch.Tensor, agent_ids: torch.Tensor, n_agents: int) -> torch.Tensor:
@@ -305,6 +333,7 @@ def main() -> None:
         activation=args.activation,
         layer_norm=args.layer_norm,
     ).to(device)
+    value_normalizer = ValueNorm((value_dim,), device=device, beta=float(args.value_norm_beta))
 
     def save_checkpoint(path: Path) -> None:
         ckpt: Dict[str, Any] = {
@@ -334,11 +363,15 @@ def main() -> None:
     bc_pretrain_path: Optional[Path] = None
     if args.bc_dataset is not None:
         bc_dataset = load_bc_dataset(args.bc_dataset)
-        if bc_dataset.size <= 0:
+        if bc_dataset.num_steps <= 0:
             raise ValueError("BC dataset is empty.")
-        if bc_dataset.obs.shape[1] != obs_dim:
+        if bc_dataset.obs.shape[2] != obs_dim:
             raise ValueError(
-                f"BC obs_dim {bc_dataset.obs.shape[1]} does not match env obs_dim {obs_dim}."
+                f"BC obs_dim {bc_dataset.obs.shape[2]} does not match env obs_dim {obs_dim}."
+            )
+        if bc_dataset.n_agents != n_agents:
+            raise ValueError(
+                f"BC dataset n_agents {bc_dataset.n_agents} does not match env n_agents {n_agents}."
             )
         meta_n_agents = bc_dataset.metadata.get("n_agents")
         if meta_n_agents is not None and int(meta_n_agents) != n_agents:
@@ -357,22 +390,29 @@ def main() -> None:
             if obs_normalizer is not None:
                 bc_dataset.obs = obs_normalizer.normalize(bc_dataset.obs, update=True)
 
+            obs_flat = bc_dataset.obs.reshape(-1, obs_dim)
+            actions_flat = bc_dataset.actions.reshape(-1)
+            agent_ids_flat = np.tile(np.arange(n_agents, dtype=np.int64), bc_dataset.num_steps)
+            total_samples = int(actions_flat.shape[0])
+
             bc_optimizer = torch.optim.Adam(actor.parameters(), lr=bc_lr)
             for epoch in range(int(args.bc_epochs)):
+                indices = rng.permutation(total_samples)
                 total_loss = 0.0
                 total_count = 0
-                for obs_mb, actions_mb, agent_ids_mb in bc_dataset.iter_batches(
-                    int(args.bc_batch_size), rng
-                ):
-                    obs_t = torch.as_tensor(obs_mb, device=device, dtype=torch.float32)
-                    actions_t = torch.as_tensor(actions_mb, device=device, dtype=torch.int64)
+                for start in range(0, total_samples, int(args.bc_batch_size)):
+                    mb_idx = indices[start : start + int(args.bc_batch_size)]
+                    obs_mb = torch.as_tensor(obs_flat[mb_idx], device=device, dtype=torch.float32)
+                    actions_mb = torch.as_tensor(actions_flat[mb_idx], device=device, dtype=torch.int64)
                     if use_agent_id:
-                        agent_ids_t = torch.as_tensor(agent_ids_mb, device=device, dtype=torch.int64)
-                        obs_in = _append_agent_id_flat(obs_t, agent_ids_t, n_agents)
+                        agent_ids_mb = torch.as_tensor(
+                            agent_ids_flat[mb_idx], device=device, dtype=torch.int64
+                        )
+                        obs_in = _append_agent_id_flat(obs_mb, agent_ids_mb, n_agents)
                     else:
-                        obs_in = obs_t
+                        obs_in = obs_mb
                     logits = actor(obs_in)
-                    loss = F.cross_entropy(logits, actions_t)
+                    loss = F.cross_entropy(logits, actions_mb)
 
                     bc_optimizer.zero_grad(set_to_none=True)
                     loss.backward()
@@ -384,16 +424,64 @@ def main() -> None:
                     total_count += batch_count
                 mean_loss = total_loss / max(1, total_count)
                 print(
-                    f"[MAPPO][BC] epoch={epoch + 1}/{int(args.bc_epochs)} "
+                    f"[MAPPO][BC][actor] epoch={epoch + 1}/{int(args.bc_epochs)} "
                     f"loss={mean_loss:.6f} samples={total_count}"
                 )
+
+            if args.bc_pretrain_critic:
+                value_epochs = (
+                    int(args.bc_epochs)
+                    if args.bc_value_epochs is None
+                    else int(args.bc_value_epochs)
+                )
+                if value_epochs > 0:
+                    rewards = bc_dataset.rewards
+                    if args.team_reward:
+                        rewards = rewards.sum(axis=1, keepdims=True)
+                    returns = _compute_discounted_returns(
+                        rewards=rewards,
+                        dones=bc_dataset.dones,
+                        gamma=float(args.gamma),
+                    )
+                    returns_t = torch.as_tensor(returns, device=device, dtype=torch.float32)
+                    value_normalizer.update(returns_t)
+                    normalized_returns_t = value_normalizer.normalize(returns_t)
+
+                    global_obs = bc_dataset.obs.reshape(bc_dataset.num_steps, -1)
+                    global_obs_t = torch.as_tensor(global_obs, device=device, dtype=torch.float32)
+                    bc_value_optimizer = torch.optim.Adam(critic.parameters(), lr=bc_lr)
+                    total_steps = int(bc_dataset.num_steps)
+                    for epoch in range(value_epochs):
+                        indices = rng.permutation(total_steps)
+                        total_loss = 0.0
+                        total_count = 0
+                        for start in range(0, total_steps, int(args.bc_batch_size)):
+                            mb_idx = indices[start : start + int(args.bc_batch_size)]
+                            mb_idx_t = torch.as_tensor(mb_idx, device=device, dtype=torch.long)
+                            obs_mb = global_obs_t[mb_idx_t]
+                            target_mb = normalized_returns_t[mb_idx_t]
+                            pred = critic(obs_mb)
+                            loss = _huber_loss(pred - target_mb, args.huber_delta).mean()
+
+                            bc_value_optimizer.zero_grad(set_to_none=True)
+                            loss.backward()
+                            nn.utils.clip_grad_norm_(critic.parameters(), float(args.max_grad_norm))
+                            bc_value_optimizer.step()
+
+                            batch_count = int(mb_idx_t.shape[0])
+                            total_loss += float(loss.item()) * batch_count
+                            total_count += batch_count
+                        mean_loss = total_loss / max(1, total_count)
+                        print(
+                            f"[MAPPO][BC][critic] epoch={epoch + 1}/{value_epochs} "
+                            f"loss={mean_loss:.6f} steps={total_count}"
+                        )
 
             bc_pretrain_path = run_dir / "bc_pretrain.pt"
             save_checkpoint(bc_pretrain_path)
 
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=float(args.learning_rate))
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=float(args.learning_rate))
-    value_normalizer = ValueNorm((value_dim,), device=device, beta=float(args.value_norm_beta))
 
     best_eval_reward = -float("inf")
     global_step = 0
@@ -435,6 +523,8 @@ def main() -> None:
         "bc_epochs": args.bc_epochs,
         "bc_batch_size": args.bc_batch_size,
         "bc_lr": args.bc_lr,
+        "bc_value_epochs": args.bc_value_epochs,
+        "bc_pretrain_critic": args.bc_pretrain_critic,
         "bc_only": args.bc_only,
     }
 
