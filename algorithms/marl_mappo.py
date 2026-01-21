@@ -28,6 +28,7 @@ from utils.marl import (
     select_device,
     stack_obs,
 )
+from utils.marl.bc_dataset import load_bc_dataset
 from utils.reward_normalization import reset_shared_running_normalizers
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
@@ -156,6 +157,35 @@ def parse_args() -> argparse.Namespace:
         default=1e-8,
         help="Epsilon for observation normalization.",
     )
+    parser.add_argument(
+        "--bc-dataset",
+        type=Path,
+        default=None,
+        help="Path to behavioral cloning dataset (.npz).",
+    )
+    parser.add_argument(
+        "--bc-epochs",
+        type=int,
+        default=0,
+        help="Number of BC epochs before PPO training (0 disables).",
+    )
+    parser.add_argument(
+        "--bc-batch-size",
+        type=int,
+        default=1024,
+        help="Mini-batch size for BC pretraining.",
+    )
+    parser.add_argument(
+        "--bc-lr",
+        type=float,
+        default=None,
+        help="BC learning rate (defaults to --learning-rate).",
+    )
+    parser.add_argument(
+        "--bc-only",
+        action="store_true",
+        help="Run BC pretraining and exit without PPO updates.",
+    )
 
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Torch device.")
     parser.add_argument("--log-interval", type=int, default=10, help="Print every N episodes.")
@@ -202,6 +232,10 @@ def _huber_loss(error: torch.Tensor, delta: float) -> torch.Tensor:
 def main() -> None:
     reset_shared_running_normalizers()
     args = parse_args()
+    if args.bc_epochs > 0 and args.bc_dataset is None:
+        raise ValueError("--bc-epochs requires --bc-dataset")
+    if args.bc_only and args.bc_dataset is None:
+        raise ValueError("--bc-only requires --bc-dataset")
     device = select_device(args.device)
     rng = np.random.default_rng(args.seed)
     torch.manual_seed(args.seed if args.seed is not None else 0)
@@ -272,17 +306,6 @@ def main() -> None:
         layer_norm=args.layer_norm,
     ).to(device)
 
-    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=float(args.learning_rate))
-    critic_optimizer = torch.optim.Adam(critic.parameters(), lr=float(args.learning_rate))
-    value_normalizer = ValueNorm((value_dim,), device=device, beta=float(args.value_norm_beta))
-
-    best_eval_reward = -float("inf")
-    global_step = 0
-    episode = 0
-    last_eval_step = 0
-    episode_reward_sum = 0.0
-    episode_length = 0
-
     def save_checkpoint(path: Path) -> None:
         ckpt: Dict[str, Any] = {
             "algorithm": "mappo",
@@ -308,12 +331,140 @@ def main() -> None:
         )
         torch.save(ckpt, path)
 
+    bc_pretrain_path: Optional[Path] = None
+    if args.bc_dataset is not None:
+        bc_dataset = load_bc_dataset(args.bc_dataset)
+        if bc_dataset.size <= 0:
+            raise ValueError("BC dataset is empty.")
+        if bc_dataset.obs.shape[1] != obs_dim:
+            raise ValueError(
+                f"BC obs_dim {bc_dataset.obs.shape[1]} does not match env obs_dim {obs_dim}."
+            )
+        meta_n_agents = bc_dataset.metadata.get("n_agents")
+        if meta_n_agents is not None and int(meta_n_agents) != n_agents:
+            raise ValueError(
+                f"BC dataset n_agents {meta_n_agents} does not match env n_agents {n_agents}."
+            )
+        min_action = int(bc_dataset.actions.min())
+        max_action = int(bc_dataset.actions.max())
+        if min_action < 0 or max_action >= n_actions:
+            raise ValueError("BC dataset actions are outside the valid action range.")
+        if args.bc_epochs <= 0:
+            if args.bc_only:
+                raise ValueError("--bc-only requires --bc-epochs > 0.")
+        else:
+            bc_lr = float(args.learning_rate) if args.bc_lr is None else float(args.bc_lr)
+            if obs_normalizer is not None:
+                bc_dataset.obs = obs_normalizer.normalize(bc_dataset.obs, update=True)
+
+            bc_optimizer = torch.optim.Adam(actor.parameters(), lr=bc_lr)
+            for epoch in range(int(args.bc_epochs)):
+                total_loss = 0.0
+                total_count = 0
+                for obs_mb, actions_mb, agent_ids_mb in bc_dataset.iter_batches(
+                    int(args.bc_batch_size), rng
+                ):
+                    obs_t = torch.as_tensor(obs_mb, device=device, dtype=torch.float32)
+                    actions_t = torch.as_tensor(actions_mb, device=device, dtype=torch.int64)
+                    if use_agent_id:
+                        agent_ids_t = torch.as_tensor(agent_ids_mb, device=device, dtype=torch.int64)
+                        obs_in = _append_agent_id_flat(obs_t, agent_ids_t, n_agents)
+                    else:
+                        obs_in = obs_t
+                    logits = actor(obs_in)
+                    loss = F.cross_entropy(logits, actions_t)
+
+                    bc_optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(actor.parameters(), float(args.max_grad_norm))
+                    bc_optimizer.step()
+
+                    batch_count = int(actions_mb.shape[0])
+                    total_loss += float(loss.item()) * batch_count
+                    total_count += batch_count
+                mean_loss = total_loss / max(1, total_count)
+                print(
+                    f"[MAPPO][BC] epoch={epoch + 1}/{int(args.bc_epochs)} "
+                    f"loss={mean_loss:.6f} samples={total_count}"
+                )
+
+            bc_pretrain_path = run_dir / "bc_pretrain.pt"
+            save_checkpoint(bc_pretrain_path)
+
+    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=float(args.learning_rate))
+    critic_optimizer = torch.optim.Adam(critic.parameters(), lr=float(args.learning_rate))
+    value_normalizer = ValueNorm((value_dim,), device=device, beta=float(args.value_norm_beta))
+
+    best_eval_reward = -float("inf")
+    global_step = 0
+    episode = 0
+    last_eval_step = 0
+    episode_reward_sum = 0.0
+    episode_length = 0
+
+    hyperparams: Dict[str, Any] = {
+        "total_timesteps": args.total_timesteps,
+        "episode_length": args.episode_length,
+        "n_agents": n_agents,
+        "n_steps": args.n_steps,
+        "batch_size": args.batch_size,
+        "n_epochs": args.n_epochs,
+        "learning_rate": args.learning_rate,
+        "gamma": args.gamma,
+        "gae_lambda": args.gae_lambda,
+        "clip_range": args.clip_range,
+        "ent_coef": args.ent_coef,
+        "vf_coef": args.vf_coef,
+        "huber_delta": args.huber_delta,
+        "value_norm": True,
+        "value_norm_beta": args.value_norm_beta,
+        "team_reward": args.team_reward,
+        "normalize_obs": args.normalize_obs,
+        "obs_norm_clip": args.obs_norm_clip,
+        "obs_norm_eps": args.obs_norm_eps,
+        "max_grad_norm": args.max_grad_norm,
+        "hidden_dims": list(args.hidden_dims),
+        "activation": args.activation,
+        "layer_norm": args.layer_norm,
+        "use_agent_id": use_agent_id,
+        "eval_freq": args.eval_freq,
+        "n_eval_episodes": args.n_eval_episodes,
+        "device": str(device),
+        "seed": args.seed,
+        "bc_dataset": str(args.bc_dataset) if args.bc_dataset is not None else None,
+        "bc_epochs": args.bc_epochs,
+        "bc_batch_size": args.bc_batch_size,
+        "bc_lr": args.bc_lr,
+        "bc_only": args.bc_only,
+    }
+
+    def finalize_run(latest_path: Path, best_path: Path) -> None:
+        save_config_with_hyperparameters(run_dir, args.config, "mappo", hyperparams)
+        print(f"Run artifacts stored in {run_dir}")
+        print(f"  - Latest model: {latest_path}")
+        print(f"  - Best model: {best_path}")
+        if bc_pretrain_path is not None:
+            print(f"  - BC pretrain: {bc_pretrain_path}")
+        print(f"  - Training rewards: {rewards_csv_path}")
+        print(f"  - Evaluation rewards: {eval_csv_path}")
+        print(f"  - Config with hyperparameters: {run_dir / 'config.json'}")
+
     with rewards_csv_path.open("w", newline="", encoding="utf-8") as train_f, \
          eval_csv_path.open("w", newline="", encoding="utf-8") as eval_f:
         train_writer = csv.writer(train_f)
         train_writer.writerow(["episode", "reward_sum", "length", "steps"])
         eval_writer = csv.writer(eval_f)
         eval_writer.writerow(["step", "mean_reward", "std_reward"])
+
+        if args.bc_only:
+            latest_path = run_dir / "latest_model.pt"
+            best_path = run_dir / "best_model.pt"
+            save_checkpoint(latest_path)
+            save_checkpoint(best_path)
+            finalize_run(latest_path, best_path)
+            env.close()
+            eval_env.close()
+            return
 
         obs_dict, _info = env.reset(seed=args.seed)
         obs = stack_obs(obs_dict, n_agents)
@@ -632,45 +783,8 @@ def main() -> None:
 
     latest_path = run_dir / "latest_model.pt"
     save_checkpoint(latest_path)
-
-    hyperparams: Dict[str, Any] = {
-        "total_timesteps": args.total_timesteps,
-        "episode_length": args.episode_length,
-        "n_agents": n_agents,
-        "n_steps": args.n_steps,
-        "batch_size": args.batch_size,
-        "n_epochs": args.n_epochs,
-        "learning_rate": args.learning_rate,
-        "gamma": args.gamma,
-        "gae_lambda": args.gae_lambda,
-        "clip_range": args.clip_range,
-        "ent_coef": args.ent_coef,
-        "vf_coef": args.vf_coef,
-        "huber_delta": args.huber_delta,
-        "value_norm": True,
-        "value_norm_beta": args.value_norm_beta,
-        "team_reward": args.team_reward,
-        "normalize_obs": args.normalize_obs,
-        "obs_norm_clip": args.obs_norm_clip,
-        "obs_norm_eps": args.obs_norm_eps,
-        "max_grad_norm": args.max_grad_norm,
-        "hidden_dims": list(args.hidden_dims),
-        "activation": args.activation,
-        "layer_norm": args.layer_norm,
-        "use_agent_id": use_agent_id,
-        "eval_freq": args.eval_freq,
-        "n_eval_episodes": args.n_eval_episodes,
-        "device": str(device),
-        "seed": args.seed,
-    }
-    save_config_with_hyperparameters(run_dir, args.config, "mappo", hyperparams)
-
-    print(f"Run artifacts stored in {run_dir}")
-    print(f"  - Latest model: {latest_path}")
-    print(f"  - Best model: {run_dir / 'best_model.pt'}")
-    print(f"  - Training rewards: {rewards_csv_path}")
-    print(f"  - Evaluation rewards: {eval_csv_path}")
-    print(f"  - Config with hyperparameters: {run_dir / 'config.json'}")
+    best_path = run_dir / "best_model.pt"
+    finalize_run(latest_path, best_path)
 
     env.close()
     eval_env.close()

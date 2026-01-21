@@ -85,6 +85,11 @@ Learning-based baselines live under `algorithms/`:
   - QPLEX weights agent Qs via Q-attention (state + per-agent Q-values); tune with `--n-head`, `--attend-reg-coef`, `--nonlinear`, `--no-state-bias`, `--no-weighted-head`.
 - MAPPO (multi-agent, PyTorch): `python -m algorithms.marl_mappo --config configs/marl_mixed_plants.json --total-timesteps 200000`
 
+Behavioral cloning warm-start for MAPPO (zero-wait expert):
+- Generate dataset: `python -m tools.generate_bc_dataset --config configs/marl_mixed_plants.json --episodes 50 --episode-length 500 --output outputs/bc_zero_wait.npz`
+- Train with BC pretrain: `python -m algorithms.marl_mappo --config configs/marl_mixed_plants.json --bc-dataset outputs/bc_zero_wait.npz --bc-epochs 10 --total-timesteps 200000`
+- Use `--bc-only` to run supervised pretraining only (saves `bc_pretrain.pt`).
+
 All MARL Q-learning algorithms (IQL, VDN, QMIX, QPLEX) support these architectural enhancements:
 - `--double-q`: Enable Double DQN (use online network to select actions, target network to evaluate).
 - `--dueling`: Enable Dueling DQN architecture (separate value and advantage streams).
