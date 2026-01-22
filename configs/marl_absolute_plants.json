@@ -27,7 +27,9 @@
     "comm_throughput_window": 200,
     "comm_penalty_alpha": 0.0,
     "comm_throughput_floor": 0.0,
-    "normalize": true,
+    "normalize": false,
+    "no_normalization_scale": 200.0,
+    "reward_clip_min": -4.0,
     "evaluation": {
       "state_error_reward": "absolute",
       "comm_penalty_alpha": 0.0,

@@ -29,6 +29,9 @@ class RewardDefinition:
     simple_freshness_decay: float = 0.0
     normalize: Optional[bool] = None  # None = auto-detect, True/False = explicit override
     normalizer: Optional[RunningRewardNormalizer] = None
+    no_normalization_scale: float = 1.0
+    reward_clip_min: Optional[float] = None
+    reward_clip_max: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.mode not in {"difference", "absolute", "absolute_sqrt", "simple", "simple_penalty"}:
@@ -38,6 +41,11 @@ class RewardDefinition:
             )
         if float(self.simple_freshness_decay) < 0.0:
             raise ValueError("simple_freshness_decay must be >= 0")
+        if float(self.no_normalization_scale) <= 0.0:
+            raise ValueError("no_normalization_scale must be > 0")
+        if self.reward_clip_min is not None and self.reward_clip_max is not None:
+            if float(self.reward_clip_min) > float(self.reward_clip_max):
+                raise ValueError("reward_clip_min must be <= reward_clip_max")
 
 
 def _should_normalize_reward(definition: RewardDefinition) -> bool:
@@ -733,6 +741,16 @@ class NCS_Env(gym.Env):
         base_normalize = reward_cfg.get("normalize", None)
         if base_normalize is not None:
             base_normalize = bool(base_normalize)
+        no_normalization_scale = reward_cfg.get("no_normalization_scale", 1.0)
+        if no_normalization_scale is None:
+            no_normalization_scale = 1.0
+        no_normalization_scale = float(no_normalization_scale)
+        reward_clip_min = reward_cfg.get("reward_clip_min", None)
+        reward_clip_max = reward_cfg.get("reward_clip_max", None)
+        if reward_clip_min is not None:
+            reward_clip_min = float(reward_clip_min)
+        if reward_clip_max is not None:
+            reward_clip_max = float(reward_clip_max)
         normalize_flag = base_normalize if base_normalize is not None else False
         return RewardDefinition(
             mode=str(base_mode),
@@ -741,6 +759,9 @@ class NCS_Env(gym.Env):
             simple_freshness_decay=base_simple_freshness_decay,
             normalize=normalize_flag,
             normalizer=None,
+            no_normalization_scale=no_normalization_scale,
+            reward_clip_min=reward_clip_min,
+            reward_clip_max=reward_clip_max,
         )
 
     def _quantize_state(self, state: np.ndarray) -> np.ndarray:
@@ -915,13 +936,27 @@ class NCS_Env(gym.Env):
             return normalizer(reward_value)
         return reward_value
 
+    def _clip_reward_value(self, reward_value: float) -> float:
+        min_value = self.reward_definition.reward_clip_min
+        max_value = self.reward_definition.reward_clip_max
+        if min_value is not None and reward_value < min_value:
+            reward_value = float(min_value)
+        if max_value is not None and reward_value > max_value:
+            reward_value = float(max_value)
+        return reward_value
+
     def _normalize_reward_value(self, agent_idx: int, reward_value: float) -> float:
         definition = self.reward_definition
         if isinstance(definition.normalizer, RunningRewardNormalizer):
-            return self._apply_running_normalization(agent_idx, reward_value)
+            return self._clip_reward_value(
+                self._apply_running_normalization(agent_idx, reward_value)
+            )
         if definition.normalizer is not None:
-            return definition.normalizer(reward_value)
-        return reward_value
+            return self._clip_reward_value(definition.normalizer(reward_value))
+        scale = float(definition.no_normalization_scale)
+        if scale != 1.0:
+            reward_value = reward_value / scale
+        return self._clip_reward_value(reward_value)
 
     def _compute_reward_for_definition(
         self,
