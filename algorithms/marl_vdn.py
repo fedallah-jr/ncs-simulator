@@ -13,19 +13,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from ncs_env.config import load_config
-from ncs_env.env import NCS_Env
 from utils.marl import (
     MARLReplayBuffer,
     VDNLearner,
     MLPAgent,
     DuelingMLPAgent,
-    RunningObsNormalizer,
     run_evaluation,
 )
-from utils.marl.common import select_device, epsilon_by_step, stack_obs, select_actions
+from utils.marl.common import epsilon_by_step, stack_obs, select_actions
+from utils.marl_training import (
+    setup_device_and_rng,
+    load_config_with_overrides,
+    create_environments,
+    create_obs_normalizer,
+    print_run_summary,
+)
 from utils.reward_normalization import reset_shared_running_normalizers
-from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
+from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters, BestModelTracker
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,59 +105,31 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     reset_shared_running_normalizers()
     args = parse_args()
-    device = select_device(args.device)
-    rng = np.random.default_rng(args.seed)
-    torch.manual_seed(args.seed if args.seed is not None else 0)
+    device, rng = setup_device_and_rng(args.device, args.seed)
 
-    config_path_str = str(args.config) if args.config is not None else None
-    cfg = load_config(config_path_str)
-    system_cfg = cfg.get("system", {})
-    n_agents = int(system_cfg.get("n_agents", args.n_agents))
-    use_agent_id = not args.no_agent_id
-
-    # Load evaluation reward config if present
-    eval_reward_override: Optional[Dict[str, Any]] = None
-    reward_cfg = cfg.get("reward", {})
-    eval_reward_cfg = reward_cfg.get("evaluation", None)
-    if isinstance(eval_reward_cfg, dict):
-        eval_reward_override = eval_reward_cfg
-    eval_termination_override: Optional[Dict[str, Any]] = None
-    termination_cfg = cfg.get("termination", {})
-    eval_termination_cfg = termination_cfg.get("evaluation", None)
-    if isinstance(eval_termination_cfg, dict):
-        eval_termination_override = eval_termination_cfg
+    _, config_path_str, n_agents, use_agent_id, eval_reward_override, eval_termination_override = (
+        load_config_with_overrides(args.config, args.n_agents, not args.no_agent_id)
+    )
 
     run_dir = prepare_run_directory("vdn", args.config, args.output_root)
     rewards_csv_path = run_dir / "training_rewards.csv"
     eval_csv_path = run_dir / "evaluation_rewards.csv"
 
-    env = NCS_Env(
+    env, eval_env = create_environments(
         n_agents=n_agents,
         episode_length=args.episode_length,
-        config_path=config_path_str,
+        config_path_str=config_path_str,
         seed=args.seed,
-    )
-
-    # Create evaluation environment with reward override
-    eval_env = NCS_Env(
-        n_agents=n_agents,
-        episode_length=args.episode_length,
-        config_path=config_path_str,
-        seed=args.seed,
-        reward_override=eval_reward_override,
-        termination_override=eval_termination_override,
-        freeze_running_normalization=True,
+        eval_reward_override=eval_reward_override,
+        eval_termination_override=eval_termination_override,
     )
 
     obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
     n_actions = int(env.action_space.spaces["agent_0"].n)
     input_dim = obs_dim + (n_agents if use_agent_id else 0)
-    obs_normalizer: Optional[RunningObsNormalizer] = None
-    if args.normalize_obs:
-        clip_value = None if args.obs_norm_clip <= 0 else float(args.obs_norm_clip)
-        obs_normalizer = RunningObsNormalizer.create(
-            obs_dim, clip=clip_value, eps=float(args.obs_norm_eps)
-        )
+    obs_normalizer = create_obs_normalizer(
+        obs_dim, args.normalize_obs, args.obs_norm_clip, args.obs_norm_eps
+    )
 
     # Select network class based on --dueling flag
     AgentClass = DuelingMLPAgent if args.dueling else MLPAgent
@@ -192,7 +168,7 @@ def main() -> None:
         rng=rng,
     )
 
-    best_eval_reward = -float("inf")
+    best_model_tracker = BestModelTracker()
     global_step = 0
     episode = 0
     last_eval_step = 0
@@ -300,15 +276,20 @@ def main() -> None:
                     eval_f.flush()
 
                     # Save best model based on evaluation reward
-                    if mean_eval_reward > best_eval_reward:
-                        best_eval_reward = mean_eval_reward
-                        save_checkpoint(run_dir / "best_model.pt")
+                    best_model_tracker.update(
+                        "eval", mean_eval_reward, run_dir / "best_model.pt", save_checkpoint
+                    )
 
                     print(f"[VDN] Eval at step {global_step}: mean_reward={mean_eval_reward:.3f} std={std_eval_reward:.3f}")
                     last_eval_step = global_step
 
             train_writer.writerow([episode, episode_reward_sum, epsilon, global_step])
             train_f.flush()
+
+            # Save best model based on training reward
+            best_model_tracker.update(
+                "train", episode_reward_sum, run_dir / "best_train_model.pt", save_checkpoint
+            )
 
             if episode % args.log_interval == 0:
                 print(f"[VDN] episode={episode} steps={global_step} reward_sum={episode_reward_sum:.3f} eps={epsilon:.3f}")
@@ -351,12 +332,7 @@ def main() -> None:
     }
     save_config_with_hyperparameters(run_dir, args.config, "vdn", hyperparams)
 
-    print(f"Run artifacts stored in {run_dir}")
-    print(f"  - Latest model: {latest_path}")
-    print(f"  - Best model: {run_dir / 'best_model.pt'}")
-    print(f"  - Training rewards: {rewards_csv_path}")
-    print(f"  - Evaluation rewards: {eval_csv_path}")
-    print(f"  - Config with hyperparameters: {run_dir / 'config.json'}")
+    print_run_summary(run_dir, latest_path, rewards_csv_path, eval_csv_path)
 
     env.close()
     eval_env.close()

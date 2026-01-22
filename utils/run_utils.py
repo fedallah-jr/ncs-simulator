@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
 
 
 def _create_unique_run_dir(base: Path, algorithm: str) -> Path:
@@ -69,3 +69,40 @@ def save_config_with_hyperparameters(
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
         f.write("\n")  # Add trailing newline
+
+
+class BestModelTracker:
+    """Track best rewards and save checkpoints when improved."""
+
+    def __init__(self) -> None:
+        self._best: Dict[str, float] = {}
+
+    def update(
+        self,
+        key: str,
+        reward: float,
+        save_path: Path,
+        save_fn: Callable[[Path], None],
+    ) -> bool:
+        """
+        Check if reward is best for the given key, save checkpoint if so.
+
+        Args:
+            key: Identifier for this reward type (e.g., "eval", "train")
+            reward: Current reward value
+            save_path: Path to save the checkpoint
+            save_fn: Function that saves the checkpoint to the given path
+
+        Returns:
+            True if new best was found and saved, False otherwise.
+        """
+        current_best = self._best.get(key, -float("inf"))
+        if reward > current_best:
+            self._best[key] = reward
+            save_fn(save_path)
+            return True
+        return False
+
+    def get_best(self, key: str) -> float:
+        """Get the current best reward for a key, or -inf if not tracked."""
+        return self._best.get(key, -float("inf"))
