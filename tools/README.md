@@ -329,6 +329,18 @@ You can extend the visualization tool by adding new plotting functions. Follow t
 3. Add it to the `HEURISTIC_POLICIES` dictionary
 4. Test it with the visualization tool
 
+## Behavioral Cloning Dataset (Actor-Only)
+
+Generate a behavioral cloning dataset from a heuristic policy (default: `zero_wait`):
+```bash
+python -m tools.generate_bc_dataset --config configs/marl_mixed_plants.json \
+  --episodes 50 --episode-length 500 --output outputs/bc_zero_wait.npz
+```
+
+The saved `.npz` contains step-level `obs` and `actions` plus metadata such as
+`n_agents` and `obs_dim`. Future updates will extend this dataset format to support
+critic and Q-function targets for value pretraining.
+
 ## Troubleshooting
 
 **Issue**: Plots look cluttered with many policies

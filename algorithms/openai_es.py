@@ -36,6 +36,7 @@ from utils.reward_normalization import (
     configure_shared_running_normalizers,
     reset_shared_running_normalizers,
 )
+from utils.bc import BCPretrainConfig, JaxActorBCAdapter, load_bc_dataset, pretrain_actor
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
 # -----------------------------------------------------------------------------
@@ -237,6 +238,14 @@ def train(args):
         raise ValueError("truncation_percentage must be between 0.0 and 0.5.")
     if args.pbt_interval < 1:
         raise ValueError("pbt_interval must be at least 1.")
+    if args.bc_epochs > 0 and args.bc_dataset is None:
+        raise ValueError("--bc-epochs requires --bc-dataset")
+    if args.bc_dataset is not None and args.bc_epochs <= 0:
+        raise ValueError("--bc-dataset requires --bc-epochs > 0")
+    if args.bc_batch_size <= 0:
+        raise ValueError("--bc-batch-size must be positive")
+    if args.bc_init_std < 0.0:
+        raise ValueError("--bc-init-std must be >= 0")
 
     config_path_str = str(args.config) if args.config is not None else None
     cfg = load_config(config_path_str)
@@ -282,9 +291,54 @@ def train(args):
     master_rng, template_rng = jax.random.split(master_rng)
     params_template = model.init(template_rng, dummy_obs)
     
-    flat_params_template, _ = flatten_util.ravel_pytree(params_template)
+    flat_params_template, unravel_fn = flatten_util.ravel_pytree(params_template)
     num_params = flat_params_template.size
     print(f"Total Parameters: {num_params}")
+
+    bc_lr: Optional[float] = None
+    pretrained_params: Optional[Any] = None
+    pretrained_flat: Optional[np.ndarray] = None
+    if args.bc_dataset is not None:
+        bc_dataset = load_bc_dataset(args.bc_dataset)
+        if bc_dataset.num_steps <= 0:
+            raise ValueError("BC dataset is empty.")
+        if bc_dataset.obs.shape[2] != obs_dim:
+            raise ValueError(
+                f"BC obs_dim {bc_dataset.obs.shape[2]} does not match env obs_dim {obs_dim}."
+            )
+        if bc_dataset.n_agents != n_agents:
+            raise ValueError(
+                f"BC dataset n_agents {bc_dataset.n_agents} does not match env n_agents {n_agents}."
+            )
+        meta_n_agents = bc_dataset.metadata.get("n_agents")
+        if meta_n_agents is not None and int(meta_n_agents) != n_agents:
+            raise ValueError(
+                f"BC dataset n_agents {meta_n_agents} does not match env n_agents {n_agents}."
+            )
+        meta_use_agent_id = bc_dataset.metadata.get("use_agent_id")
+        if meta_use_agent_id is not None and bool(meta_use_agent_id) != use_agent_id:
+            raise ValueError(
+                f"BC dataset use_agent_id {meta_use_agent_id} does not match {use_agent_id}."
+            )
+        min_action = int(bc_dataset.actions.min())
+        max_action = int(bc_dataset.actions.max())
+        if min_action < 0 or max_action >= action_dim:
+            raise ValueError("BC dataset actions are outside the valid action range.")
+
+        bc_lr = float(args.learning_rate) if args.bc_lr is None else float(args.bc_lr)
+        bc_config = BCPretrainConfig(
+            epochs=int(args.bc_epochs),
+            batch_size=int(args.bc_batch_size),
+            learning_rate=bc_lr,
+            use_agent_id=use_agent_id,
+            n_agents=n_agents,
+        )
+        bc_rng = np.random.default_rng(args.seed)
+        bc_adapter = JaxActorBCAdapter(model.apply, n_agents=n_agents, use_agent_id=use_agent_id)
+        bc_result = pretrain_actor(bc_adapter, params_template, bc_dataset, bc_config, bc_rng)
+        pretrained_params = bc_result.params
+        pretrained_flat = np.array(flatten_util.ravel_pytree(pretrained_params)[0])
+        print(f"[BC] Pretrained actor with avg loss {bc_result.metrics.get('loss', 0.0):.6f}")
 
     # 3. Setup Open_ES Strategy with built-in fitness shaping
     lrate_schedule = optax.exponential_decay(
@@ -304,7 +358,16 @@ def train(args):
 
     def build_strategy_context(init_key: Any, param_key: Any) -> Dict[str, Any]:
         """Construct an independent Open_ES strategy with its own initialization."""
-        initial_params = model.init(param_key, dummy_obs)
+        if pretrained_params is None:
+            initial_params = model.init(param_key, dummy_obs)
+        else:
+            if args.bc_init_std > 0.0:
+                if pretrained_flat is None:
+                    raise RuntimeError("Pretrained flat params missing.")
+                noise = jax.random.normal(param_key, shape=pretrained_flat.shape) * args.bc_init_std
+                initial_params = unravel_fn(pretrained_flat + noise)
+            else:
+                initial_params = pretrained_params
         strategy = Open_ES(
             population_size=args.popsize,
             solution=initial_params,
@@ -391,7 +454,20 @@ def train(args):
     # 5. Logging Setup
     run_dir = prepare_run_directory("openai_es", args.config, args.output_root)
     (run_dir / "checkpoints").mkdir(exist_ok=True)
-    
+    if pretrained_flat is not None:
+        np.savez(
+            run_dir / "bc_pretrain.npz",
+            flat_params=pretrained_flat,
+            hidden_size=args.hidden_size,
+            use_layer_norm=args.use_layer_norm,
+            n_agents=n_agents,
+            obs_dim=obs_dim,
+            use_agent_id=use_agent_id,
+            bc_epochs=args.bc_epochs,
+            bc_batch_size=args.bc_batch_size,
+            bc_lr=bc_lr,
+        )
+
     rewards_file = run_dir / "training_rewards.csv"
     with rewards_file.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -558,6 +634,11 @@ def train(args):
         "meta_population_size": args.meta_population_size,
         "truncation_percentage": args.truncation_percentage,
         "pbt_interval": args.pbt_interval,
+        "bc_dataset": str(args.bc_dataset) if args.bc_dataset is not None else None,
+        "bc_epochs": args.bc_epochs,
+        "bc_batch_size": args.bc_batch_size,
+        "bc_lr": bc_lr,
+        "bc_init_std": args.bc_init_std,
     }
     save_config_with_hyperparameters(run_dir, args.config, "openai_es", hyperparams)
     
@@ -583,6 +664,36 @@ def parse_args():
     parser.add_argument("--lrate-decay", type=float, default=0.999, help="LR decay.")
     parser.add_argument("--sigma-init", type=float, default=0.25, help="Initial sigma.")
     parser.add_argument("--sigma-decay", type=float, default=0.99, help="Sigma decay.")
+    parser.add_argument(
+        "--bc-dataset",
+        type=Path,
+        default=None,
+        help="Path to behavioral cloning dataset (.npz).",
+    )
+    parser.add_argument(
+        "--bc-epochs",
+        type=int,
+        default=0,
+        help="Number of BC epochs for actor pretraining (0 disables).",
+    )
+    parser.add_argument(
+        "--bc-batch-size",
+        type=int,
+        default=1024,
+        help="Mini-batch size for BC pretraining.",
+    )
+    parser.add_argument(
+        "--bc-lr",
+        type=float,
+        default=None,
+        help="BC learning rate (defaults to --learning-rate).",
+    )
+    parser.add_argument(
+        "--bc-init-std",
+        type=float,
+        default=0.0,
+        help="Std dev of Gaussian noise added to BC init params per strategy.",
+    )
     parser.add_argument("--n-workers", type=int, default=multiprocessing.cpu_count(), help="Workers.")
     parser.add_argument("--checkpoint-freq", type=int, default=5, help="Checkpoint frequency.")
     parser.add_argument("--output-root", type=Path, default=Path("outputs"), help="Output directory.")

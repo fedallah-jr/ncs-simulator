@@ -102,6 +102,23 @@ All MARL algorithms (IQL, VDN, QMIX, QPLEX, MAPPO) support observation normaliza
 - `--obs-norm-clip`: Clip normalized observations to +/- this value (<=0 disables).
 - `--obs-norm-eps`: Epsilon for observation normalization.
 
+## Behavioral Cloning (Actor-Only)
+
+Generate an actor-only behavioral cloning dataset from a heuristic policy:
+```bash
+python -m tools.generate_bc_dataset --config configs/marl_mixed_plants.json \
+  --episodes 50 --episode-length 500 --output outputs/bc_zero_wait.npz
+```
+
+Warm-start OpenAI-ES from the dataset:
+```bash
+python -m algorithms.openai_es --config configs/marl_mixed_plants.json \
+  --bc-dataset outputs/bc_zero_wait.npz --bc-epochs 10 --generations 1000
+```
+
+Note: the current dataset stores only observations and actions. We plan to extend
+behavioral cloning to include critic and Q-function targets in a future update.
+
 CLI flags let you change environment parameters. Use `--output-root` (defaults to `outputs/`) to control where training artifacts land. Each run calls `utils.run_utils.prepare_run_directory(...)`, which creates a sequentially numbered folder for the algorithm (e.g., `iql_0`, `iql_1`, `vdn_0`, etc.). All training details are preserved in the saved config file. That directory always contains:
 
 - **Model Checkpoints:**
