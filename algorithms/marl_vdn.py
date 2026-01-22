@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--total-timesteps", type=int, default=200_000, help="Total environment steps.")
 
     parser.add_argument("--buffer-size", type=int, default=200_000, help="Replay buffer capacity.")
-    parser.add_argument("--batch-size", type=int, default=128, help="Batch size.")
+    parser.add_argument("--batch-size", type=int, default=2048, help="Batch size.")
     parser.add_argument("--start-learning", type=int, default=1_000, help="Start updates after this many steps.")
     parser.add_argument("--train-interval", type=int, default=1, help="Update frequency in env steps.")
 
