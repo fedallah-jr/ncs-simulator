@@ -232,12 +232,6 @@ def train(args):
     import optax
     from evosax.algorithms.distribution_based import Open_ES
     
-    if args.meta_population_size < 1:
-        raise ValueError("meta_population_size must be at least 1.")
-    if not 0.0 <= args.truncation_percentage <= 0.5:
-        raise ValueError("truncation_percentage must be between 0.0 and 0.5.")
-    if args.pbt_interval < 1:
-        raise ValueError("pbt_interval must be at least 1.")
     if args.bc_epochs > 0 and args.bc_dataset is None:
         raise ValueError("--bc-epochs requires --bc-dataset")
     if args.bc_dataset is not None and args.bc_epochs <= 0:
@@ -265,12 +259,6 @@ def train(args):
     print(f"Hidden Size: {args.hidden_size}, Layer Norm: {args.use_layer_norm}")
     print(f"Evaluation episodes per individual: {args.eval_episodes}")
     print(f"Fitness shaping: {args.fitness_shaping} (evosax built-in)")
-    if args.meta_population_size > 1:
-        print(
-            f"Meta population: {args.meta_population_size} strategies | "
-            f"Truncation: {args.truncation_percentage:.2f} every {args.pbt_interval} generations"
-        )
-    
     # Log hardware acceleration status
     devices = jax.devices()
     print(f"JAX devices available: {devices}")
@@ -393,15 +381,10 @@ def train(args):
             "state": state,
             "ask_step": ask_step,
             "tell_step": tell_step,
-            "mean_fitness": -float("inf"),
         }
 
-    meta_strategies: List[Dict[str, Any]] = []
-    strategy_rngs: List[Any] = []
-    for strat_idx in range(args.meta_population_size):
-        master_rng, init_key, param_key, loop_key = jax.random.split(master_rng, 4)
-        meta_strategies.append(build_strategy_context(init_key, param_key))
-        strategy_rngs.append(loop_key)
+    master_rng, init_key, param_key, strategy_rng = jax.random.split(master_rng, 4)
+    strategy_context = build_strategy_context(init_key, param_key)
 
     # 4. Setup Parallel Workers
     pool = None
@@ -477,13 +460,6 @@ def train(args):
     start_time = time.time()
     best_fitness_all_time = -float("inf")
 
-    def copy_tree(tree: Any) -> Any:
-        """Deep copy a pytree so PBT resets do not alias state."""
-        return jax.tree_util.tree_map(
-            lambda v: jnp.array(v, copy=True) if isinstance(v, (jnp.ndarray, np.ndarray)) else (v.copy() if hasattr(v, "copy") else v),
-            tree,
-        )
-
     # 6. Training Loop
     for gen in range(1, args.generations + 1):
         master_rng, rng_seeds = jax.random.split(master_rng)
@@ -497,60 +473,33 @@ def train(args):
             for i in range(args.eval_episodes)
         ]
 
-        all_fitness_values: List[float] = []
+        strategy_rng, rng_ask = jax.random.split(strategy_rng)
+        x, context_state = strategy_context["ask_step"](rng_ask, strategy_context["state"])
 
-        for strat_idx, context in enumerate(meta_strategies):
-            strategy_rngs[strat_idx], rng_ask = jax.random.split(strategy_rngs[strat_idx])
-            x, context_state = context["ask_step"](rng_ask, context["state"])
-            
-            population_flat = []
-            for i in range(args.popsize):
-                individual = jax.tree_util.tree_map(lambda arr: arr[i], x)
-                flat_individual, _ = flatten_util.ravel_pytree(individual)
-                population_flat.append(np.array(flat_individual))
-            
-            eval_payloads = [(flat_params, gen_episode_seeds) for flat_params in population_flat]
-            fitness_values = map_fn(_evaluate_params_multi_episode, eval_payloads)
-            fitness_array = jnp.array(fitness_values)
-            
-            strategy_rngs[strat_idx], rng_tell = jax.random.split(strategy_rngs[strat_idx])
-            context_state, _ = context["tell_step"](rng_tell, x, fitness_array, context_state)
-            context["state"] = context_state
-            
-            mean_fit = float(jnp.mean(fitness_array))
-            max_fit = float(jnp.max(fitness_array))
-            context["mean_fitness"] = mean_fit
+        population_flat = []
+        for i in range(args.popsize):
+            individual = jax.tree_util.tree_map(lambda arr: arr[i], x)
+            flat_individual, _ = flatten_util.ravel_pytree(individual)
+            population_flat.append(np.array(flat_individual))
 
-            all_fitness_values.extend(fitness_values)
+        eval_payloads = [(flat_params, gen_episode_seeds) for flat_params in population_flat]
+        fitness_values = map_fn(_evaluate_params_multi_episode, eval_payloads)
+        fitness_array = jnp.array(fitness_values)
 
-            if max_fit > best_fitness_all_time:
-                best_fitness_all_time = max_fit
-                best_idx = int(jnp.argmax(fitness_array))
-                np.savez(
-                    run_dir / "best_model.npz",
-                    flat_params=population_flat[best_idx],
-                    hidden_size=args.hidden_size,
-                    use_layer_norm=args.use_layer_norm,
-                    n_agents=n_agents,
-                    obs_dim=obs_dim,
-                    use_agent_id=use_agent_id,
-                )
+        strategy_rng, rng_tell = jax.random.split(strategy_rng)
+        context_state, _ = strategy_context["tell_step"](rng_tell, x, fitness_array, context_state)
+        strategy_context["state"] = context_state
 
-        all_fitness_array = jnp.array(all_fitness_values)
-        mean_fit = float(jnp.mean(all_fitness_array))
-        max_fit = float(jnp.max(all_fitness_array))
-        min_fit = float(jnp.min(all_fitness_array))
-        std_fit = float(jnp.std(all_fitness_array))
+        mean_fit = float(jnp.mean(fitness_array))
+        max_fit = float(jnp.max(fitness_array))
+        min_fit = float(jnp.min(fitness_array))
+        std_fit = float(jnp.std(fitness_array))
         elapsed = time.time() - start_time
 
-        best_strategy_idx = int(np.argmax([ctx["mean_fitness"] for ctx in meta_strategies]))
-
         if gen % 3 == 0 or gen == 1:
-            best_strategy_mean = meta_strategies[best_strategy_idx]["mean_fitness"]
             print(
-                f"Gen {gen}/{args.generations} | Global Mean: {mean_fit:.1f} | "
-                f"Global Max: {max_fit:.1f} | Min: {min_fit:.1f} | Std: {std_fit:.1f} | "
-                f"Best Strategy {best_strategy_idx} Mean: {best_strategy_mean:.1f} | "
+                f"Gen {gen}/{args.generations} | Mean: {mean_fit:.1f} | "
+                f"Max: {max_fit:.1f} | Min: {min_fit:.1f} | Std: {std_fit:.1f} | "
                 f"Time: {elapsed:.1f}s"
             )
             
@@ -558,7 +507,20 @@ def train(args):
             writer = csv.writer(f)
             writer.writerow([gen, mean_fit, max_fit, min_fit, std_fit, elapsed])
 
-        best_strategy_state = meta_strategies[best_strategy_idx]["state"]
+        if max_fit > best_fitness_all_time:
+            best_fitness_all_time = max_fit
+            best_idx = int(jnp.argmax(fitness_array))
+            np.savez(
+                run_dir / "best_model.npz",
+                flat_params=population_flat[best_idx],
+                hidden_size=args.hidden_size,
+                use_layer_norm=args.use_layer_norm,
+                n_agents=n_agents,
+                obs_dim=obs_dim,
+                use_agent_id=use_agent_id,
+            )
+
+        best_strategy_state = strategy_context["state"]
         np.savez(
             run_dir / "latest_model.npz",
             flat_params=np.array(best_strategy_state.mean),
@@ -579,32 +541,6 @@ def train(args):
                 obs_dim=obs_dim,
                 use_agent_id=use_agent_id,
             )
-
-        if args.meta_population_size > 1 and args.truncation_percentage > 0.0 and gen % args.pbt_interval == 0:
-            n_replace = int(args.meta_population_size * args.truncation_percentage)
-            if n_replace > 0:
-                ranked_indices = sorted(
-                    range(args.meta_population_size),
-                    key=lambda idx: meta_strategies[idx]["mean_fitness"]
-                )
-                bottom_indices = ranked_indices[:n_replace]
-                top_indices = ranked_indices[-n_replace:]
-                top_indices_array = jnp.array(top_indices)
-
-                for dest_idx in bottom_indices:
-                    master_rng, sample_key = jax.random.split(master_rng)
-                    source_idx = int(jax.random.choice(sample_key, top_indices_array))
-                    source_state = meta_strategies[source_idx]["state"]
-                    dest_state = meta_strategies[dest_idx]["state"]
-                    meta_strategies[dest_idx]["state"] = dest_state.replace(
-                        mean=jnp.array(source_state.mean, copy=True),
-                        opt_state=copy_tree(source_state.opt_state),
-                        std=jnp.array(source_state.std, copy=True),
-                        best_solution=jnp.array(source_state.best_solution, copy=True),
-                        best_fitness=jnp.array(source_state.best_fitness, copy=True),
-                    )
-                    meta_strategies[dest_idx]["mean_fitness"] = meta_strategies[source_idx]["mean_fitness"]
-                    master_rng, strategy_rngs[dest_idx] = jax.random.split(master_rng)
 
     if pool is not None:
         pool.close()
@@ -631,9 +567,6 @@ def train(args):
         "n_agents": n_agents,
         "use_agent_id": use_agent_id,
         "checkpoint_freq": args.checkpoint_freq,
-        "meta_population_size": args.meta_population_size,
-        "truncation_percentage": args.truncation_percentage,
-        "pbt_interval": args.pbt_interval,
         "bc_dataset": str(args.bc_dataset) if args.bc_dataset is not None else None,
         "bc_epochs": args.bc_epochs,
         "bc_batch_size": args.bc_batch_size,
@@ -650,7 +583,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train OpenAI-ES on NCS env.")
     parser.add_argument("--config", type=Path, default=None, help="Config JSON path.")
     parser.add_argument("--generations", type=int, default=100, help="Number of generations.")
-    parser.add_argument("--popsize", type=int, default=132, help="Population size.")
+    parser.add_argument("--popsize", type=int, default=1000, help="Population size.")
     parser.add_argument("--episode-length", type=int, default=500, help="Episode length.")
     parser.add_argument("--eval-episodes", type=int, default=3, 
                         help="Episodes per individual (anti-overfitting). Default: 3")
@@ -660,7 +593,7 @@ def parse_args():
     parser.add_argument("--hidden-size", type=int, default=64, help="Hidden layer size.")
     parser.add_argument("--use-layer-norm", action="store_true", help="Use LayerNorm.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
-    parser.add_argument("--learning-rate", type=float, default=0.05, help="Learning rate.")
+    parser.add_argument("--learning-rate", type=float, default=0.005, help="Learning rate.")
     parser.add_argument("--lrate-decay", type=float, default=0.999, help="LR decay.")
     parser.add_argument("--sigma-init", type=float, default=0.25, help="Initial sigma.")
     parser.add_argument("--sigma-decay", type=float, default=0.99, help="Sigma decay.")
@@ -692,17 +625,11 @@ def parse_args():
         "--bc-init-std",
         type=float,
         default=0.0,
-        help="Std dev of Gaussian noise added to BC init params per strategy.",
+        help="Std dev of Gaussian noise added to BC init params.",
     )
     parser.add_argument("--n-workers", type=int, default=multiprocessing.cpu_count(), help="Workers.")
     parser.add_argument("--checkpoint-freq", type=int, default=5, help="Checkpoint frequency.")
     parser.add_argument("--output-root", type=Path, default=Path("outputs"), help="Output directory.")
-    parser.add_argument("--meta-population-size", type=int, default=1,
-                        help="Number of independent Open_ES strategies to evolve in parallel.")
-    parser.add_argument("--truncation-percentage", type=float, default=0.2,
-                        help="Fraction (0.0-0.5) of strategies replaced during PBT exploitation.")
-    parser.add_argument("--pbt-interval", type=int, default=10,
-                        help="Generations between truncation selections.")
     return parser.parse_args()
 
 
