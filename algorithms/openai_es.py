@@ -821,7 +821,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--learning-rate", type=float, default=0.005, help="Learning rate.")
     parser.add_argument("--lrate-decay", type=float, default=0.999, help="LR decay.")
-    parser.add_argument("--sigma-init", type=float, default=0.25, help="Initial sigma.")
+    parser.add_argument("--sigma-init", type=float, default=0.02, help="Initial sigma.")
     parser.add_argument("--sigma-decay", type=float, default=0.99, help="Sigma decay.")
     parser.add_argument(
         "--bc-dataset",
