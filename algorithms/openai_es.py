@@ -53,6 +53,8 @@ _worker_episode_length: int = 500
 _worker_n_agents: int = 1
 _worker_use_agent_id: bool = False
 _worker_agent_id_eye: Optional[np.ndarray] = None
+_worker_use_vbn: bool = False
+_worker_vbn_reference_batch: Optional[Any] = None
 
 
 def _build_obs_batch(obs_dict: Dict[str, np.ndarray]) -> np.ndarray:
@@ -67,7 +69,76 @@ def _build_obs_batch(obs_dict: Dict[str, np.ndarray]) -> np.ndarray:
     return obs_batch
 
 
-def create_policy_net(action_dim: int, hidden_size: int = 64, use_layer_norm: bool = False):
+def _build_obs_batch_static(
+    obs_dict: Dict[str, np.ndarray],
+    n_agents: int,
+    use_agent_id: bool,
+    agent_id_eye: Optional[np.ndarray],
+) -> np.ndarray:
+    obs_batch = np.stack(
+        [np.asarray(obs_dict[f"agent_{i}"], dtype=np.float32) for i in range(n_agents)],
+        axis=0,
+    )
+    if use_agent_id:
+        if agent_id_eye is None:
+            raise RuntimeError("Agent id eye matrix not initialized.")
+        obs_batch = np.concatenate([obs_batch, agent_id_eye], axis=1)
+    return obs_batch
+
+
+def collect_vbn_reference_batch(
+    config_path: Optional[str],
+    episode_length: int,
+    seed: Optional[int],
+    n_agents: int,
+    use_agent_id: bool,
+    ref_batch_size: int,
+) -> np.ndarray:
+    if ref_batch_size <= 0:
+        raise ValueError("vbn_ref_batch_size must be positive")
+
+    env = NCS_Env(
+        n_agents=n_agents,
+        episode_length=episode_length,
+        config_path=config_path,
+        seed=seed,
+        freeze_running_normalization=True,
+    )
+    rng = np.random.default_rng(seed)
+    agent_id_eye = np.eye(n_agents, dtype=np.float32) if use_agent_id else None
+
+    obs_dict, _ = env.reset(seed=seed)
+    batches: List[np.ndarray] = []
+    total = 0
+    while total < ref_batch_size:
+        obs_batch = _build_obs_batch_static(obs_dict, n_agents, use_agent_id, agent_id_eye)
+        batches.append(obs_batch)
+        total += obs_batch.shape[0]
+
+        action_dict = {
+            f"agent_{i}": int(rng.integers(env.action_space[f"agent_{i}"].n))
+            for i in range(n_agents)
+        }
+        obs_dict, _, terminated, truncated, _ = env.step(action_dict)
+        done = any(
+            bool(terminated[f"agent_{i}"]) or bool(truncated[f"agent_{i}"])
+            for i in range(n_agents)
+        )
+        if done:
+            next_seed = int(rng.integers(0, 2**31 - 1))
+            obs_dict, _ = env.reset(seed=next_seed)
+
+    env.close()
+    return np.concatenate(batches, axis=0)[:ref_batch_size]
+
+
+def create_policy_net(
+    action_dim: int,
+    hidden_size: int = 64,
+    use_layer_norm: bool = False,
+    use_vbn: bool = False,
+    vbn_eps: float = 1e-5,
+):
     """
     Create a PolicyNet instance. Imports Flax lazily.
     
@@ -75,30 +146,73 @@ def create_policy_net(action_dim: int, hidden_size: int = 64, use_layer_norm: bo
         action_dim: Number of output actions
         hidden_size: Number of units in hidden layers
         use_layer_norm: Whether to use Layer Normalization
+        use_vbn: Whether to use Virtual Batch Normalization
+        vbn_eps: Epsilon for VBN stability
     """
     import flax.linen as nn
+    import jax.numpy as jnp
     
     class PolicyNet(nn.Module):
         action_dim: int
         hidden_size: int = 64
         use_layer_norm: bool = False
+        use_vbn: bool = False
+        vbn_eps: float = 1e-5
+
+        class VirtualBatchNorm(nn.Module):
+            epsilon: float = 1e-5
+
+            @nn.compact
+            def __call__(self, x: jnp.ndarray, reference: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+                combined = jnp.concatenate([reference, x], axis=0)
+                mean = jnp.mean(combined, axis=0)
+                var = jnp.var(combined, axis=0)
+                x_norm = (x - mean) / jnp.sqrt(var + self.epsilon)
+                ref_norm = (reference - mean) / jnp.sqrt(var + self.epsilon)
+                scale = self.param("scale", nn.initializers.ones, (x.shape[-1],))
+                bias = self.param("bias", nn.initializers.zeros, (x.shape[-1],))
+                x_out = x_norm * scale + bias
+                ref_out = ref_norm * scale + bias
+                return x_out, ref_out
 
         @nn.compact
-        def __call__(self, x):
-            x = nn.Dense(self.hidden_size)(x)
-            if self.use_layer_norm:
+        def __call__(self, x: jnp.ndarray, reference_batch: Optional[jnp.ndarray] = None) -> jnp.ndarray:
+            ref = reference_batch
+            if self.use_vbn and ref is None:
+                raise ValueError("VBN enabled but reference_batch is None.")
+
+            dense1 = nn.Dense(self.hidden_size)
+            x = dense1(x)
+            if self.use_vbn:
+                ref = dense1(ref)
+                x, ref = self.VirtualBatchNorm(epsilon=self.vbn_eps)(x, ref)
+            elif self.use_layer_norm:
                 x = nn.LayerNorm()(x)
             x = nn.tanh(x)
-            
-            x = nn.Dense(self.hidden_size)(x)
-            if self.use_layer_norm:
+            if self.use_vbn:
+                ref = nn.tanh(ref)
+
+            dense2 = nn.Dense(self.hidden_size)
+            x = dense2(x)
+            if self.use_vbn:
+                ref = dense2(ref)
+                x, ref = self.VirtualBatchNorm(epsilon=self.vbn_eps)(x, ref)
+            elif self.use_layer_norm:
                 x = nn.LayerNorm()(x)
             x = nn.tanh(x)
-            
+            if self.use_vbn:
+                ref = nn.tanh(ref)
+
             x = nn.Dense(self.action_dim)(x)
             return x
     
-    return PolicyNet(action_dim=action_dim, hidden_size=hidden_size, use_layer_norm=use_layer_norm)
+    return PolicyNet(
+        action_dim=action_dim,
+        hidden_size=hidden_size,
+        use_layer_norm=use_layer_norm,
+        use_vbn=use_vbn,
+        vbn_eps=vbn_eps,
+    )
 
 
 def _init_worker(
@@ -111,12 +225,16 @@ def _init_worker(
     use_agent_id: bool,
     hidden_size: int = 64,
     use_layer_norm: bool = False,
+    use_vbn: bool = False,
+    vbn_reference_batch: Optional[np.ndarray] = None,
+    vbn_eps: float = 1e-5,
     shared_normalizer_store: Optional[Any] = None,
     shared_normalizer_lock: Optional[Any] = None,
 ):
     """Initialize the environment and model in the worker process."""
     global _worker_env, _worker_model, _worker_params, _worker_config_path, _worker_episode_length
     global _worker_n_agents, _worker_use_agent_id, _worker_agent_id_eye
+    global _worker_use_vbn, _worker_vbn_reference_batch
     
     # Set JAX to use CPU BEFORE importing JAX
     os.environ["JAX_PLATFORMS"] = "cpu"
@@ -131,6 +249,7 @@ def _init_worker(
     _worker_n_agents = int(n_agents)
     _worker_use_agent_id = bool(use_agent_id)
     _worker_agent_id_eye = np.eye(_worker_n_agents, dtype=np.float32) if _worker_use_agent_id else None
+    _worker_use_vbn = bool(use_vbn)
 
     configure_shared_running_normalizers(shared_normalizer_store, shared_normalizer_lock)
     _worker_env = NCS_Env(
@@ -139,17 +258,35 @@ def _init_worker(
         config_path=config_path,
         seed=seed,
     )
-    _worker_model = create_policy_net(action_dim, hidden_size=hidden_size, use_layer_norm=use_layer_norm)
+    _worker_model = create_policy_net(
+        action_dim,
+        hidden_size=hidden_size,
+        use_layer_norm=use_layer_norm,
+        use_vbn=_worker_use_vbn,
+        vbn_eps=vbn_eps,
+    )
     
     rng = jax.random.PRNGKey(0)
     input_dim = obs_dim + (_worker_n_agents if _worker_use_agent_id else 0)
     dummy_obs = jnp.zeros((1, input_dim))
-    _worker_params = _worker_model.init(rng, dummy_obs)
+    if _worker_use_vbn:
+        if vbn_reference_batch is None:
+            raise RuntimeError("VBN enabled but no reference batch provided to worker.")
+        _worker_vbn_reference_batch = jnp.asarray(vbn_reference_batch)
+        _worker_params = _worker_model.init(
+            rng,
+            dummy_obs,
+            reference_batch=_worker_vbn_reference_batch,
+        )
+    else:
+        _worker_vbn_reference_batch = None
+        _worker_params = _worker_model.init(rng, dummy_obs)
 
 
 def _run_single_episode(flat_params: np.ndarray, episode_seed: int) -> float:
     """Run one episode with the given flattened parameters and seed."""
     global _worker_env, _worker_model, _worker_params, _worker_n_agents
+    global _worker_use_vbn, _worker_vbn_reference_batch
     
     import jax.numpy as jnp
     from jax import flatten_util
@@ -164,7 +301,14 @@ def _run_single_episode(flat_params: np.ndarray, episode_seed: int) -> float:
     while not done:
         obs_batch = _build_obs_batch(obs_dict)
         obs_jax = jnp.asarray(obs_batch)
-        logits = _worker_model.apply(params, obs_jax)
+        if _worker_use_vbn:
+            logits = _worker_model.apply(
+                params,
+                obs_jax,
+                reference_batch=_worker_vbn_reference_batch,
+            )
+        else:
+            logits = _worker_model.apply(params, obs_jax)
         actions = np.asarray(jnp.argmax(logits, axis=1))
         action_dict = {f"agent_{i}": int(actions[i]) for i in range(_worker_n_agents)}
 
@@ -240,6 +384,8 @@ def train(args):
         raise ValueError("--bc-batch-size must be positive")
     if args.bc_init_std < 0.0:
         raise ValueError("--bc-init-std must be >= 0")
+    if args.use_vbn and args.use_layer_norm:
+        raise ValueError("--use-vbn and --use-layer-norm are mutually exclusive")
 
     config_path_str = str(args.config) if args.config is not None else None
     cfg = load_config(config_path_str)
@@ -253,9 +399,30 @@ def train(args):
     action_dim = dummy_env.action_space["agent_0"].n
     dummy_env.close()
     input_dim = obs_dim + (n_agents if use_agent_id else 0)
+
+    vbn_reference_batch: Optional[np.ndarray] = None
+    vbn_reference_batch_jax: Optional[Any] = None
+    vbn_seed_used: Optional[int] = None
+    if args.use_vbn:
+        vbn_seed = args.seed if args.vbn_ref_batch_seed is None else args.vbn_ref_batch_seed
+        vbn_seed_used = None if vbn_seed is None else int(vbn_seed)
+        vbn_reference_batch = collect_vbn_reference_batch(
+            config_path=config_path_str,
+            episode_length=args.episode_length,
+            seed=vbn_seed_used,
+            n_agents=n_agents,
+            use_agent_id=use_agent_id,
+            ref_batch_size=args.vbn_ref_batch_size,
+        )
+        vbn_reference_batch_jax = jnp.asarray(vbn_reference_batch)
     
     print(f"Observation Dim: {obs_dim}, Input Dim: {input_dim}, Action Dim: {action_dim}")
     print(f"N Agents: {n_agents}, Use Agent Id: {use_agent_id}")
+    if args.use_vbn:
+        print(
+            "VBN: enabled "
+            f"(ref_batch={args.vbn_ref_batch_size}, eps={args.vbn_eps}, seed={vbn_seed_used})"
+        )
     print(f"Hidden Size: {args.hidden_size}, Layer Norm: {args.use_layer_norm}")
     print(f"Evaluation episodes per individual: {args.eval_episodes}")
     print(f"Fitness shaping: {args.fitness_shaping} (evosax built-in)")
@@ -274,10 +441,25 @@ def train(args):
 
     # 2. Setup Flax Model & Initial Params
     master_rng = jax.random.PRNGKey(args.seed if args.seed is not None else 0)
-    model = create_policy_net(action_dim, hidden_size=args.hidden_size, use_layer_norm=args.use_layer_norm)
+    model = create_policy_net(
+        action_dim,
+        hidden_size=args.hidden_size,
+        use_layer_norm=args.use_layer_norm,
+        use_vbn=args.use_vbn,
+        vbn_eps=args.vbn_eps,
+    )
     dummy_obs = jnp.zeros((1, input_dim))
     master_rng, template_rng = jax.random.split(master_rng)
-    params_template = model.init(template_rng, dummy_obs)
+    if args.use_vbn:
+        if vbn_reference_batch_jax is None:
+            raise RuntimeError("VBN enabled but reference batch missing.")
+        params_template = model.init(
+            template_rng,
+            dummy_obs,
+            reference_batch=vbn_reference_batch_jax,
+        )
+    else:
+        params_template = model.init(template_rng, dummy_obs)
     
     flat_params_template, unravel_fn = flatten_util.ravel_pytree(params_template)
     num_params = flat_params_template.size
@@ -322,7 +504,12 @@ def train(args):
             n_agents=n_agents,
         )
         bc_rng = np.random.default_rng(args.seed)
-        bc_adapter = JaxActorBCAdapter(model.apply, n_agents=n_agents, use_agent_id=use_agent_id)
+        bc_adapter = JaxActorBCAdapter(
+            model.apply,
+            n_agents=n_agents,
+            use_agent_id=use_agent_id,
+            reference_batch=vbn_reference_batch,
+        )
         bc_result = pretrain_actor(bc_adapter, params_template, bc_dataset, bc_config, bc_rng)
         pretrained_params = bc_result.params
         pretrained_flat = np.array(flatten_util.ravel_pytree(pretrained_params)[0])
@@ -347,7 +534,16 @@ def train(args):
     def build_strategy_context(init_key: Any, param_key: Any) -> Dict[str, Any]:
         """Construct an independent Open_ES strategy with its own initialization."""
         if pretrained_params is None:
-            initial_params = model.init(param_key, dummy_obs)
+            if args.use_vbn:
+                if vbn_reference_batch_jax is None:
+                    raise RuntimeError("VBN enabled but reference batch missing.")
+                initial_params = model.init(
+                    param_key,
+                    dummy_obs,
+                    reference_batch=vbn_reference_batch_jax,
+                )
+            else:
+                initial_params = model.init(param_key, dummy_obs)
         else:
             if args.bc_init_std > 0.0:
                 if pretrained_flat is None:
@@ -411,6 +607,9 @@ def train(args):
                 use_agent_id,
                 args.hidden_size,
                 args.use_layer_norm,
+                args.use_vbn,
+                vbn_reference_batch,
+                args.vbn_eps,
                 shared_normalizer_store,
                 shared_normalizer_lock,
             ),
@@ -432,24 +631,48 @@ def train(args):
             use_agent_id,
             args.hidden_size,
             args.use_layer_norm,
+            args.use_vbn,
+            vbn_reference_batch,
+            args.vbn_eps,
         )
 
     # 5. Logging Setup
     run_dir = prepare_run_directory("openai_es", args.config, args.output_root)
     (run_dir / "checkpoints").mkdir(exist_ok=True)
+
+    def build_checkpoint_payload(flat_params: np.ndarray) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "flat_params": flat_params,
+            "hidden_size": args.hidden_size,
+            "use_layer_norm": args.use_layer_norm,
+            "use_vbn": args.use_vbn,
+            "n_agents": n_agents,
+            "obs_dim": obs_dim,
+            "use_agent_id": use_agent_id,
+        }
+        if args.use_vbn:
+            if vbn_reference_batch is None:
+                raise RuntimeError("VBN enabled but reference batch missing.")
+            payload.update(
+                {
+                    "vbn_eps": args.vbn_eps,
+                    "vbn_reference_batch": vbn_reference_batch,
+                    "vbn_ref_batch_size": args.vbn_ref_batch_size,
+                    "vbn_ref_batch_seed": vbn_seed_used,
+                }
+            )
+        return payload
+
     if pretrained_flat is not None:
-        np.savez(
-            run_dir / "bc_pretrain.npz",
-            flat_params=pretrained_flat,
-            hidden_size=args.hidden_size,
-            use_layer_norm=args.use_layer_norm,
-            n_agents=n_agents,
-            obs_dim=obs_dim,
-            use_agent_id=use_agent_id,
-            bc_epochs=args.bc_epochs,
-            bc_batch_size=args.bc_batch_size,
-            bc_lr=bc_lr,
+        bc_payload = build_checkpoint_payload(pretrained_flat)
+        bc_payload.update(
+            {
+                "bc_epochs": args.bc_epochs,
+                "bc_batch_size": args.bc_batch_size,
+                "bc_lr": bc_lr,
+            }
         )
+        np.savez(run_dir / "bc_pretrain.npz", **bc_payload)
 
     rewards_file = run_dir / "training_rewards.csv"
     with rewards_file.open("w", newline="", encoding="utf-8") as f:
@@ -512,34 +735,19 @@ def train(args):
             best_idx = int(jnp.argmax(fitness_array))
             np.savez(
                 run_dir / "best_model.npz",
-                flat_params=population_flat[best_idx],
-                hidden_size=args.hidden_size,
-                use_layer_norm=args.use_layer_norm,
-                n_agents=n_agents,
-                obs_dim=obs_dim,
-                use_agent_id=use_agent_id,
+                **build_checkpoint_payload(population_flat[best_idx]),
             )
 
         best_strategy_state = strategy_context["state"]
         np.savez(
             run_dir / "latest_model.npz",
-            flat_params=np.array(best_strategy_state.mean),
-            hidden_size=args.hidden_size,
-            use_layer_norm=args.use_layer_norm,
-            n_agents=n_agents,
-            obs_dim=obs_dim,
-            use_agent_id=use_agent_id,
+            **build_checkpoint_payload(np.array(best_strategy_state.mean)),
         )
 
         if gen % args.checkpoint_freq == 0:
             np.savez(
                 run_dir / "checkpoints" / f"gen_{gen}.npz",
-                flat_params=np.array(best_strategy_state.mean),
-                hidden_size=args.hidden_size,
-                use_layer_norm=args.use_layer_norm,
-                n_agents=n_agents,
-                obs_dim=obs_dim,
-                use_agent_id=use_agent_id,
+                **build_checkpoint_payload(np.array(best_strategy_state.mean)),
             )
 
     if pool is not None:
@@ -558,6 +766,10 @@ def train(args):
         "fitness_shaping": args.fitness_shaping,
         "hidden_size": args.hidden_size,
         "use_layer_norm": args.use_layer_norm,
+        "use_vbn": args.use_vbn,
+        "vbn_ref_batch_size": args.vbn_ref_batch_size,
+        "vbn_ref_batch_seed": vbn_seed_used,
+        "vbn_eps": args.vbn_eps,
         "learning_rate": args.learning_rate,
         "lrate_decay": args.lrate_decay,
         "sigma_init": args.sigma_init,
@@ -591,7 +803,21 @@ def parse_args():
                         choices=["centered_rank", "z_score", "normalize", "none"],
                         help="Fitness shaping (evosax built-in). Default: centered_rank")
     parser.add_argument("--hidden-size", type=int, default=64, help="Hidden layer size.")
-    parser.add_argument("--use-layer-norm", action="store_true", help="Use LayerNorm.")
+    parser.add_argument("--use-layer-norm", action="store_true", help="Use LayerNorm (mutually exclusive with VBN).")
+    parser.add_argument("--use-vbn", action="store_true", help="Use Virtual Batch Normalization (VBN).")
+    parser.add_argument(
+        "--vbn-ref-batch-size",
+        type=int,
+        default=128,
+        help="Reference batch size for VBN.",
+    )
+    parser.add_argument(
+        "--vbn-ref-batch-seed",
+        type=int,
+        default=None,
+        help="Seed for VBN reference batch (defaults to --seed).",
+    )
+    parser.add_argument("--vbn-eps", type=float, default=1e-5, help="VBN epsilon.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--learning-rate", type=float, default=0.005, help="Learning rate.")
     parser.add_argument("--lrate-decay", type=float, default=0.999, help="LR decay.")

@@ -82,6 +82,7 @@ Learning-based baselines live under `algorithms/`:
 
 - OpenAI-ES (shared policy, JAX): `python -m algorithms.openai_es --config configs/perfect_comm.json --generations 1000 --popsize 128`
   - Uses `system.n_agents` from the config and appends a one-hot agent id for parameter sharing when `n_agents > 1`.
+  - To match the ES paper's Virtual Batch Normalization, pass `--use-vbn` (optionally tune `--vbn-ref-batch-size`).
 - IQL (multi-agent, PyTorch): `python -m algorithms.marl_iql --config configs/marl_mixed_plants.json --total-timesteps 200000`
 - VDN (multi-agent, PyTorch): `python -m algorithms.marl_vdn --config configs/marl_mixed_plants.json --total-timesteps 200000`
 - QMIX (multi-agent, PyTorch): `python -m algorithms.marl_qmix --config configs/marl_mixed_plants.json --total-timesteps 200000`

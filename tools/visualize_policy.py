@@ -186,6 +186,9 @@ def load_es_policy(model_path: str, env: NCS_Env):
         # Load architecture parameters with backward compatibility
         hidden_size = int(data['hidden_size']) if 'hidden_size' in data else 64
         use_layer_norm = bool(data['use_layer_norm']) if 'use_layer_norm' in data else False
+        use_vbn = bool(data['use_vbn']) if 'use_vbn' in data else False
+        vbn_eps = float(data['vbn_eps']) if 'vbn_eps' in data else 1e-5
+        vbn_reference_batch = data['vbn_reference_batch'] if 'vbn_reference_batch' in data else None
 
         saved_n_agents = int(data['n_agents']) if 'n_agents' in data else None
         use_agent_id = bool(data['use_agent_id']) if 'use_agent_id' in data else False
@@ -194,7 +197,7 @@ def load_es_policy(model_path: str, env: NCS_Env):
         print(
             "  Architecture: "
             f"hidden_size={hidden_size}, use_layer_norm={use_layer_norm}, "
-            f"use_agent_id={use_agent_id}"
+            f"use_vbn={use_vbn}, use_agent_id={use_agent_id}"
         )
     except Exception as e:
         raise ValueError(f"Could not load numpy data from {model_path_p}: {e}")
@@ -220,22 +223,49 @@ def load_es_policy(model_path: str, env: NCS_Env):
     input_dim = obs_dim + (n_agents if use_agent_id else 0)
 
     # Create model with correct architecture
-    model = create_policy_net(action_dim=action_dim, hidden_size=hidden_size, use_layer_norm=use_layer_norm)
+    model = create_policy_net(
+        action_dim=action_dim,
+        hidden_size=hidden_size,
+        use_layer_norm=use_layer_norm,
+        use_vbn=use_vbn,
+        vbn_eps=vbn_eps,
+    )
 
     # Initialize dummy to get structure
     rng = jax.random.PRNGKey(0)
     dummy_obs = jnp.zeros((1, input_dim))
-    dummy_params = model.init(rng, dummy_obs)
+    vbn_reference_batch_jax = None
+    if use_vbn:
+        if vbn_reference_batch is None:
+            raise ValueError("Checkpoint uses VBN but no reference batch is stored.")
+        if vbn_reference_batch.ndim != 2 or vbn_reference_batch.shape[1] != input_dim:
+            raise ValueError(
+                f"VBN reference batch shape {vbn_reference_batch.shape} does not match input_dim={input_dim}."
+            )
+        vbn_reference_batch_jax = jnp.asarray(vbn_reference_batch)
+        dummy_params = model.init(rng, dummy_obs, reference_batch=vbn_reference_batch_jax)
+    else:
+        dummy_params = model.init(rng, dummy_obs)
 
     _, unravel_fn = flatten_util.ravel_pytree(dummy_params)
     params = unravel_fn(flat_params)
 
     class ESMultiAgentPolicy:
-        def __init__(self, model, params, n_agents: int, use_agent_id: bool):
+        def __init__(
+            self,
+            model,
+            params,
+            n_agents: int,
+            use_agent_id: bool,
+            use_vbn: bool,
+            vbn_reference_batch: Optional[jnp.ndarray],
+        ):
             self.model = model
             self.params = params
             self.n_agents = int(n_agents)
             self.use_agent_id = bool(use_agent_id)
+            self.use_vbn = bool(use_vbn)
+            self.vbn_reference_batch = vbn_reference_batch
 
         def reset(self) -> None:
             return None
@@ -248,11 +278,25 @@ def load_es_policy(model_path: str, env: NCS_Env):
             if self.use_agent_id:
                 agent_ids = np.eye(self.n_agents, dtype=obs_batch.dtype)
                 obs_batch = np.concatenate([obs_batch, agent_ids], axis=1)
-            logits = self.model.apply(self.params, jnp.array(obs_batch))
+            if self.use_vbn:
+                logits = self.model.apply(
+                    self.params,
+                    jnp.array(obs_batch),
+                    reference_batch=self.vbn_reference_batch,
+                )
+            else:
+                logits = self.model.apply(self.params, jnp.array(obs_batch))
             actions = np.argmax(np.asarray(logits), axis=1)
             return {f"agent_{i}": int(actions[i]) for i in range(self.n_agents)}
 
-    return ESMultiAgentPolicy(model, params, n_agents=n_agents, use_agent_id=use_agent_id)
+    return ESMultiAgentPolicy(
+        model,
+        params,
+        n_agents=n_agents,
+        use_agent_id=use_agent_id,
+        use_vbn=use_vbn,
+        vbn_reference_batch=vbn_reference_batch_jax,
+    )
 
 
 def load_marl_torch_multi_agent_policy(model_path: str, env: NCS_Env) -> MARLTorchMultiAgentPolicy:
