@@ -101,6 +101,7 @@ class ModelRun:
     path: Path
     config_path: Path
     best_model: Optional[Path]
+    best_train_model: Optional[Path]
     latest_model: Optional[Path]
 
 
@@ -500,17 +501,27 @@ def _discover_model_runs(models_root: Path) -> List[ModelRun]:
         config_path = entry / "config.json"
         if not config_path.exists():
             continue
-        best_model = entry / "best_model.pt"
-        latest_model = entry / "latest_model.pt"
-        if not best_model.exists() and not latest_model.exists():
+
+        def _select_checkpoint(stem: str) -> Optional[Path]:
+            for suffix in (".pt", ".npz"):
+                candidate = entry / f"{stem}{suffix}"
+                if candidate.exists():
+                    return candidate
+            return None
+
+        best_model = _select_checkpoint("best_model")
+        best_train_model = _select_checkpoint("best_train_model")
+        latest_model = _select_checkpoint("latest_model")
+        if best_model is None and latest_model is None and best_train_model is None:
             continue
         runs.append(
             ModelRun(
                 name=entry.name,
                 path=entry,
                 config_path=config_path,
-                best_model=best_model if best_model.exists() else None,
-                latest_model=latest_model if latest_model.exists() else None,
+                best_model=best_model,
+                best_train_model=best_train_model,
+                latest_model=latest_model,
             )
         )
     return runs
@@ -981,6 +992,117 @@ def _write_reward_stats(
         json.dump(payload, handle, indent=2, sort_keys=True, ensure_ascii=True)
 
 
+def _reward_normalization_disabled(config_path: Path) -> bool:
+    if not config_path.exists():
+        return False
+    try:
+        config = load_config(str(config_path))
+    except Exception as exc:
+        print(f"Warning: Could not read config for reward normalization: {exc}")
+        return False
+    reward_cfg = config.get("reward", {})
+    if not isinstance(reward_cfg, dict):
+        return False
+    normalize = reward_cfg.get("normalize", False)
+    return not bool(normalize)
+
+
+def _plot_combined_rewards(
+    model_dir: Path,
+    output_path: Path,
+    model_name: str = "Model",
+    *,
+    log_warnings: bool = True,
+) -> bool:
+    """Plot training and evaluation rewards on a shared y-axis when scales match."""
+    training_csv = model_dir / "training_rewards.csv"
+    eval_csv = model_dir / "evaluation_rewards.csv"
+    if not training_csv.exists():
+        if log_warnings:
+            print(f"Warning: Training rewards not found at {training_csv}")
+        return False
+    if not eval_csv.exists():
+        if log_warnings:
+            print(f"Warning: Evaluation rewards not found at {eval_csv}")
+        return False
+
+    try:
+        train_df = pd.read_csv(str(training_csv))
+        if len(train_df) == 0:
+            if log_warnings:
+                print(f"Warning: Training rewards file is empty at {training_csv}")
+            return False
+
+        eval_df = pd.read_csv(str(eval_csv))
+        if len(eval_df) == 0:
+            if log_warnings:
+                print(f"Warning: Evaluation rewards file is empty at {eval_csv}")
+            return False
+
+        episode_col = _select_column(train_df, ["episode", "Episode", "generation", "Generation"])
+        reward_col = _select_column(train_df, ["reward", "reward_sum", "total_reward", "episode_reward", "mean_reward"])
+        if episode_col is None or reward_col is None:
+            raise ValueError(f"Could not find episode/reward columns. Available: {list(train_df.columns)}")
+
+        step_col = _select_column(eval_df, ["step", "Step", "steps", "Steps"])
+        mean_reward_col = _select_column(eval_df, ["mean_reward", "reward", "avg_reward"])
+        std_reward_col = _select_column(eval_df, ["std_reward", "reward_std", "std"])
+        if step_col is None or mean_reward_col is None:
+            raise ValueError(f"Could not find step/reward columns. Available: {list(eval_df.columns)}")
+
+        episodes = train_df[episode_col].values
+        rewards = train_df[reward_col].values
+        smoothed_train = _smooth_rewards(rewards, window_size=200)
+
+        steps = eval_df[step_col].values
+        mean_rewards = eval_df[mean_reward_col].values
+        std_rewards = eval_df[std_reward_col].values if std_reward_col is not None else None
+        smoothed_eval = _smooth_rewards(mean_rewards, window_size=20)
+
+        fig, ax_train = plt.subplots(figsize=(7, 5))
+        ax_eval = ax_train.twiny()
+
+        ax_train.plot(episodes, rewards, alpha=0.3, linewidth=0.5, color="blue", label="Train Raw")
+        ax_train.plot(episodes, smoothed_train, linewidth=2, color="blue", label="Train Smoothed (window=200)")
+
+        ax_eval.plot(steps, mean_rewards, alpha=0.3, linewidth=0.5, color="green", label="Eval Raw")
+        ax_eval.plot(steps, smoothed_eval, linewidth=2, color="green", label="Eval Smoothed (window=20)")
+
+        if std_rewards is not None:
+            smoothed_std = _smooth_rewards(std_rewards, window_size=20)
+            ax_eval.fill_between(
+                steps,
+                smoothed_eval - smoothed_std,
+                smoothed_eval + smoothed_std,
+                alpha=0.2,
+                color="green",
+                label="Eval +/- 1 std",
+            )
+
+        train_xlabel = "Generation" if "generation" in episode_col.lower() else "Episode"
+        ax_train.set_xlabel(train_xlabel)
+        ax_eval.set_xlabel("Evaluation Steps")
+        ax_train.set_ylabel("Reward (shared scale)")
+        ax_train.set_title(f"{model_name} - Training vs Evaluation Rewards")
+        ax_train.grid(True, alpha=0.3)
+
+        train_handles, train_labels = ax_train.get_legend_handles_labels()
+        eval_handles, eval_labels = ax_eval.get_legend_handles_labels()
+        ax_train.legend(train_handles + eval_handles, train_labels + eval_labels, loc="best")
+
+        plt.tight_layout()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(str(output_path), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        if log_warnings:
+            print(f"Saved combined rewards plot to {output_path}")
+        return True
+    except Exception as exc:
+        if log_warnings:
+            print(f"Warning: Could not plot combined rewards: {exc}")
+        return False
+
+
 def _plot_training_rewards(
     model_dir: Path,
     output_path: Path,
@@ -1097,6 +1219,28 @@ def _plot_evaluation_rewards(
         if log_warnings:
             print(f"Warning: Could not plot evaluation rewards: {exc}")
         return False
+
+
+def _plot_reward_curves(
+    model_dir: Path,
+    config_path: Path,
+    model_name: str = "Model",
+    *,
+    log_warnings: bool = True,
+) -> List[str]:
+    if _reward_normalization_disabled(config_path):
+        combined_path = model_dir / "training_evaluation_rewards.png"
+        if _plot_combined_rewards(model_dir, combined_path, model_name=model_name, log_warnings=log_warnings):
+            return [str(combined_path)]
+
+    plotted_paths: List[str] = []
+    training_path = model_dir / "training_rewards.png"
+    evaluation_path = model_dir / "evaluation_rewards.png"
+    if _plot_training_rewards(model_dir, training_path, model_name=model_name, log_warnings=log_warnings):
+        plotted_paths.append(str(training_path))
+    if _plot_evaluation_rewards(model_dir, evaluation_path, model_name=model_name, log_warnings=log_warnings):
+        plotted_paths.append(str(evaluation_path))
+    return plotted_paths
 
 
 def main() -> int:
@@ -1295,23 +1439,12 @@ def main() -> int:
             training_stats = _compute_training_stats(model_dir)
             evaluation_stats = _compute_evaluation_stats(model_dir)
             _write_reward_stats(run_dir, training_stats, evaluation_stats)
-            training_plot = _plot_training_rewards(
+            plotted_paths = _plot_reward_curves(
                 model_dir,
-                model_dir / "training_rewards.png",
+                model_dir / "config.json",
                 model_name=target_label,
                 log_warnings=False,
             )
-            evaluation_plot = _plot_evaluation_rewards(
-                model_dir,
-                model_dir / "evaluation_rewards.png",
-                model_name=target_label,
-                log_warnings=False,
-            )
-            plotted_paths = []
-            if training_plot:
-                plotted_paths.append(str(model_dir / "training_rewards.png"))
-            if evaluation_plot:
-                plotted_paths.append(str(model_dir / "evaluation_rewards.png"))
             if plotted_paths:
                 _log("Plots:")
                 for path in plotted_paths:
@@ -1351,7 +1484,11 @@ def main() -> int:
     policy_types: List[str] = []
     for run in runs:
         specs: List[Tuple[str, PolicySpec]] = []
-        for checkpoint_name, model_path in (("best", run.best_model), ("latest", run.latest_model)):
+        for checkpoint_name, model_path in (
+            ("best", run.best_model),
+            ("best_train", run.best_train_model),
+            ("latest", run.latest_model),
+        ):
             if model_path is None:
                 continue
             policy_type = _infer_policy_type(model_path)
@@ -1416,23 +1553,12 @@ def main() -> int:
             _write_reward_stats(run_dir, training_stats, evaluation_stats)
             _log(f"    results: {run_dir / 'summary_results.csv'}")
 
-        training_plot = _plot_training_rewards(
+        plotted_paths = _plot_reward_curves(
             run.path,
-            run.path / "training_rewards.png",
+            run.config_path,
             model_name=model_name,
             log_warnings=False,
         )
-        evaluation_plot = _plot_evaluation_rewards(
-            run.path,
-            run.path / "evaluation_rewards.png",
-            model_name=model_name,
-            log_warnings=False,
-        )
-        plotted_paths = []
-        if training_plot:
-            plotted_paths.append(str(run.path / "training_rewards.png"))
-        if evaluation_plot:
-            plotted_paths.append(str(run.path / "evaluation_rewards.png"))
         if plotted_paths:
             _log("  plots:")
             for path in plotted_paths:
