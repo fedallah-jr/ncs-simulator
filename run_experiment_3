@@ -10,8 +10,8 @@ cd "${PROJECT_ROOT}"
 SEED="${SEED:-0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 
-TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-1000000}"
-EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-800000}"
+TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-2000000}"
+EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-1600000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_root="${OUTPUT_ROOT}/exp_3_vdn_shared_${timestamp}_seed${SEED}"
@@ -89,7 +89,7 @@ run_one() {
 }
 
 run_one "algorithms.marl_vdn" "vdn" "vdn_shared" \
-  --epsilon-decay-steps "${EPS_DECAY_STEPS}"
+  --epsilon-decay-steps "${EPS_DECAY_STEPS} --batch-size 512 --learning-rate 0.00025"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then
