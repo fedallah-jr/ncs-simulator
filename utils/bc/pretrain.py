@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Dict, Protocol
 
 import numpy as np
 
@@ -50,13 +50,11 @@ class JaxActorBCAdapter:
         apply_fn: Any,
         n_agents: int,
         use_agent_id: bool,
-        reference_batch: Optional[np.ndarray] = None,
     ) -> None:
         self.apply_fn = apply_fn
         self.n_agents = int(n_agents)
         self.use_agent_id = bool(use_agent_id)
         self._agent_eye = np.eye(self.n_agents, dtype=np.float32) if self.use_agent_id else None
-        self._reference_batch = reference_batch
 
     def _augment_obs(self, obs: np.ndarray, agent_idx: np.ndarray) -> np.ndarray:
         if not self.use_agent_id:
@@ -90,16 +88,8 @@ class JaxActorBCAdapter:
         optimizer = optax.adam(config.learning_rate)
         opt_state = optimizer.init(params)
 
-        reference_batch = None
-        if self._reference_batch is not None:
-            reference_batch = jnp.asarray(self._reference_batch)
-        use_reference_batch = reference_batch is not None
-
         def loss_fn(params_local: Any, obs: jnp.ndarray, actions: jnp.ndarray) -> jnp.ndarray:
-            if use_reference_batch:
-                logits = self.apply_fn(params_local, obs, reference_batch=reference_batch)
-            else:
-                logits = self.apply_fn(params_local, obs)
+            logits = self.apply_fn(params_local, obs)
             return optax.softmax_cross_entropy_with_integer_labels(logits, actions).mean()
 
         @jax.jit

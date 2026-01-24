@@ -52,6 +52,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from ncs_env.env import NCS_Env
 from ncs_env.config import load_config
 from tools.heuristic_policies import get_heuristic_policy, HEURISTIC_POLICIES
+from utils.marl.obs_normalization import RunningObsNormalizer
 
 
 class MultiAgentHeuristicPolicy:
@@ -186,10 +187,12 @@ def load_es_policy(model_path: str, env: NCS_Env):
         # Load architecture parameters with backward compatibility
         hidden_size = int(data['hidden_size']) if 'hidden_size' in data else 64
         use_layer_norm = bool(data['use_layer_norm']) if 'use_layer_norm' in data else False
-        use_vbn = bool(data['use_vbn']) if 'use_vbn' in data else False
-        vbn_eps = float(data['vbn_eps']) if 'vbn_eps' in data else 1e-5
-        vbn_reference_batch = data['vbn_reference_batch'] if 'vbn_reference_batch' in data else None
-
+        normalize_obs = bool(data['normalize_obs']) if 'normalize_obs' in data else False
+        obs_norm_clip = float(data['obs_norm_clip']) if 'obs_norm_clip' in data else 5.0
+        obs_norm_eps = float(data['obs_norm_eps']) if 'obs_norm_eps' in data else 1e-8
+        obs_norm_mean = data['obs_norm_mean'] if 'obs_norm_mean' in data else None
+        obs_norm_m2 = data['obs_norm_m2'] if 'obs_norm_m2' in data else None
+        obs_norm_count = int(data['obs_norm_count']) if 'obs_norm_count' in data else 0
         saved_n_agents = int(data['n_agents']) if 'n_agents' in data else None
         use_agent_id = bool(data['use_agent_id']) if 'use_agent_id' in data else False
         saved_obs_dim = int(data['obs_dim']) if 'obs_dim' in data else None
@@ -197,7 +200,7 @@ def load_es_policy(model_path: str, env: NCS_Env):
         print(
             "  Architecture: "
             f"hidden_size={hidden_size}, use_layer_norm={use_layer_norm}, "
-            f"use_vbn={use_vbn}, use_agent_id={use_agent_id}"
+            f"normalize_obs={normalize_obs}, use_agent_id={use_agent_id}"
         )
     except Exception as e:
         raise ValueError(f"Could not load numpy data from {model_path_p}: {e}")
@@ -227,28 +230,28 @@ def load_es_policy(model_path: str, env: NCS_Env):
         action_dim=action_dim,
         hidden_size=hidden_size,
         use_layer_norm=use_layer_norm,
-        use_vbn=use_vbn,
-        vbn_eps=vbn_eps,
     )
 
     # Initialize dummy to get structure
     rng = jax.random.PRNGKey(0)
     dummy_obs = jnp.zeros((1, input_dim))
-    vbn_reference_batch_jax = None
-    if use_vbn:
-        if vbn_reference_batch is None:
-            raise ValueError("Checkpoint uses VBN but no reference batch is stored.")
-        if vbn_reference_batch.ndim != 2 or vbn_reference_batch.shape[1] != input_dim:
-            raise ValueError(
-                f"VBN reference batch shape {vbn_reference_batch.shape} does not match input_dim={input_dim}."
-            )
-        vbn_reference_batch_jax = jnp.asarray(vbn_reference_batch)
-        dummy_params = model.init(rng, dummy_obs, reference_batch=vbn_reference_batch_jax)
-    else:
-        dummy_params = model.init(rng, dummy_obs)
+    dummy_params = model.init(rng, dummy_obs)
 
     _, unravel_fn = flatten_util.ravel_pytree(dummy_params)
     params = unravel_fn(flat_params)
+
+    obs_normalizer = None
+    obs_normalizer_update = False
+    if normalize_obs:
+        clip_value = None if obs_norm_clip <= 0 else float(obs_norm_clip)
+        obs_normalizer = RunningObsNormalizer.create(
+            obs_dim, clip=clip_value, eps=float(obs_norm_eps)
+        )
+        if obs_norm_mean is not None and obs_norm_m2 is not None:
+            obs_normalizer.set_state(obs_norm_mean, obs_norm_m2, obs_norm_count)
+            obs_normalizer_update = False
+        else:
+            obs_normalizer_update = True
 
     class ESMultiAgentPolicy:
         def __init__(
@@ -257,15 +260,15 @@ def load_es_policy(model_path: str, env: NCS_Env):
             params,
             n_agents: int,
             use_agent_id: bool,
-            use_vbn: bool,
-            vbn_reference_batch: Optional[jnp.ndarray],
+            obs_normalizer: Optional[RunningObsNormalizer],
+            obs_normalizer_update: bool,
         ):
             self.model = model
             self.params = params
             self.n_agents = int(n_agents)
             self.use_agent_id = bool(use_agent_id)
-            self.use_vbn = bool(use_vbn)
-            self.vbn_reference_batch = vbn_reference_batch
+            self.obs_normalizer = obs_normalizer
+            self.obs_normalizer_update = bool(obs_normalizer_update)
 
         def reset(self) -> None:
             return None
@@ -275,17 +278,14 @@ def load_es_policy(model_path: str, env: NCS_Env):
                 [np.asarray(obs_dict[f"agent_{i}"], dtype=np.float32) for i in range(self.n_agents)],
                 axis=0,
             )
+            if self.obs_normalizer is not None:
+                obs_batch = self.obs_normalizer.normalize(
+                    obs_batch, update=self.obs_normalizer_update
+                )
             if self.use_agent_id:
                 agent_ids = np.eye(self.n_agents, dtype=obs_batch.dtype)
                 obs_batch = np.concatenate([obs_batch, agent_ids], axis=1)
-            if self.use_vbn:
-                logits = self.model.apply(
-                    self.params,
-                    jnp.array(obs_batch),
-                    reference_batch=self.vbn_reference_batch,
-                )
-            else:
-                logits = self.model.apply(self.params, jnp.array(obs_batch))
+            logits = self.model.apply(self.params, jnp.array(obs_batch))
             actions = np.argmax(np.asarray(logits), axis=1)
             return {f"agent_{i}": int(actions[i]) for i in range(self.n_agents)}
 
@@ -294,8 +294,8 @@ def load_es_policy(model_path: str, env: NCS_Env):
         params,
         n_agents=n_agents,
         use_agent_id=use_agent_id,
-        use_vbn=use_vbn,
-        vbn_reference_batch=vbn_reference_batch_jax,
+        obs_normalizer=obs_normalizer,
+        obs_normalizer_update=obs_normalizer_update,
     )
 
 

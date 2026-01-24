@@ -66,6 +66,42 @@ class RunningObsNormalizer:
         )
         self.count = total_count
 
+    def update_from_moments(
+        self,
+        batch_mean: np.ndarray,
+        batch_var: np.ndarray,
+        batch_count: int,
+    ) -> None:
+        if batch_count <= 0:
+            return
+        mean = np.asarray(batch_mean, dtype=np.float64)
+        var = np.asarray(batch_var, dtype=np.float64)
+        if mean.shape != self.mean.shape or var.shape != self.mean.shape:
+            raise ValueError("Moment shapes must match obs_dim")
+        if self.count == 0:
+            self.mean = mean
+            self.m2 = var * batch_count
+            self.count = int(batch_count)
+            return
+        delta = mean - self.mean
+        total_count = self.count + int(batch_count)
+        self.mean = self.mean + delta * (batch_count / float(total_count))
+        self.m2 = (
+            self.m2
+            + var * batch_count
+            + (delta ** 2) * self.count * batch_count / float(total_count)
+        )
+        self.count = total_count
+
+    def set_state(self, mean: np.ndarray, m2: np.ndarray, count: int) -> None:
+        mean_arr = np.asarray(mean, dtype=np.float64)
+        m2_arr = np.asarray(m2, dtype=np.float64)
+        if mean_arr.shape != self.mean.shape or m2_arr.shape != self.mean.shape:
+            raise ValueError("State shapes must match obs_dim")
+        self.mean = mean_arr
+        self.m2 = m2_arr
+        self.count = int(count)
+
     def normalize(self, obs: np.ndarray, *, update: bool = True) -> np.ndarray:
         if update:
             self.update(obs)
