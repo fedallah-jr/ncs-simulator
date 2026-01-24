@@ -425,8 +425,8 @@ def train(args):
         transition_steps=1, 
         decay_rate=args.sigma_decay
     )
-    
-    optimizer = optax.adam(learning_rate=lrate_schedule)
+
+    optimizer = optax.adamw(learning_rate=lrate_schedule, weight_decay=0.005)
     fitness_shaping_fn = get_fitness_shaping_fn(args.fitness_shaping)
 
     def build_strategy_context(init_key: Any, param_key: Any) -> Dict[str, Any]:
