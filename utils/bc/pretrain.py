@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, Protocol
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Protocol
 
 import numpy as np
 
 from utils.bc.dataset import BCDataset
+from utils.marl.obs_normalization import RunningObsNormalizer
 
 
 @dataclass
@@ -15,6 +16,7 @@ class BCPretrainConfig:
     learning_rate: float
     use_agent_id: bool
     n_agents: int
+    obs_normalizer: Optional[RunningObsNormalizer] = field(default=None)
 
 
 @dataclass
@@ -63,6 +65,13 @@ class JaxActorBCAdapter:
             raise RuntimeError("Agent id eye not initialized.")
         return np.concatenate([obs, self._agent_eye[agent_idx]], axis=1)
 
+    def _normalize_obs(
+        self, obs: np.ndarray, normalizer: Optional[RunningObsNormalizer]
+    ) -> np.ndarray:
+        if normalizer is None:
+            return obs
+        return normalizer.normalize(obs, update=False)
+
     def pretrain(
         self,
         params: Any,
@@ -108,6 +117,7 @@ class JaxActorBCAdapter:
         total_batches = 0
         for _epoch in range(config.epochs):
             for obs_mb, actions_mb, agent_idx in dataset.iter_actor_batches(config.batch_size, rng):
+                obs_mb = self._normalize_obs(obs_mb, config.obs_normalizer)
                 obs_mb = self._augment_obs(obs_mb, agent_idx)
                 params, opt_state, loss = train_step(
                     params,

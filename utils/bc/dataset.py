@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterator, Optional, Tuple
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from utils.marl.obs_normalization import RunningObsNormalizer
 
 
 @dataclass
@@ -39,6 +42,27 @@ class BCDataset:
             obs_mb = self.obs[step_idx, agent_idx]
             actions_mb = self.actions[step_idx, agent_idx]
             yield obs_mb, actions_mb, agent_idx
+
+    def compute_obs_normalizer(
+        self,
+        clip: Optional[float] = 5.0,
+        eps: float = 1e-8,
+    ) -> "RunningObsNormalizer":
+        """Compute observation normalization statistics from the dataset.
+
+        Returns a RunningObsNormalizer initialized with the dataset's observation
+        mean and variance, ready for use in BC pretraining and ES training.
+        """
+        from utils.marl.obs_normalization import RunningObsNormalizer
+
+        obs_dim = int(self.obs.shape[2])
+        normalizer = RunningObsNormalizer.create(obs_dim, clip=clip, eps=eps)
+
+        # Flatten observations: (steps, n_agents, obs_dim) -> (steps * n_agents, obs_dim)
+        flat_obs = self.obs.reshape(-1, obs_dim).astype(np.float64)
+        normalizer.update(flat_obs)
+
+        return normalizer
 
 
 def _read_scalar(data: np.lib.npyio.NpzFile, key: str, default: Any) -> Any:

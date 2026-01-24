@@ -319,12 +319,8 @@ def train(args):
     action_dim = dummy_env.action_space["agent_0"].n
     dummy_env.close()
     input_dim = obs_dim + (n_agents if use_agent_id else 0)
+    # obs_normalizer is initialized later - either from BC dataset or fresh
     obs_normalizer: Optional[RunningObsNormalizer] = None
-    if args.normalize_obs:
-        clip_value = None if args.obs_norm_clip <= 0 else float(args.obs_norm_clip)
-        obs_normalizer = RunningObsNormalizer.create(
-            obs_dim, clip=clip_value, eps=float(args.obs_norm_eps)
-        )
 
     print(f"Observation Dim: {obs_dim}, Input Dim: {input_dim}, Action Dim: {action_dim}")
     print(f"N Agents: {n_agents}, Use Agent Id: {use_agent_id}")
@@ -367,6 +363,7 @@ def train(args):
     bc_lr: Optional[float] = None
     pretrained_params: Optional[Any] = None
     pretrained_flat: Optional[np.ndarray] = None
+    bc_dataset = None
     if args.bc_dataset is not None:
         bc_dataset = load_bc_dataset(args.bc_dataset)
         if bc_dataset.num_steps <= 0:
@@ -394,6 +391,17 @@ def train(args):
         if min_action < 0 or max_action >= action_dim:
             raise ValueError("BC dataset actions are outside the valid action range.")
 
+        # Initialize obs normalizer from BC dataset if normalization is enabled
+        if args.normalize_obs:
+            clip_value = None if args.obs_norm_clip <= 0 else float(args.obs_norm_clip)
+            obs_normalizer = bc_dataset.compute_obs_normalizer(
+                clip=clip_value, eps=float(args.obs_norm_eps)
+            )
+            print(
+                f"[BC] Initialized obs normalizer from dataset "
+                f"(count={obs_normalizer.count}, mean_norm={np.linalg.norm(obs_normalizer.mean):.4f})"
+            )
+
         bc_lr = float(args.learning_rate) if args.bc_lr is None else float(args.bc_lr)
         bc_config = BCPretrainConfig(
             epochs=int(args.bc_epochs),
@@ -401,6 +409,7 @@ def train(args):
             learning_rate=bc_lr,
             use_agent_id=use_agent_id,
             n_agents=n_agents,
+            obs_normalizer=obs_normalizer,
         )
         bc_rng = np.random.default_rng(args.seed)
         bc_adapter = JaxActorBCAdapter(
@@ -412,6 +421,13 @@ def train(args):
         pretrained_params = bc_result.params
         pretrained_flat = np.array(flatten_util.ravel_pytree(pretrained_params)[0])
         print(f"[BC] Pretrained actor with avg loss {bc_result.metrics.get('loss', 0.0):.6f}")
+
+    # Create fresh obs normalizer if not initialized from BC dataset
+    if obs_normalizer is None and args.normalize_obs:
+        clip_value = None if args.obs_norm_clip <= 0 else float(args.obs_norm_clip)
+        obs_normalizer = RunningObsNormalizer.create(
+            obs_dim, clip=clip_value, eps=float(args.obs_norm_eps)
+        )
 
     # 3. Setup Open_ES Strategy with built-in fitness shaping
     lrate_schedule = optax.exponential_decay(
@@ -730,7 +746,7 @@ def parse_args():
     parser.add_argument("--learning-rate", type=float, default=0.005, help="Learning rate.")
     parser.add_argument("--lrate-decay", type=float, default=0.999, help="LR decay.")
     parser.add_argument("--sigma-init", type=float, default=0.02, help="Initial sigma.")
-    parser.add_argument("--sigma-decay", type=float, default=0.99, help="Sigma decay.")
+    parser.add_argument("--sigma-decay", type=float, default=1, help="Sigma decay.")
     parser.add_argument(
         "--bc-dataset",
         type=Path,
