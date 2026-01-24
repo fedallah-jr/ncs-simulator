@@ -332,6 +332,7 @@ def train(args):
     )
     print(f"Evaluation episodes per individual: {args.eval_episodes}")
     print(f"Fitness shaping: {args.fitness_shaping} (evosax built-in)")
+    print(f"L2 weight decay: {args.weight_decay}")
     # Log hardware acceleration status
     devices = jax.devices()
     print(f"JAX devices available: {devices}")
@@ -442,7 +443,7 @@ def train(args):
         decay_rate=args.sigma_decay
     )
 
-    optimizer = optax.adamw(learning_rate=lrate_schedule, weight_decay=0.005)
+    optimizer = optax.adam(learning_rate=lrate_schedule)
     fitness_shaping_fn = get_fitness_shaping_fn(args.fitness_shaping)
 
     def build_strategy_context(init_key: Any, param_key: Any) -> Dict[str, Any]:
@@ -609,6 +610,15 @@ def train(args):
         eval_payloads = [(flat_params, gen_episode_seeds, obs_state) for flat_params in population_flat]
         eval_results = map_fn(_evaluate_params_multi_episode, eval_payloads)
         fitness_values = [result[0] for result in eval_results]
+
+        # Apply L2 regularization to fitness (penalize large parameter norms)
+        if args.weight_decay > 0:
+            l2_penalties = [
+                args.weight_decay * float(np.sum(np.square(flat_params)))
+                for flat_params in population_flat
+            ]
+            fitness_values = [f - p for f, p in zip(fitness_values, l2_penalties)]
+
         fitness_array = jnp.array(fitness_values)
 
         if obs_normalizer is not None:
@@ -688,6 +698,7 @@ def train(args):
         "lrate_decay": args.lrate_decay,
         "sigma_init": args.sigma_init,
         "sigma_decay": args.sigma_decay,
+        "weight_decay": args.weight_decay,
         "seed": args.seed,
         "n_workers": args.n_workers,
         "n_agents": n_agents,
@@ -747,6 +758,12 @@ def parse_args():
     parser.add_argument("--lrate-decay", type=float, default=0.999, help="LR decay.")
     parser.add_argument("--sigma-init", type=float, default=0.02, help="Initial sigma.")
     parser.add_argument("--sigma-decay", type=float, default=1, help="Sigma decay.")
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.005,
+        help="L2 regularization coefficient applied to fitness (default: 0.005).",
+    )
     parser.add_argument(
         "--bc-dataset",
         type=Path,
