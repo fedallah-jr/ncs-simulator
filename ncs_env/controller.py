@@ -224,12 +224,15 @@ class Controller:
         # filterpy's predict can take control input
         self.kf.predict(u=self.last_u.reshape(-1, 1))
 
-    def update(self, measurement: np.ndarray) -> None:
+    def update(self, measurement: np.ndarray, measurement_noise_cov: Optional[np.ndarray] = None) -> None:
         """
         Kalman filter measurement update.
         This is the measurement update step: corrects prediction using measurement.
         """
-        self.kf.update(measurement.reshape(-1, 1))
+        if measurement_noise_cov is None:
+            self.kf.update(measurement.reshape(-1, 1))
+        else:
+            self.kf.update(measurement.reshape(-1, 1), R=measurement_noise_cov)
         self._record_seen_measurement(self.current_state_index)
 
     def _has_seen_measurement(self, measurement_state_index: int) -> bool:
@@ -244,7 +247,12 @@ class Controller:
             old_index = self.seen_measurement_indices.popleft()
             self.seen_measurement_set.discard(old_index)
 
-    def delayed_update(self, measurement: np.ndarray, measurement_state_index: int) -> bool:
+    def delayed_update(
+        self,
+        measurement: np.ndarray,
+        measurement_state_index: int,
+        measurement_noise_cov: Optional[np.ndarray] = None,
+    ) -> bool:
         """
         Handle a delayed measurement by retrodict-then-predict.
 
@@ -285,7 +293,7 @@ class Controller:
         # Apply Kalman update equations manually
         # y = z - H @ x_prior (innovation)
         H = self.kf.H
-        R = self.kf.R
+        R = measurement_noise_cov if measurement_noise_cov is not None else self.kf.R
         z = measurement.reshape(-1, 1)
 
         y = z - H @ x_prior

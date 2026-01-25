@@ -187,17 +187,28 @@ class NetworkModel:
         entity.ifs_countdown = ifs_slots + 1
 
     def queue_data_packet(
-        self, sensor_id: int, state_measurement: np.ndarray, measurement_timestamp: int
+        self,
+        sensor_id: int,
+        state_measurement: np.ndarray,
+        measurement_timestamp: int,
+        *,
+        measurement_noise_cov: Optional[np.ndarray] = None,
     ) -> Tuple[bool, Optional[Packet]]:
         """Queue a data packet from a sensor."""
         entity_idx = sensor_id
         entity = self.entities[entity_idx]
 
+        payload: Dict[str, Any] = {
+            "state": state_measurement,
+            "timestamp": measurement_timestamp,
+        }
+        if measurement_noise_cov is not None:
+            payload["measurement_noise_cov"] = measurement_noise_cov.copy()
         packet = Packet(
             source_id=sensor_id,
             dest_id=sensor_id,
             packet_type="data",
-            payload={"state": state_measurement, "timestamp": measurement_timestamp},
+            payload=payload,
             size_bytes=self.data_packet_size,
             timestamp_sent=self.current_slot,
         )

@@ -1407,6 +1407,52 @@ def main() -> int:
                 }
             )
 
+        # Add perfect communication baseline if heuristics-only mode
+        if args.only_heuristics:
+            perfect_comm_config_path = _write_perfect_comm_config(
+                config, run_dir / "perfect_comm_config.json"
+            )
+            _log("Perfect communication baseline:")
+            perfect_comm_spec = PolicySpec(
+                label="perfect_comm_always_send",
+                policy_type="heuristic",
+                policy_path="always_send",
+            )
+            perfect_comm_results = _evaluate_policy(
+                perfect_comm_spec,
+                config_path=perfect_comm_config_path,
+                episode_length=int(args.episode_length),
+                n_agents=resolved_n_agents,
+                seeds=seeds,
+                termination_override=termination_override,
+                num_workers=int(args.num_workers),
+            )
+            for result in perfect_comm_results:
+                per_seed_rows.append(
+                    {
+                        "policy_label": result.policy_label,
+                        "policy_type": result.policy_type,
+                        "seed": result.seed,
+                        "total_reward": result.total_reward,
+                        "mean_reward": result.mean_reward,
+                        "mean_state_error": result.mean_state_error,
+                        "final_state_error": result.final_state_error,
+                        "send_rate": result.send_rate,
+                        "mean_true_goodput_kbps": result.mean_true_goodput_kbps,
+                        "steps": result.steps,
+                        "n_agents": result.n_agents,
+                        "episode_length": result.episode_length,
+                    }
+                )
+            summary_rows.append(
+                {
+                    "policy_label": "perfect_comm_always_send",
+                    "policy_type": "heuristic",
+                    "num_seeds": len(perfect_comm_results),
+                    **_summarize_results(perfect_comm_results),
+                }
+            )
+
         _write_csv(
             run_dir / "per_seed_results.csv",
             [

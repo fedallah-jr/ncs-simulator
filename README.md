@@ -10,6 +10,7 @@ The configuration file is divided into sections; each key controls a specific as
 - `A`, `B`: Discrete-time state and input matrices used by every plant and controller.
 - `process_noise_cov`: Covariance of Gaussian process noise injected into each plant.
 - `measurement_noise_cov`: Covariance of sensor noise added before packets are queued; the Kalman filter uses the same value.
+- `measurement_noise_scale_range`: Optional `[min, max]` range for a per-step scalar applied to `measurement_noise_cov` to produce `R_k`. When set and `measurement_noise_cov` is omitted, the base defaults to the identity matrix.
 - `initial_estimate_cov`: Initial covariance for each controller’s state estimate.
 - `initial_state_scale_min` / `initial_state_scale_max`: Magnitude bounds for sampling each plant’s initial state. For each state dimension we draw a magnitude uniformly from `[min, max]` and apply a random sign (`x_i ~ s * U(min_i, max_i)`, `s ∈ {-1,1}`). Provide scalars to share bounds across dimensions or lists/matrices (flattened) matching the state dimension. When omitted, defaults to `[0.9, 1.0]`. Legacy `initial_state_scale` is still accepted as a symmetric bound (equivalent to `min=max=scale`).
 - `initial_state_fixed`: When `true`, sample one initial state per plant once and reuse it for every reset (training and evaluation).
@@ -53,7 +54,7 @@ When `perfect_communication=true`, the whole communication logic is bypassed dir
 - `throughput_window`: Sliding window (in steps) used to estimate recent channel throughput (kbps).
 - `quantization_step`: Step size for quantizing plant states before they appear in observations. Set to `0` or omit to disable quantization.
 
-Observations are laid out as `[current_state, current_throughput, prev_states..., prev_statuses..., prev_throughputs...]`, where each “prev” block holds `history_window` (or `state_history_window` for states) entries.
+Observations are laid out as `[current_state, current_throughput, current_measurement_noise, prev_states..., prev_statuses..., prev_throughputs...]`, where each “prev” block holds `history_window` (or `state_history_window` for states) entries. `current_measurement_noise` is a scalar intensity summary of `R_k` (trace divided by state dimension).
 
 ### `network`
 - `data_rate_kbps`: Physical-layer rate used to convert packet sizes into transmission durations.
@@ -150,7 +151,7 @@ Policy testing lives in `tools/policy_tester.py` and evaluates a target policy a
   - Expects subfolders like `model_1/config.json`, `model_1/best_model.pt`, `model_1/latest_model.pt`.
   - Writes `leaderboard.csv` at the models root plus per-model evaluation folders under `model_*/policy_tests/`.
 - Example (heuristics only): `python -m tools.policy_tester --config configs/marl_mixed_plants.json --only-heuristics --num-seeds 50`
-  - Evaluates only the three heuristic baselines (`zero_wait`, `always_send`, `random_50`) without requiring trained models.
+  - Evaluates the three heuristic baselines (`zero_wait`, `always_send`, `random_50`) plus a perfect communication baseline (`always_send` with `network.perfect_communication=true`).
   - Useful for establishing baseline performance metrics before training.
 
 ### Saved Configuration Format

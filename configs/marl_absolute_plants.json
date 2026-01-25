@@ -4,12 +4,12 @@
     "A": [[0.99, 0.01], [0.0, 0.99]],
     "B": [[0.000025], [0.005]],
     "heterogeneous_plants": [
-      { "A": [[1.0009, 0.01], [0.0, 1.000005]], "B": [[0.000031], [0.0041]] },
-      { "A": [[1.0015, 0.01], [0.0, 1.00009]], "B": [[0.00014], [0.0064]] },
-      { "A": [[1.0024, 0.01], [0.0, 1.001]], "B": [[0.00139], [0.017]] }
+      { "A": [[1.00301, 0.01], [0, 1.0013]], "B": [[0.000141], [0.00041]] },
+      { "A": [[0.991, 0.0], [0.01, 0.991]], "B": [[0.0001], [0.003]]},
+      { "A": [[0.9945, 0.01], [0.0, 0.9918]], "B": [ [0.003],[0.00011]]}
     ],
-    "process_noise_cov": [[0.04, 0.0], [0.0, 0.04]],
-    "measurement_noise_cov": [[0.0, 0.0], [0.0, 0.0]],
+    "process_noise_cov": [[0.01, 0.0], [0.0, 0.01]],
+    "measurement_noise_cov": [[0.01, 0.0], [0.0, 0.01]],
     "initial_estimate_cov": [[1.0, 0.0], [0.0, 1.0]],
     "initial_state_scale_min": 0.9,
     "initial_state_scale_max": 1.0,
@@ -18,7 +18,7 @@
   },
   "lqr": {
     "Q": [[1.0, 0.0], [0.0, 1.0]],
-    "R": [[0.05]]
+    "R": [[0.02]]
   },
   "reward": {
     "state_error_reward": "absolute",
@@ -29,7 +29,7 @@
     "comm_throughput_floor": 0.0,
     "normalize": false,
     "no_normalization_scale": 200.0,
-    "reward_clip_min": -4.0,
+    "reward_clip_min": -10000,
     "evaluation": {
       "state_error_reward": "absolute",
       "comm_penalty_alpha": 0.0,
@@ -53,10 +53,10 @@
   },
   "network": {
     "data_rate_kbps": 250.0,
-    "data_packet_size": 125,
+    "data_packet_size": 150,
     "perfect_communication": false,
     "app_ack_enabled": true,
-    "app_ack_packet_size": 30,
-    "tx_buffer_bytes": 125
+    "app_ack_packet_size": 50,
+    "tx_buffer_bytes": 150
   }
 }
