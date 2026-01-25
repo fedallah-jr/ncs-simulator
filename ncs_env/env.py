@@ -139,6 +139,7 @@ class NCS_Env(gym.Env):
             + self.history_window  # previous statuses
             + self.history_window  # previous throughputs
         )
+        self.obs_dim = int(obs_dim)
         self.observation_space = spaces.Dict(
             {
                 f"agent_{i}": spaces.Box(
@@ -403,7 +404,10 @@ class NCS_Env(gym.Env):
                     self.net_tx_attempts[i] += 1
                     self.net_tx_acks[i] += 1
                     state = self.plants[i].get_state()
-                    measurement = state + self._sample_measurement_noise()
+                    if self._has_measurement_noise:
+                        measurement = state + self._sample_measurement_noise()
+                    else:
+                        measurement = state
                     self.controllers[i].update(measurement)
                     self.last_measurements[i] = measurement
                     self._record_decision(i, status=1)
@@ -424,7 +428,10 @@ class NCS_Env(gym.Env):
                 if action == 1:
                     self.net_tx_attempts[i] += 1
                     state = self.plants[i].get_state()
-                    measurement = state + self._sample_measurement_noise()
+                    if self._has_measurement_noise:
+                        measurement = state + self._sample_measurement_noise()
+                    else:
+                        measurement = state
                     # Use state_index as the measurement timestamp
                     # This clearly indicates measurement is of x[state_index]
                     measurement_timestamp = state_index
@@ -767,7 +774,7 @@ class NCS_Env(gym.Env):
     def _quantize_state(self, state: np.ndarray) -> np.ndarray:
         """Quantize the measured plant state."""
         if self.quantization_step is None or self.quantization_step <= 0:
-            return state.copy()
+            return state
         step = self.quantization_step
         return np.round(state / step) * step
 
@@ -1024,39 +1031,60 @@ class NCS_Env(gym.Env):
         """Construct observations for all agents."""
         observations = {}
         current_throughputs: List[float] = []
+        quantized_states: List[np.ndarray] = []
 
         for i in range(self.n_agents):
             # decision_history maxlen may be larger than history_window, so use islice
             dh = self.decision_history[i]
-            status_history = list(islice(dh, max(0, len(dh) - self.history_window), None))
-            status_values = [entry["status"] for entry in status_history]
+            status_iter = (
+                entry["status"]
+                for entry in islice(dh, max(0, len(dh) - self.history_window), None)
+            )
+            status_values = np.fromiter(
+                status_iter, dtype=np.float32, count=self.history_window
+            )
 
             # state_history has maxlen=state_history_window and is pre-filled, always full
-            prev_states_flat = np.concatenate(list(self.state_history[i])).tolist()
+            prev_states = np.asarray(self.state_history[i], dtype=np.float32)
+            prev_states_flat = prev_states.reshape(-1)
 
             # throughput_history has maxlen=history_window and is pre-filled, always full
-            prev_throughputs = list(self.throughput_history[i])
+            prev_throughputs = np.asarray(self.throughput_history[i], dtype=np.float32)
 
             throughput = self._compute_observed_goodput_kbps(i)
-            quantized_state = self._quantize_state(self.plants[i].get_state())
-            obs_values: List[float] = []
-            obs_values.extend([float(x) for x in quantized_state])
-            obs_values.append(float(throughput))
-            obs_values.extend(prev_states_flat)
-            obs_values.extend([float(x) for x in status_values])
-            obs_values.extend([float(x) for x in prev_throughputs])
+            state = self.plants[i].get_state()
+            quantized_state = self._quantize_state(state)
+            obs_values = np.empty(self.obs_dim, dtype=np.float32)
+            cursor = 0
+            obs_values[cursor : cursor + self.state_dim] = quantized_state
+            cursor += self.state_dim
+            obs_values[cursor] = float(throughput)
+            cursor += 1
+            obs_values[cursor : cursor + prev_states_flat.size] = prev_states_flat
+            cursor += prev_states_flat.size
+            obs_values[cursor : cursor + self.history_window] = status_values
+            cursor += self.history_window
+            obs_values[cursor : cursor + self.history_window] = prev_throughputs
 
-            observations[f"agent_{i}"] = np.array(obs_values, dtype=np.float32)
+            observations[f"agent_{i}"] = obs_values
             current_throughputs.append(float(throughput))
+            quantized_states.append(quantized_state)
 
-        self._update_history_buffers(current_throughputs)
+        self._update_history_buffers(current_throughputs, quantized_states)
         return observations
 
-    def _update_history_buffers(self, throughputs: List[float]) -> None:
+    def _update_history_buffers(
+        self,
+        throughputs: List[float],
+        quantized_states: Optional[List[np.ndarray]] = None,
+    ) -> None:
         """Push current values so they appear in the 'previous k' slice next step."""
         for i in range(self.n_agents):
             if i < len(throughputs):
                 self.throughput_history[i].append(float(throughputs[i]))
+            if quantized_states is not None and i < len(quantized_states):
+                self.state_history[i].append(quantized_states[i])
+                continue
             quantized_state = self._quantize_state(self.plants[i].get_state())
             self.state_history[i].append(quantized_state)
 

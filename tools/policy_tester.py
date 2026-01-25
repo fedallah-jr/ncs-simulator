@@ -1280,6 +1280,11 @@ def main() -> int:
         default="outputs/policy_tests",
         help="Directory to write results",
     )
+    parser.add_argument(
+        "--only-heuristics",
+        action="store_true",
+        help="Evaluate only heuristic baselines (zero_wait, random_50, always_send)",
+    )
     args = parser.parse_args()
 
     if args.num_seeds < 1:
@@ -1292,7 +1297,14 @@ def main() -> int:
             f"Use --seed-start >= {TRAINING_EVAL_SEED_COUNT}."
         )
 
-    if args.models_root:
+    if args.only_heuristics:
+        if args.models_root or args.policy or args.policy_type:
+            raise ValueError("--only-heuristics cannot be used with --models-root, --policy, or --policy-type.")
+        if not args.config:
+            raise ValueError("--only-heuristics requires --config.")
+        # Treat as single-policy mode but skip the target policy
+        models_root = None
+    elif args.models_root:
         if args.policy or args.policy_type or args.config:
             raise ValueError("Use --models-root alone, or specify --config/--policy/--policy-type for single runs.")
         models_root = Path(args.models_root)
@@ -1309,26 +1321,32 @@ def main() -> int:
             raise FileNotFoundError(f"Config not found: {config_path}")
         config = load_config(str(config_path))
 
-        policy_type = args.policy_type.lower()
-
-        target_label = args.policy_label
-        if not target_label:
-            target_label = _sanitize_filename(Path(args.policy).name if policy_type != "heuristic" else args.policy)
-
         termination_override = config.get("termination", {}).get("evaluation")
         if not isinstance(termination_override, dict):
             termination_override = None
         seeds = _iter_seeds(args.seed_start, args.num_seeds)
         output_root = Path(args.output_dir)
         output_root.mkdir(parents=True, exist_ok=True)
-        run_dir = output_root / f"policy_test_{_sanitize_filename(target_label)}"
-        run_dir.mkdir(parents=True, exist_ok=True)
 
-        policy_specs = [PolicySpec(label=target_label, policy_type=policy_type, policy_path=args.policy)]
+        # Build policy specs list
+        policy_specs = []
+        if args.only_heuristics:
+            target_label = "heuristics_only"
+            policy_type = None
+        else:
+            policy_type = args.policy_type.lower()
+            target_label = args.policy_label or _sanitize_filename(
+                Path(args.policy).name if policy_type != "heuristic" else args.policy
+            )
+            policy_specs.append(PolicySpec(label=target_label, policy_type=policy_type, policy_path=args.policy))
+
         for heuristic_name in HEURISTIC_POLICY_NAMES:
             policy_specs.append(
                 PolicySpec(label=heuristic_name, policy_type="heuristic", policy_path=heuristic_name)
             )
+
+        run_dir = output_root / f"policy_test_{_sanitize_filename(target_label)}"
+        run_dir.mkdir(parents=True, exist_ok=True)
 
         resolved_n_agents = _resolve_n_agents(config, policy_specs, args.n_agents)
         policy_type_names = [spec.policy_type.lower() for spec in policy_specs]
@@ -1338,7 +1356,7 @@ def main() -> int:
         if resolved_n_agents < 1:
             raise ValueError("Resolved n_agents must be >= 1.")
 
-        _log("Policy tester (single policy)")
+        _log("Policy tester (heuristics only)" if args.only_heuristics else "Policy tester (single policy)")
         _log(f"Config: {config_path}")
         _log(f"Seeds: {_format_seed_range(seeds)} ({len(seeds)})")
         if args.num_workers > 1:
@@ -1373,6 +1391,7 @@ def main() -> int:
                         "mean_state_error": result.mean_state_error,
                         "final_state_error": result.final_state_error,
                         "send_rate": result.send_rate,
+                        "mean_true_goodput_kbps": result.mean_true_goodput_kbps,
                         "steps": result.steps,
                         "n_agents": result.n_agents,
                         "episode_length": result.episode_length,
@@ -1399,6 +1418,7 @@ def main() -> int:
                 "mean_state_error",
                 "final_state_error",
                 "send_rate",
+                "mean_true_goodput_kbps",
                 "steps",
                 "n_agents",
                 "episode_length",
@@ -1419,11 +1439,45 @@ def main() -> int:
                 "std_final_error",
                 "mean_send_rate",
                 "std_send_rate",
+                "mean_true_goodput_kbps",
+                "std_true_goodput_kbps",
                 "mean_steps",
                 "std_steps",
                 "mean_reward_per_step",
                 "std_reward_per_step",
                 "completion_rate",
+                "mean_tx_attempts",
+                "std_tx_attempts",
+                "mean_tx_acked",
+                "std_tx_acked",
+                "mean_tx_dropped",
+                "std_tx_dropped",
+                "mean_tx_rewrites",
+                "std_tx_rewrites",
+                "mean_tx_collisions",
+                "std_tx_collisions",
+                "mean_data_delivered",
+                "std_data_delivered",
+                "mean_mac_ack_sent",
+                "std_mac_ack_sent",
+                "mean_mac_ack_collisions",
+                "std_mac_ack_collisions",
+                "mean_ack_timeouts",
+                "std_ack_timeouts",
+                "mean_tx_success_rate",
+                "std_tx_success_rate",
+                "mean_data_delivery_rate",
+                "std_data_delivery_rate",
+                "mean_collision_rate",
+                "std_collision_rate",
+                "mean_drop_rate",
+                "std_drop_rate",
+                "mean_rewrite_rate",
+                "std_rewrite_rate",
+                "mean_ack_collision_rate",
+                "std_ack_collision_rate",
+                "mean_ack_timeout_rate",
+                "std_ack_timeout_rate",
             ],
             summary_rows,
         )
@@ -1433,7 +1487,7 @@ def main() -> int:
         _log(str(run_dir / "summary_results.csv"), indent=2)
 
         # Plot training curves and save stats if the policy is from a trained model
-        if policy_type != "heuristic":
+        if policy_type and policy_type != "heuristic":
             policy_path = Path(args.policy)
             model_dir = policy_path.parent
             training_stats = _compute_training_stats(model_dir)

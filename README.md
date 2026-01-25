@@ -149,6 +149,9 @@ Policy testing lives in `tools/policy_tester.py` and evaluates a target policy a
 - Example (batch): `python -m tools.policy_tester --models-root outputs --num-seeds 30`
   - Expects subfolders like `model_1/config.json`, `model_1/best_model.pt`, `model_1/latest_model.pt`.
   - Writes `leaderboard.csv` at the models root plus per-model evaluation folders under `model_*/policy_tests/`.
+- Example (heuristics only): `python -m tools.policy_tester --config configs/marl_mixed_plants.json --only-heuristics --num-seeds 50`
+  - Evaluates only the three heuristic baselines (`zero_wait`, `always_send`, `random_50`) without requiring trained models.
+  - Useful for establishing baseline performance metrics before training.
 
 ### Saved Configuration Format
 
