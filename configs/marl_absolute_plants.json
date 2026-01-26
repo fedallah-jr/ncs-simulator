@@ -4,12 +4,13 @@
     "A": [[0.99, 0.01], [0.0, 0.99]],
     "B": [[0.000025], [0.005]],
     "heterogeneous_plants": [
-      { "A": [[1.00301, 0.01], [0, 1.0013]], "B": [[0.000141], [0.00041]] },
-      { "A": [[0.991, 0.0], [0.01, 0.991]], "B": [[0.0001], [0.003]]},
-      { "A": [[0.9945, 0.01], [0.0, 0.9918]], "B": [ [0.003],[0.00011]]}
+      { "A": [[1.00501, 0.01], [0, 1.0053]], "B": [[0.000141], [0.00041]] },
+      { "A": [[0.992, 0.0], [0.01, 0.994]], "B": [[0.00012], [0.003]]},
+      { "A": [[0.9955, 0.01], [0.0, 0.9918]], "B": [ [0.003],[0.00011]]}
     ],
-    "process_noise_cov": [[0.01, 0.0], [0.0, 0.01]],
-    "measurement_noise_cov": [[0.01, 0.0], [0.0, 0.01]],
+    "process_noise_cov": [[0.008, 0.0], [0.0, 0.008]],
+    "measurement_noise_scale_range": 6.0,
+    "measurement_noise_cov": [[0.005, 0.0], [0.0, 0.005]],
     "initial_estimate_cov": [[1.0, 0.0], [0.0, 1.0]],
     "initial_state_scale_min": 0.9,
     "initial_state_scale_max": 1.0,
@@ -27,14 +28,14 @@
     "comm_throughput_window": 200,
     "comm_penalty_alpha": 0.0,
     "comm_throughput_floor": 0.0,
-    "normalize": false,
+    "normalize": true,
     "no_normalization_scale": 200.0,
     "reward_clip_min": -10000,
     "evaluation": {
       "state_error_reward": "absolute",
       "comm_penalty_alpha": 0.0,
       "simple_comm_penalty_alpha": 0.0,
-      "normalize": false
+      "normalize": true
     }
   },
   "termination": {

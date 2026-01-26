@@ -1,8 +1,8 @@
 """
 Policy testing tool for the NCS simulator.
 
-Evaluates a target policy against a fixed set of heuristic baselines across multiple seeds,
-using raw absolute reward (no normalization) in multi-agent environments.
+Evaluates a target policy against a fixed set of heuristic baselines across multiple seeds.
+By default uses raw absolute reward without normalization; enable normalization via CLI.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ HEURISTIC_POLICY_NAMES: Sequence[str] = ("zero_wait", "always_send", "random_50"
 # Names for stochastic heuristics that should use non-deterministic actions.
 STOCHASTIC_HEURISTICS: Sequence[str] = ("random_50",)
 
-# Reward override for evaluation: raw absolute reward, no normalization.
+# Reward override for evaluation: absolute reward, no normalization by default.
 EVAL_REWARD_OVERRIDE: Dict[str, Any] = {
     "state_error_reward": "absolute",
     "normalize": False,
@@ -193,10 +193,33 @@ def _safe_rate(numerator: float, denominator: float) -> float:
     return float(numerator) / float(denominator)
 
 
+def _build_reward_override(use_reward_normalization: bool) -> Dict[str, Any]:
+    reward_override = dict(EVAL_REWARD_OVERRIDE)
+    if use_reward_normalization:
+        reward_override["normalize"] = True
+    return reward_override
+
+
 def _write_perfect_comm_config(config: Dict[str, Any], output_path: Path) -> Path:
     config_copy = copy.deepcopy(config)
     network_cfg = config_copy.setdefault("network", {})
     network_cfg["perfect_communication"] = True
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w") as handle:
+        json.dump(config_copy, handle, indent=2, sort_keys=True, ensure_ascii=True)
+    return output_path
+
+
+def _write_perfect_comm_perfect_measurements_config(
+    config: Dict[str, Any],
+    output_path: Path,
+) -> Path:
+    config_copy = copy.deepcopy(config)
+    network_cfg = config_copy.setdefault("network", {})
+    network_cfg["perfect_communication"] = True
+    system_cfg = config_copy.setdefault("system", {})
+    system_cfg["measurement_noise_cov"] = 0.0
+    system_cfg["measurement_noise_scale_range"] = 0.0
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w") as handle:
         json.dump(config_copy, handle, indent=2, sort_keys=True, ensure_ascii=True)
@@ -273,13 +296,14 @@ def _build_env(
     n_agents: int,
     seed: int,
     termination_override: Optional[Dict[str, Any]],
+    reward_override: Optional[Dict[str, Any]],
 ) -> NCS_Env:
     return NCS_Env(
         n_agents=n_agents,
         episode_length=episode_length,
         config_path=str(config_path),
         seed=seed,
-        reward_override=EVAL_REWARD_OVERRIDE,
+        reward_override=reward_override,
         termination_override=termination_override,
         track_true_goodput=True,
     )
@@ -561,13 +585,19 @@ def _evaluate_policy_for_seeds(
     n_agents: int,
     seeds: Sequence[int],
     termination_override: Optional[Dict[str, Any]],
+    reward_override: Optional[Dict[str, Any]],
 ) -> List[EpisodeResult]:
     if not seeds:
         return []
     results: List[EpisodeResult] = []
     cached_policy: Optional[Any] = None
     env = _build_env(
-        config_path, episode_length, n_agents, int(seeds[0]), termination_override
+        config_path,
+        episode_length,
+        n_agents,
+        int(seeds[0]),
+        termination_override,
+        reward_override,
     )
     try:
         for seed in seeds:
@@ -604,6 +634,7 @@ def _evaluate_policy(
     n_agents: int,
     seeds: Sequence[int],
     termination_override: Optional[Dict[str, Any]],
+    reward_override: Optional[Dict[str, Any]],
     num_workers: int = 1,
 ) -> List[EpisodeResult]:
     if not seeds:
@@ -617,6 +648,7 @@ def _evaluate_policy(
             n_agents=n_agents,
             seeds=seeds,
             termination_override=termination_override,
+            reward_override=reward_override,
         )
         results.sort(key=lambda r: r.seed)
         return results
@@ -630,6 +662,7 @@ def _evaluate_policy(
             n_agents=n_agents,
             seeds=seeds,
             termination_override=termination_override,
+            reward_override=reward_override,
         )
         results.sort(key=lambda r: r.seed)
         return results
@@ -644,6 +677,7 @@ def _evaluate_policy(
                 [n_agents] * len(chunks),
                 chunks,
                 [termination_override] * len(chunks),
+                [reward_override] * len(chunks),
             )
         )
 
@@ -1281,6 +1315,11 @@ def main() -> int:
         help="Directory to write results",
     )
     parser.add_argument(
+        "--use-reward-normalization",
+        action="store_true",
+        help="Enable running reward normalization during evaluation (default: disabled)",
+    )
+    parser.add_argument(
         "--only-heuristics",
         action="store_true",
         help="Evaluate only heuristic baselines (zero_wait, random_50, always_send)",
@@ -1296,6 +1335,7 @@ def main() -> int:
             "Seed range overlaps training evaluation seeds (0-10). "
             f"Use --seed-start >= {TRAINING_EVAL_SEED_COUNT}."
         )
+    reward_override = _build_reward_override(bool(args.use_reward_normalization))
 
     if args.only_heuristics:
         if args.models_root or args.policy or args.policy_type:
@@ -1361,7 +1401,10 @@ def main() -> int:
         _log(f"Seeds: {_format_seed_range(seeds)} ({len(seeds)})")
         if args.num_workers > 1:
             _log(f"Workers: {args.num_workers}")
-        _log("Evaluation: raw absolute reward; comm/termination from config.")
+        if args.use_reward_normalization:
+            _log("Evaluation: absolute reward with running normalization; comm/termination from config.")
+        else:
+            _log("Evaluation: raw absolute reward; comm/termination from config.")
         _log("Policies:")
         for spec in policy_specs:
             _log(f"- {spec.label} ({spec.policy_type})", indent=2)
@@ -1378,6 +1421,7 @@ def main() -> int:
                 n_agents=resolved_n_agents,
                 seeds=seeds,
                 termination_override=termination_override,
+                reward_override=reward_override,
                 num_workers=int(args.num_workers),
             )
             for result in results:
@@ -1425,6 +1469,7 @@ def main() -> int:
                 n_agents=resolved_n_agents,
                 seeds=seeds,
                 termination_override=termination_override,
+                reward_override=reward_override,
                 num_workers=int(args.num_workers),
             )
             for result in perfect_comm_results:
@@ -1450,6 +1495,50 @@ def main() -> int:
                     "policy_type": "heuristic",
                     "num_seeds": len(perfect_comm_results),
                     **_summarize_results(perfect_comm_results),
+                }
+            )
+            perfect_comm_perfect_meas_config_path = _write_perfect_comm_perfect_measurements_config(
+                config, run_dir / "perfect_comm_perfect_meas_config.json"
+            )
+            _log("Perfect communication + perfect measurements baseline:")
+            perfect_comm_perfect_meas_spec = PolicySpec(
+                label="perfect_comm_perfect_meas_always_send",
+                policy_type="heuristic",
+                policy_path="always_send",
+            )
+            perfect_comm_perfect_meas_results = _evaluate_policy(
+                perfect_comm_perfect_meas_spec,
+                config_path=perfect_comm_perfect_meas_config_path,
+                episode_length=int(args.episode_length),
+                n_agents=resolved_n_agents,
+                seeds=seeds,
+                termination_override=termination_override,
+                reward_override=reward_override,
+                num_workers=int(args.num_workers),
+            )
+            for result in perfect_comm_perfect_meas_results:
+                per_seed_rows.append(
+                    {
+                        "policy_label": result.policy_label,
+                        "policy_type": result.policy_type,
+                        "seed": result.seed,
+                        "total_reward": result.total_reward,
+                        "mean_reward": result.mean_reward,
+                        "mean_state_error": result.mean_state_error,
+                        "final_state_error": result.final_state_error,
+                        "send_rate": result.send_rate,
+                        "mean_true_goodput_kbps": result.mean_true_goodput_kbps,
+                        "steps": result.steps,
+                        "n_agents": result.n_agents,
+                        "episode_length": result.episode_length,
+                    }
+                )
+            summary_rows.append(
+                {
+                    "policy_label": "perfect_comm_perfect_meas_always_send",
+                    "policy_type": "heuristic",
+                    "num_seeds": len(perfect_comm_perfect_meas_results),
+                    **_summarize_results(perfect_comm_perfect_meas_results),
                 }
             )
 
@@ -1627,7 +1716,10 @@ def main() -> int:
     _log(f"Seeds: {_format_seed_range(seeds)} ({len(seeds)})")
     if args.num_workers > 1:
         _log(f"Workers: {args.num_workers}")
-    _log("Evaluation: raw absolute reward; comm/termination from config.")
+    if args.use_reward_normalization:
+        _log("Evaluation: absolute reward with running normalization; comm/termination from config.")
+    else:
+        _log("Evaluation: raw absolute reward; comm/termination from config.")
 
     for model_idx, (model_name, specs) in enumerate(model_specs_by_run.items(), start=1):
         _log(f"[{model_idx}/{total_models}] {model_name}")
@@ -1643,6 +1735,7 @@ def main() -> int:
                 n_agents=resolved_n_agents,
                 seeds=seeds,
                 termination_override=termination_override,
+                reward_override=reward_override,
                 num_workers=int(args.num_workers),
             )
             run_dir = models_root / model_name / "policy_tests" / f"{checkpoint_name}_eval"
@@ -1676,6 +1769,7 @@ def main() -> int:
             n_agents=resolved_n_agents,
             seeds=seeds,
             termination_override=termination_override,
+            reward_override=reward_override,
             num_workers=int(args.num_workers),
         )
         run_dir = models_root / "heuristics" / f"{heuristic_name}_eval"
@@ -1703,6 +1797,7 @@ def main() -> int:
         n_agents=resolved_n_agents,
         seeds=seeds,
         termination_override=termination_override,
+        reward_override=reward_override,
         num_workers=int(args.num_workers),
     )
     perfect_comm_dir = perfect_comm_root / "policy_tests" / "always_send_eval"
@@ -1711,6 +1806,41 @@ def main() -> int:
     perfect_comm_summary["checkpoint"] = "always_send"
     leaderboard_rows.append(perfect_comm_summary)
     _log(f"results: {perfect_comm_dir / 'summary_results.csv'}", indent=2)
+
+    perfect_comm_perfect_meas_root = models_root / "perfect_comm_perfect_meas"
+    perfect_comm_perfect_meas_config_path = _write_perfect_comm_perfect_measurements_config(
+        reference_config,
+        perfect_comm_perfect_meas_root / "perfect_comm_perfect_meas_config.json",
+    )
+    _log("Perfect communication + perfect measurements baseline:")
+    _log(f"config: {perfect_comm_perfect_meas_config_path}", indent=2)
+    perfect_comm_perfect_meas_spec = PolicySpec(
+        label="perfect_comm_perfect_meas/always_send",
+        policy_type="heuristic",
+        policy_path="always_send",
+    )
+    perfect_comm_perfect_meas_results = _evaluate_policy(
+        perfect_comm_perfect_meas_spec,
+        config_path=perfect_comm_perfect_meas_config_path,
+        episode_length=int(args.episode_length),
+        n_agents=resolved_n_agents,
+        seeds=seeds,
+        termination_override=termination_override,
+        reward_override=reward_override,
+        num_workers=int(args.num_workers),
+    )
+    perfect_comm_perfect_meas_dir = (
+        perfect_comm_perfect_meas_root / "policy_tests" / "always_send_eval"
+    )
+    perfect_comm_perfect_meas_summary = _write_policy_results(
+        perfect_comm_perfect_meas_dir,
+        perfect_comm_perfect_meas_spec,
+        perfect_comm_perfect_meas_results,
+    )
+    perfect_comm_perfect_meas_summary["model_name"] = "perfect_comm_perfect_meas"
+    perfect_comm_perfect_meas_summary["checkpoint"] = "always_send"
+    leaderboard_rows.append(perfect_comm_perfect_meas_summary)
+    _log(f"results: {perfect_comm_perfect_meas_dir / 'summary_results.csv'}", indent=2)
 
     leaderboard_rows.sort(key=lambda row: float(row["mean_total_reward"]), reverse=True)
     ranked_rows: List[Dict[str, Any]] = []

@@ -144,7 +144,7 @@ Post-training visualization lives in `tools/visualize_policy.py`.
 
 ## Policy Testing
 
-Policy testing lives in `tools/policy_tester.py` and evaluates a target policy against a fixed heuristic set (default: `zero_wait`, `always_send`, `random_50`) over multiple seeds. The evaluator forces raw absolute reward (no normalization/mixing) while keeping communication penalties and termination settings from the config.
+Policy testing lives in `tools/policy_tester.py` and evaluates a target policy against a fixed heuristic set (default: `zero_wait`, `always_send`, `random_50`) over multiple seeds. The evaluator forces raw absolute reward (no normalization/mixing) while keeping communication penalties and termination settings from the config. Pass `--use-reward-normalization` to enable running reward normalization during evaluation.
 
 - Example (MARL): `python -m tools.policy_tester --config configs/marl_mixed_plants.json --policy outputs/.../best_model.pt --policy-type marl_torch --num-seeds 30`
 - Example (batch): `python -m tools.policy_tester --models-root outputs --num-seeds 30`
