@@ -25,7 +25,7 @@ The configuration file is divided into sections; each key controls a specific as
   - `"difference"` (default): Reward is improvement in tracking error (`r_t = e_{t-1} - e_t`).
   - `"absolute"`: Reward equals negative tracking error (`r_t = -e_t`).
   - `"absolute_sqrt"`: Reward equals negative sqrt tracking error (`r_t = -sqrt(e_t)`).
-  - `"estimate_error"`: Reward equals negative estimation error between the real state and the controller estimate (`r_t = -(x - x_hat)^T Q (x - x_hat)`).
+  - `"estimate_error"`: Reward equals negative weighted L1 estimation error between the real state and the controller estimate (`r_t = -||Q (x - x_hat)||_1`).
   - `"simple"`: Reward +1 if measurement delivered this step, 0 otherwise. Range: [0, max_steps].
   - `"simple_penalty"`: Reward 0 if measurement delivered, -1 otherwise. Range: [-max_steps, 0]. Symmetric version of "simple".
 - `comm_recent_window`: Short window (steps) used to count how many recent transmission attempts (`p>0`) an agent has initiated.

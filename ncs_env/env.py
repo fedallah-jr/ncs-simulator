@@ -976,10 +976,11 @@ class NCS_Env(gym.Env):
         return float(dx.T @ self.state_cost_matrix @ dx)
 
     def _compute_estimation_error(self, agent_idx: int, state: np.ndarray) -> float:
-        """Quadratic estimation error (x - x_hat)^T Q (x - x_hat)."""
+        """Weighted L1 estimation error ||Q (x - x_hat)||_1."""
         estimate = self.controllers[agent_idx].x_hat
         dx = state - estimate
-        return float(dx.T @ self.state_cost_matrix @ dx)
+        weighted = self.state_cost_matrix @ dx
+        return float(np.sum(np.abs(weighted)))
 
     def _compute_reward_error(self, agent_idx: int, state: np.ndarray) -> float:
         """Return the error used by the selected reward mode."""
