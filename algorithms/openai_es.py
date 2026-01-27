@@ -19,6 +19,7 @@ import multiprocessing
 import os
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -146,6 +147,12 @@ def _init_worker(
     
     # Set JAX to use CPU BEFORE importing JAX
     os.environ["JAX_PLATFORMS"] = "cpu"
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Transparent hugepages are not enabled\..*",
+        category=UserWarning,
+        module=r"jax\._src\.cloud_tpu_init",
+    )
     
     import jax
     import jax.numpy as jnp
@@ -248,6 +255,22 @@ def _evaluate_params_multi_episode(
     return float(np.mean(rewards)), obs_sum, obs_sumsq, obs_count
 
 
+def _evaluate_params_fixed_seeds(
+    args_tuple: Tuple[np.ndarray, List[int], Optional[Tuple[np.ndarray, np.ndarray, int]]]
+) -> Tuple[float, float]:
+    """Evaluate params on fixed seeds and return mean/std reward."""
+    flat_params, episode_seeds, obs_state = args_tuple
+
+    _set_obs_normalizer_state(obs_state)
+    rewards: List[float] = []
+    for seed in episode_seeds:
+        reward, _obs_sum, _obs_sumsq, _obs_count = _run_single_episode(flat_params, seed)
+        rewards.append(reward)
+
+    rewards_array = np.asarray(rewards, dtype=np.float64)
+    return float(np.mean(rewards_array)), float(np.std(rewards_array))
+
+
 def get_fitness_shaping_fn(method: str = "centered_rank"):
     """
     Get a fitness shaping function from evosax.
@@ -286,6 +309,12 @@ def get_fitness_shaping_fn(method: str = "centered_rank"):
 def train(args):
     """Main training loop."""
     reset_shared_running_normalizers()
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Transparent hugepages are not enabled\..*",
+        category=UserWarning,
+        module=r"jax\._src\.cloud_tpu_init",
+    )
     import jax
     import jax.numpy as jnp
     from jax import flatten_util
@@ -338,6 +367,7 @@ def train(args):
     else:
         print("⚠ Running on CPU only (no TPU/GPU detected)")
     print(f"Fitness evaluations will run on {args.n_workers} CPU workers in parallel")
+    fixed_eval_seeds: List[int] = list(range(30))
 
     # 2. Setup Flax Model & Initial Params
     master_rng = jax.random.PRNGKey(args.seed if args.seed is not None else 0)
@@ -566,6 +596,11 @@ def train(args):
         writer = csv.writer(f)
         writer.writerow(["generation", "mean_reward", "max_reward", "min_reward", "std_reward", "time_elapsed"])
 
+    eval_rewards_file = run_dir / "evaluation_rewards.csv"
+    with eval_rewards_file.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["step", "mean_reward", "std_reward"])
+
     print(f"Starting training for {args.generations} generations...")
     start_time = time.time()
     best_fitness_all_time = -float("inf")
@@ -613,6 +648,9 @@ def train(args):
             fitness_values = [f - p for f, p in zip(fitness_values, l2_penalties)]
 
         fitness_array = jnp.array(fitness_values)
+        best_idx_generation = int(jnp.argmax(fitness_array))
+        fixed_eval_payload = (population_flat[best_idx_generation], fixed_eval_seeds, obs_state)
+        fixed_eval_mean, fixed_eval_std = map_fn(_evaluate_params_fixed_seeds, [fixed_eval_payload])[0]
 
         if obs_normalizer is not None:
             obs_sum_total = np.zeros((obs_dim,), dtype=np.float64)
@@ -639,23 +677,26 @@ def train(args):
         std_fit = float(jnp.std(fitness_array))
         elapsed = time.time() - start_time
 
-        if gen % 3 == 0 or gen == 1:
-            print(
-                f"Gen {gen}/{args.generations} | Mean: {mean_fit:.1f} | "
-                f"Max: {max_fit:.1f} | Min: {min_fit:.1f} | Std: {std_fit:.1f} | "
-                f"Time: {elapsed:.1f}s"
-            )
+        print(
+            f"Gen {gen}/{args.generations} | Mean: {mean_fit:.1f} | "
+            f"Max: {max_fit:.1f} | Min: {min_fit:.1f} | Std: {std_fit:.1f} | "
+            f"Eval(0-29): {fixed_eval_mean:.1f} ± {fixed_eval_std:.1f} | "
+            f"Time: {elapsed:.1f}s"
+        )
             
         with rewards_file.open("a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow([gen, mean_fit, max_fit, min_fit, std_fit, elapsed])
 
+        with eval_rewards_file.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([gen, fixed_eval_mean, fixed_eval_std])
+
         if max_fit > best_fitness_all_time:
             best_fitness_all_time = max_fit
-            best_idx = int(jnp.argmax(fitness_array))
             np.savez(
                 run_dir / "best_model.npz",
-                **build_checkpoint_payload(population_flat[best_idx]),
+                **build_checkpoint_payload(population_flat[best_idx_generation]),
             )
 
         best_strategy_state = strategy_context["state"]
@@ -681,6 +722,7 @@ def train(args):
         "popsize": args.popsize,
         "episode_length": args.episode_length,
         "eval_episodes": args.eval_episodes,
+        "eval_best_fixed_seeds": fixed_eval_seeds,
         "fitness_shaping": args.fitness_shaping,
         "hidden_size": args.hidden_size,
         "use_layer_norm": args.use_layer_norm,
