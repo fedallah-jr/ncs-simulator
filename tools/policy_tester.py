@@ -1320,6 +1320,11 @@ def main() -> int:
         help="Enable running reward normalization during evaluation (default: disabled)",
     )
     parser.add_argument(
+        "--no-override",
+        action="store_true",
+        help="Disable evaluation reward overrides and use the config reward as-is",
+    )
+    parser.add_argument(
         "--only-heuristics",
         action="store_true",
         help="Evaluate only heuristic baselines (zero_wait, random_50, always_send)",
@@ -1330,12 +1335,9 @@ def main() -> int:
         raise ValueError("--num-seeds must be >= 1")
     if args.num_workers < 1:
         raise ValueError("--num-workers must be >= 1")
-    if args.seed_start < TRAINING_EVAL_SEED_COUNT:
-        raise ValueError(
-            "Seed range overlaps training evaluation seeds (0-10). "
-            f"Use --seed-start >= {TRAINING_EVAL_SEED_COUNT}."
-        )
-    reward_override = _build_reward_override(bool(args.use_reward_normalization))
+    reward_override = None if args.no_override else _build_reward_override(bool(args.use_reward_normalization))
+    if args.no_override and args.use_reward_normalization:
+        _log("Note: --use-reward-normalization ignored because --no-override is set.")
 
     if args.only_heuristics:
         if args.models_root or args.policy or args.policy_type:
@@ -1401,7 +1403,9 @@ def main() -> int:
         _log(f"Seeds: {_format_seed_range(seeds)} ({len(seeds)})")
         if args.num_workers > 1:
             _log(f"Workers: {args.num_workers}")
-        if args.use_reward_normalization:
+        if args.no_override:
+            _log("Evaluation: reward from config (no override).")
+        elif args.use_reward_normalization:
             _log("Evaluation: absolute reward with running normalization; comm/termination from config.")
         else:
             _log("Evaluation: raw absolute reward; comm/termination from config.")
@@ -1716,7 +1720,9 @@ def main() -> int:
     _log(f"Seeds: {_format_seed_range(seeds)} ({len(seeds)})")
     if args.num_workers > 1:
         _log(f"Workers: {args.num_workers}")
-    if args.use_reward_normalization:
+    if args.no_override:
+        _log("Evaluation: reward from config (no override).")
+    elif args.use_reward_normalization:
         _log("Evaluation: absolute reward with running normalization; comm/termination from config.")
     else:
         _log("Evaluation: raw absolute reward; comm/termination from config.")

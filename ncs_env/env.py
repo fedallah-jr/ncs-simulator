@@ -34,10 +34,17 @@ class RewardDefinition:
     reward_clip_max: Optional[float] = None
 
     def __post_init__(self) -> None:
-        if self.mode not in {"difference", "absolute", "absolute_sqrt", "simple", "simple_penalty"}:
+        if self.mode not in {
+            "difference",
+            "absolute",
+            "absolute_sqrt",
+            "estimate_error",
+            "simple",
+            "simple_penalty",
+        }:
             raise ValueError(
                 "state_error_reward must be 'difference', 'absolute', 'absolute_sqrt', "
-                "'simple', or 'simple_penalty'"
+                "'estimate_error', 'simple', or 'simple_penalty'"
             )
         if float(self.simple_freshness_decay) < 0.0:
             raise ValueError("simple_freshness_decay must be >= 0")
@@ -56,7 +63,7 @@ def _should_normalize_reward(definition: RewardDefinition) -> bool:
     - If explicit override provided: use it
     - Otherwise, auto-detect:
       - simple, simple_penalty: NO (bounded rewards [-1, 0] or [0, 1])
-      - absolute, difference: YES (unbounded rewards, scale varies by system)
+      - absolute, difference, estimate_error: YES (unbounded rewards, scale varies by system)
 
     Returns:
         True if reward should be normalized, False otherwise
@@ -67,8 +74,8 @@ def _should_normalize_reward(definition: RewardDefinition) -> bool:
 
     # Automatic detection based on reward type
     # Simple rewards are bounded and well-scaled, don't normalize
-    # Absolute/difference rewards are unbounded, do normalize
-    return definition.mode in ["absolute", "absolute_sqrt", "difference"]
+    # Absolute/difference/estimate_error rewards are unbounded, do normalize
+    return definition.mode in ["absolute", "absolute_sqrt", "difference", "estimate_error"]
 
 
 class NCS_Env(gym.Env):
@@ -395,7 +402,9 @@ class NCS_Env(gym.Env):
 
         observations = self._get_observations()
         for idx in range(self.n_agents):
-            self.last_errors[idx] = self._compute_state_error(self.plants[idx].get_state())
+            self.last_errors[idx] = self._compute_reward_error(
+                idx, self.plants[idx].get_state()
+            )
         info = self._get_info()
         return observations, info
 
@@ -562,7 +571,8 @@ class NCS_Env(gym.Env):
             action = actions[f"agent_{i}"]
             prev_error = self.last_errors[i]
             raw_error = self._compute_state_error(x)
-            curr_error = raw_error
+            reward_error = self._compute_reward_error(i, x)
+            curr_error = reward_error
             if not np.isfinite(raw_error):
                 termination_triggered = True
                 termination_reasons.append("non_finite")
@@ -982,6 +992,18 @@ class NCS_Env(gym.Env):
         dx = state  # reference is zero
         return float(dx.T @ self.state_cost_matrix @ dx)
 
+    def _compute_estimation_error(self, agent_idx: int, state: np.ndarray) -> float:
+        """Quadratic estimation error (x - x_hat)^T Q (x - x_hat)."""
+        estimate = self.controllers[agent_idx].x_hat
+        dx = state - estimate
+        return float(dx.T @ self.state_cost_matrix @ dx)
+
+    def _compute_reward_error(self, agent_idx: int, state: np.ndarray) -> float:
+        """Return the error used by the selected reward mode."""
+        if self.reward_definition.mode == "estimate_error":
+            return self._compute_estimation_error(agent_idx, state)
+        return self._compute_state_error(state)
+
     def _recent_transmission_count(self, agent_idx: int) -> int:
         """Count transmissions (ACKed or pending) over the short window."""
         dh = self.decision_history[agent_idx]
@@ -1089,6 +1111,8 @@ class NCS_Env(gym.Env):
             error_reward = -curr_error
         elif definition.mode == "absolute_sqrt":
             error_reward = -float(np.sqrt(max(curr_error, 0.0)))
+        elif definition.mode == "estimate_error":
+            error_reward = curr_error
         elif definition.mode == "simple_penalty":
             # Symmetric version of "simple": 0 if measurement delivered, -1 otherwise
             if info_arrived:

@@ -89,7 +89,7 @@ run_one() {
 }
 
 run_one "algorithms.marl_qmix" "qmix" "qmix_doubleq" \
-  --double-q --batch-size 512 --learning-rate 1e-5 \
+  --double-q --batch-size 512 --learning-rate 7e-5 \
   --epsilon-decay-steps "${EPS_DECAY_STEPS}"
 
 zip_path="${run_root}.zip"
