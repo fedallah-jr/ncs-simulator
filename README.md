@@ -33,7 +33,7 @@ The configuration file is divided into sections; each key controls a specific as
 - `comm_penalty_alpha`: Scalar multiplier (`α`) used in the communication penalty `R_{a,\text{comm}} = -α * N_\text{recent}/T`, applied only when `action=1` and the network is not set to `perfect_communication`.
 - `simple_comm_penalty_alpha`: Optional override for `"simple"` and `"simple_penalty"` reward modes. Set to `0` to keep no comm penalty in those modes; otherwise the same penalty formula applies.
 - `simple_freshness_decay`: Exponential freshness decay rate for `"simple"` reward mode (default `0.0`). When a measurement is delivered, the base reward becomes `exp(-simple_freshness_decay * age_steps)`, where `age_steps` is the measurement staleness in environment steps.
-- `normalize`: Optional flag for reward normalization in multi-agent runs. When enabled, running normalization scales the per-step reward.
+- `normalize`: Explicit flag (default: `false`) for reward normalization in multi-agent runs. When `true`, running normalization scales the per-step reward.
 - `no_normalization_scale`: Scalar divisor applied to rewards when normalization is disabled (default `1.0`).
 - `reward_clip_min` / `reward_clip_max`: Optional bounds applied to rewards after scaling/normalization.
 - `normalization_gamma`: Discount factor for running normalization returns (default `0.99`).

@@ -4,9 +4,9 @@
     "A": [[0.99, 0.01], [0.0, 0.99]],
     "B": [[0.000025], [0.005]],
     "heterogeneous_plants": [
-      { "A": [[1.00501, 0.01], [0, 1.0053]], "B": [[0.000141], [0.00041]] },
+      { "A": [[0.99312, 0.01], [0, 0.9993]], "B": [[0.000101], [0.00031]] },
       { "A": [[0.9992, 0.0], [0.01, 0.9994]], "B": [[0.00012], [0.003]]},
-      { "A": [[0.99985, 0.03], [0.0, 1]], "B": [ [0.002],[0.00011]]}
+      { "A": [[0.99985, 0.01], [0.0, 1]], "B": [ [0.002],[0.00011]]}
     ],
     "process_noise_cov": [[0.008, 0.0], [0.0, 0.008]],
     "measurement_noise_scale_range": 20.0,
@@ -19,7 +19,7 @@
   },
   "lqr": {
     "Q": [[1.0, 0.0], [0.0, 1.0]],
-    "R": [[0.02]]
+    "R": [[0.0]]
   },
   "reward": {
     "state_error_reward": "estimate_error",
@@ -28,10 +28,10 @@
     "comm_throughput_window": 200,
     "comm_penalty_alpha": 0.0,
     "comm_throughput_floor": 0.0,
-    "normalize": true,
-    "no_normalization_scale": 1.0,
+    "normalize": false,
+    "no_normalization_scale": 4.0,
     "reward_clip_max": 5,
-    "reward_clip_min": -5,
+    "reward_clip_min": -10,
     "evaluation": {
       "state_error_reward": "estimate_error",
       "comm_penalty_alpha": 0.0,

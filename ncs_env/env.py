@@ -27,7 +27,7 @@ class RewardDefinition:
     comm_penalty_alpha: float
     simple_comm_penalty_alpha: float
     simple_freshness_decay: float = 0.0
-    normalize: Optional[bool] = None  # None = auto-detect, True/False = explicit override
+    normalize: bool = False  # Explicit flag; normalization is applied only when True.
     normalizer: Optional[RunningRewardNormalizer] = None
     no_normalization_scale: float = 1.0
     reward_clip_min: Optional[float] = None
@@ -57,25 +57,11 @@ class RewardDefinition:
 
 def _should_normalize_reward(definition: RewardDefinition) -> bool:
     """
-    Determine if a reward should be normalized based on its type.
+    Return whether reward normalization is enabled.
 
-    Logic:
-    - If explicit override provided: use it
-    - Otherwise, auto-detect:
-      - simple, simple_penalty: NO (bounded rewards [-1, 0] or [0, 1])
-      - absolute, difference, estimate_error: YES (unbounded rewards, scale varies by system)
-
-    Returns:
-        True if reward should be normalized, False otherwise
+    Normalization is applied only when reward.normalize is explicitly set to True.
     """
-    # Explicit user override takes precedence
-    if definition.normalize is not None:
-        return definition.normalize
-
-    # Automatic detection based on reward type
-    # Simple rewards are bounded and well-scaled, don't normalize
-    # Absolute/difference/estimate_error rewards are unbounded, do normalize
-    return definition.mode in ["absolute", "absolute_sqrt", "difference", "estimate_error"]
+    return bool(definition.normalize)
 
 
 class NCS_Env(gym.Env):
@@ -823,9 +809,7 @@ class NCS_Env(gym.Env):
         base_simple_freshness_decay: float,
     ) -> RewardDefinition:
         base_mode = reward_cfg.get("state_error_reward", "difference")
-        base_normalize = reward_cfg.get("normalize", None)
-        if base_normalize is not None:
-            base_normalize = bool(base_normalize)
+        base_normalize = bool(reward_cfg.get("normalize", False))
         no_normalization_scale = reward_cfg.get("no_normalization_scale", 1.0)
         if no_normalization_scale is None:
             no_normalization_scale = 1.0
@@ -836,13 +820,12 @@ class NCS_Env(gym.Env):
             reward_clip_min = float(reward_clip_min)
         if reward_clip_max is not None:
             reward_clip_max = float(reward_clip_max)
-        normalize_flag = base_normalize if base_normalize is not None else False
         return RewardDefinition(
             mode=str(base_mode),
             comm_penalty_alpha=base_comm_penalty_alpha,
             simple_comm_penalty_alpha=base_simple_comm_penalty_alpha,
             simple_freshness_decay=base_simple_freshness_decay,
-            normalize=normalize_flag,
+            normalize=base_normalize,
             normalizer=None,
             no_normalization_scale=no_normalization_scale,
             reward_clip_min=reward_clip_min,
