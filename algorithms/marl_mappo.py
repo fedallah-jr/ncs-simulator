@@ -124,7 +124,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vf-coef", type=float, default=0.5, help="Value loss coefficient.")
     parser.add_argument("--huber-delta", type=float, default=10.0, help="Huber loss delta for value loss.")
     parser.add_argument("--value-norm-beta", type=float, default=0.999, help="EMA decay for value normalization.")
-    parser.add_argument("--max-grad-norm", type=float, default=10.0, help="Gradient clipping L2 norm.")
+    parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Gradient clipping L2 norm.")
 
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[128, 128], help="MLP hidden dims.")
     parser.add_argument("--activation", type=str, default="tanh", choices=["relu", "tanh", "elu"], help="Activation.")

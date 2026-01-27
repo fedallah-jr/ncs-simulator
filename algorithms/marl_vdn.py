@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=5e-4, help="Learning rate.")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor.")
     parser.add_argument("--target-update-interval", type=int, default=500, help="Hard target update interval (steps).")
-    parser.add_argument("--grad-clip-norm", type=float, default=10.0, help="Gradient clipping L2 norm.")
+    parser.add_argument("--grad-clip-norm", type=float, default=1.0, help="Gradient clipping L2 norm.")
     parser.add_argument("--double-q", action="store_true", help="Use Double DQN targets.")
     parser.add_argument("--optimizer", type=str, default="rmsprop", choices=["adam", "rmsprop"], help="Optimizer type.")
 
