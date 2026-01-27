@@ -1112,7 +1112,7 @@ class NCS_Env(gym.Env):
         elif definition.mode == "absolute_sqrt":
             error_reward = -float(np.sqrt(max(curr_error, 0.0)))
         elif definition.mode == "estimate_error":
-            error_reward = curr_error
+            error_reward = -curr_error
         elif definition.mode == "simple_penalty":
             # Symmetric version of "simple": 0 if measurement delivered, -1 otherwise
             if info_arrived:
