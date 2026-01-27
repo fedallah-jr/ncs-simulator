@@ -96,8 +96,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Torch device.")
     parser.add_argument("--log-interval", type=int, default=10, help="Print every N episodes.")
 
-    parser.add_argument("--eval-freq", type=int, default=2500, help="Evaluation frequency in env steps.")
-    parser.add_argument("--n-eval-episodes", type=int, default=5, help="Number of evaluation episodes.")
+    parser.add_argument("--eval-freq", type=int, default=5000, help="Evaluation frequency in env steps.")
+    parser.add_argument("--n-eval-episodes", type=int, default=30, help="Number of evaluation episodes.")
     parser.set_defaults(normalize_obs=True)
     return parser.parse_args()
 
