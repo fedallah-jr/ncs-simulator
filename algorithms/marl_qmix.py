@@ -162,14 +162,14 @@ def main() -> None:
             episode_seed = None if args.seed is None else args.seed + episode
             obs_dict, _info = env.reset(seed=episode_seed)
             obs_raw = stack_obs(obs_dict, n_agents)
-            if obs_normalizer is not None:
-                obs = obs_normalizer.normalize(obs_raw, update=True)
-            else:
-                obs = obs_raw
 
             episode_reward_sum = 0.0
             done = False
             while not done and global_step < args.total_timesteps:
+                if obs_normalizer is not None:
+                    obs = obs_normalizer.normalize(obs_raw, update=True)
+                else:
+                    obs = obs_raw
                 epsilon = epsilon_by_step(global_step, args.epsilon_start, args.epsilon_end, args.epsilon_decay_steps)
                 actions = select_actions(
                     agent=learner.agent,
@@ -184,10 +184,6 @@ def main() -> None:
                 action_dict = {f"agent_{i}": int(actions[i]) for i in range(n_agents)}
                 next_obs_dict, rewards_dict, terminated, truncated, _infos = env.step(action_dict)
                 next_obs_raw = stack_obs(next_obs_dict, n_agents)
-                if obs_normalizer is not None:
-                    next_obs = obs_normalizer.normalize(next_obs_raw, update=True)
-                else:
-                    next_obs = next_obs_raw
                 rewards = np.asarray([rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32)
                 # Distinguish termination (true end) from truncation (time limit)
                 # Only terminated should zero out bootstrap; truncated should still bootstrap
@@ -205,7 +201,6 @@ def main() -> None:
 
                 episode_reward_sum += float(rewards.sum())
                 obs_raw = next_obs_raw
-                obs = next_obs
                 global_step += 1
 
                 if len(buffer) >= args.start_learning and global_step % args.train_interval == 0:

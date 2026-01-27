@@ -230,9 +230,7 @@ def main() -> None:
         eval_writer.writerow(["step", "mean_reward", "std_reward"])
 
         obs_dict, _info = env.reset(seed=args.seed)
-        obs = stack_obs(obs_dict, n_agents)
-        if obs_normalizer is not None:
-            obs = obs_normalizer.normalize(obs, update=True)
+        obs_raw = stack_obs(obs_dict, n_agents)
 
         while global_step < args.total_timesteps:
             buffer = MAPPORolloutBuffer(args.n_steps, n_agents, obs_dim, value_dim)
@@ -240,6 +238,11 @@ def main() -> None:
             for _ in range(args.n_steps):
                 if global_step >= args.total_timesteps:
                     break
+
+                if obs_normalizer is not None:
+                    obs = obs_normalizer.normalize(obs_raw, update=True)
+                else:
+                    obs = obs_raw
 
                 obs_t = torch.as_tensor(obs, device=device, dtype=torch.float32).unsqueeze(0)
                 if use_agent_id:
@@ -262,9 +265,11 @@ def main() -> None:
 
                 action_dict = {f"agent_{i}": int(actions[i]) for i in range(n_agents)}
                 next_obs_dict, rewards_dict, terminated, truncated, _infos = env.step(action_dict)
-                next_obs = stack_obs(next_obs_dict, n_agents)
+                next_obs_raw = stack_obs(next_obs_dict, n_agents)
                 if obs_normalizer is not None:
-                    next_obs = obs_normalizer.normalize(next_obs, update=True)
+                    next_obs = obs_normalizer.normalize(next_obs_raw, update=False)
+                else:
+                    next_obs = next_obs_raw
                 raw_rewards = np.asarray(
                     [rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32
                 )
@@ -313,11 +318,9 @@ def main() -> None:
                     episode_length = 0
                     episode_seed = None if args.seed is None else args.seed + episode
                     obs_dict, _info = env.reset(seed=episode_seed)
-                    obs = stack_obs(obs_dict, n_agents)
-                    if obs_normalizer is not None:
-                        obs = obs_normalizer.normalize(obs, update=True)
+                    obs_raw = stack_obs(obs_dict, n_agents)
                 else:
-                    obs = next_obs
+                    obs_raw = next_obs_raw
 
                 if global_step - last_eval_step >= args.eval_freq:
                     mean_eval_reward, std_eval_reward, _ = run_evaluation(

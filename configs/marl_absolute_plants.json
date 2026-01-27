@@ -29,9 +29,9 @@
     "comm_penalty_alpha": 0.0,
     "comm_throughput_floor": 0.0,
     "normalize": false,
-    "no_normalization_scale": 4.0,
+    "no_normalization_scale": 2.0,
     "reward_clip_max": 5,
-    "reward_clip_min": -10,
+    "reward_clip_min": -7.5,
     "evaluation": {
       "state_error_reward": "estimate_error",
       "comm_penalty_alpha": 0.0,

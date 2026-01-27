@@ -89,7 +89,7 @@ run_one() {
 }
 
 run_one "algorithms.marl_vdn" "vdn" "vdn_shared" \
-  --batch-size 512 --learning-rate 7e-5 \
+  --batch-size 512 --learning-rate 2.5e-5 \
   --epsilon-decay-steps "${EPS_DECAY_STEPS}"
 
 zip_path="${run_root}.zip"

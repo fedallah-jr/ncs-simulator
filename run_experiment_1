@@ -89,7 +89,7 @@ run_one() {
 }
 
 run_one "algorithms.marl_iql" "iql" "iql_dueling_doubleq" \
-  --dueling --double-q --batch-size 512 --learning-rate 7e-5 \
+  --dueling --double-q --batch-size 512 --learning-rate 2.5e-5 \
   --epsilon-decay-steps "${EPS_DECAY_STEPS}"
 
 zip_path="${run_root}.zip"
