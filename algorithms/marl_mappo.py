@@ -23,6 +23,9 @@ from utils.marl import (
     append_agent_id,
     run_evaluation,
     stack_obs,
+    build_mappo_parser,
+    save_mappo_checkpoint,
+    build_mappo_hyperparams,
 )
 from utils.marl_training import (
     setup_device_and_rng,
@@ -104,68 +107,9 @@ class MAPPORolloutBuffer:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train MAPPO (shared actor, centralized critic) on multi-agent NCS env.")
-    parser.add_argument("--config", type=Path, default=None, help="Config JSON path.")
-    parser.add_argument("--output-root", type=Path, default=Path("outputs"), help="Output root directory.")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed.")
-    parser.add_argument("--n-agents", type=int, default=3, help="Number of agents (overridden by config if present).")
-    parser.add_argument("--episode-length", type=int, default=500, help="Episode length.")
-    parser.add_argument("--total-timesteps", type=int, default=200_000, help="Total environment steps.")
-
-    parser.add_argument("--n-steps", type=int, default=256, help="Rollout length per PPO update.")
-    parser.add_argument("--batch-size", type=int, default=256, help="Mini-batch size for PPO actor updates.")
-    parser.add_argument("--n-epochs", type=int, default=4, help="Number of PPO update epochs per rollout.")
-
-    parser.add_argument("--learning-rate", type=float, default=3e-4, help="Learning rate.")
-    parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor.")
-    parser.add_argument("--gae-lambda", type=float, default=0.95, help="GAE lambda.")
-    parser.add_argument("--clip-range", type=float, default=0.2, help="PPO clipping range.")
-    parser.add_argument("--ent-coef", type=float, default=0.01, help="Entropy coefficient.")
-    parser.add_argument("--vf-coef", type=float, default=0.5, help="Value loss coefficient.")
-    parser.add_argument("--huber-delta", type=float, default=10.0, help="Huber loss delta for value loss.")
-    parser.add_argument("--value-norm-beta", type=float, default=0.999, help="EMA decay for value normalization.")
-    parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Gradient clipping L2 norm.")
-
-    parser.add_argument("--hidden-dims", type=int, nargs="+", default=[128, 128], help="MLP hidden dims.")
-    parser.add_argument("--activation", type=str, default="tanh", choices=["relu", "tanh", "elu"], help="Activation.")
-    parser.add_argument("--layer-norm", action="store_true", help="Enable LayerNorm in MLP.")
-    parser.add_argument("--no-agent-id", action="store_true", help="Disable appending one-hot agent id.")
-    parser.add_argument(
-        "--team-reward",
-        action="store_true",
-        help="Use the summed team reward and a single shared value function.",
+    parser = build_mappo_parser(
+        description="Train MAPPO (shared actor, centralized critic) on multi-agent NCS env."
     )
-    obs_norm_group = parser.add_mutually_exclusive_group()
-    obs_norm_group.add_argument(
-        "--normalize-obs",
-        action="store_true",
-        help="Normalize observations with running mean/std (default).",
-    )
-    obs_norm_group.add_argument(
-        "--no-normalize-obs",
-        action="store_false",
-        dest="normalize_obs",
-        help="Disable observation normalization.",
-    )
-    parser.add_argument(
-        "--obs-norm-clip",
-        type=float,
-        default=5.0,
-        help="Clip normalized observations to +/- this value (<=0 disables).",
-    )
-    parser.add_argument(
-        "--obs-norm-eps",
-        type=float,
-        default=1e-8,
-        help="Epsilon for observation normalization.",
-    )
-
-    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Torch device.")
-    parser.add_argument("--log-interval", type=int, default=10, help="Print every N episodes.")
-
-    parser.add_argument("--eval-freq", type=int, default=5000, help="Evaluation frequency in env steps.")
-    parser.add_argument("--n-eval-episodes", type=int, default=30, help="Number of evaluation episodes.")
-    parser.set_defaults(normalize_obs=True)
     return parser.parse_args()
 
 
@@ -260,29 +204,23 @@ def main() -> None:
     episode_length = 0
 
     def save_checkpoint(path: Path) -> None:
-        ckpt: Dict[str, Any] = {
-            "algorithm": "mappo",
-            "n_agents": n_agents,
-            "obs_dim": obs_dim,
-            "n_actions": n_actions,
-            "use_agent_id": use_agent_id,
-            "parameter_sharing": True,
-            "team_reward": args.team_reward,
-            "agent_hidden_dims": list(args.hidden_dims),
-            "agent_activation": args.activation,
-            "agent_layer_norm": args.layer_norm,
-            "dueling": False,
-            "stream_hidden_dim": None,
-            "agent_state_dict": actor.state_dict(),
-            "critic_state_dict": critic.state_dict(),
-            "critic_hidden_dims": list(args.hidden_dims),
-            "critic_activation": args.activation,
-            "critic_layer_norm": args.layer_norm,
-        }
-        ckpt["obs_normalization"] = (
-            obs_normalizer.state_dict() if obs_normalizer is not None else {"enabled": False}
+        save_mappo_checkpoint(
+            path=path,
+            n_agents=n_agents,
+            obs_dim=obs_dim,
+            n_actions=n_actions,
+            use_agent_id=use_agent_id,
+            team_reward=args.team_reward,
+            agent_hidden_dims=list(args.hidden_dims),
+            agent_activation=args.activation,
+            agent_layer_norm=args.layer_norm,
+            critic_hidden_dims=list(args.hidden_dims),
+            critic_activation=args.activation,
+            critic_layer_norm=args.layer_norm,
+            actor=actor,
+            critic=critic,
+            obs_normalizer=obs_normalizer,
         )
-        torch.save(ckpt, path)
 
     with rewards_csv_path.open("w", newline="", encoding="utf-8") as train_f, \
          eval_csv_path.open("w", newline="", encoding="utf-8") as eval_f:
@@ -615,36 +553,12 @@ def main() -> None:
     latest_path = run_dir / "latest_model.pt"
     save_checkpoint(latest_path)
 
-    hyperparams: Dict[str, Any] = {
-        "total_timesteps": args.total_timesteps,
-        "episode_length": args.episode_length,
-        "n_agents": n_agents,
-        "n_steps": args.n_steps,
-        "batch_size": args.batch_size,
-        "n_epochs": args.n_epochs,
-        "learning_rate": args.learning_rate,
-        "gamma": args.gamma,
-        "gae_lambda": args.gae_lambda,
-        "clip_range": args.clip_range,
-        "ent_coef": args.ent_coef,
-        "vf_coef": args.vf_coef,
-        "huber_delta": args.huber_delta,
-        "value_norm": True,
-        "value_norm_beta": args.value_norm_beta,
-        "team_reward": args.team_reward,
-        "normalize_obs": args.normalize_obs,
-        "obs_norm_clip": args.obs_norm_clip,
-        "obs_norm_eps": args.obs_norm_eps,
-        "max_grad_norm": args.max_grad_norm,
-        "hidden_dims": list(args.hidden_dims),
-        "activation": args.activation,
-        "layer_norm": args.layer_norm,
-        "use_agent_id": use_agent_id,
-        "eval_freq": args.eval_freq,
-        "n_eval_episodes": args.n_eval_episodes,
-        "device": str(device),
-        "seed": args.seed,
-    }
+    hyperparams = build_mappo_hyperparams(
+        args=args,
+        n_agents=n_agents,
+        use_agent_id=use_agent_id,
+        device=device,
+    )
     save_config_with_hyperparameters(run_dir, args.config, "mappo", hyperparams)
 
     print_run_summary(run_dir, latest_path, rewards_csv_path, eval_csv_path)

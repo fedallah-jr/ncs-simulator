@@ -20,6 +20,10 @@ from utils.marl import (
     DuelingMLPAgent,
     QPLEXMixer,
     run_evaluation,
+    build_base_qlearning_parser,
+    add_qplex_args,
+    save_qlearning_checkpoint,
+    build_qlearning_hyperparams,
 )
 from utils.marl.common import epsilon_by_step, stack_obs, select_actions
 from utils.marl_training import (
@@ -34,92 +38,10 @@ from utils.run_utils import prepare_run_directory, save_config_with_hyperparamet
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train QPLEX (Q-attention duplex mixer) on multi-agent NCS env.")
-    parser.add_argument("--config", type=Path, default=None, help="Config JSON path.")
-    parser.add_argument("--output-root", type=Path, default=Path("outputs"), help="Output root directory.")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed.")
-    parser.add_argument("--n-agents", type=int, default=3, help="Number of agents (overridden by config if present).")
-    parser.add_argument("--episode-length", type=int, default=500, help="Episode length.")
-    parser.add_argument("--total-timesteps", type=int, default=200_000, help="Total environment steps.")
-
-    parser.add_argument("--buffer-size", type=int, default=200_000, help="Replay buffer capacity.")
-    parser.add_argument("--batch-size", type=int, default=2048, help="Batch size.")
-    parser.add_argument("--start-learning", type=int, default=1_000, help="Start updates after this many steps.")
-    parser.add_argument("--train-interval", type=int, default=1, help="Update frequency in env steps.")
-
-    parser.add_argument("--learning-rate", type=float, default=5e-4, help="Learning rate.")
-    parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor.")
-    parser.add_argument("--target-update-interval", type=int, default=500, help="Hard target update interval (steps).")
-    parser.add_argument("--grad-clip-norm", type=float, default=1.0, help="Gradient clipping L2 norm.")
-    parser.add_argument("--double-q", action="store_true", help="Use Double DQN targets.")
-    parser.add_argument(
-        "--optimizer",
-        type=str,
-        default="rmsprop",
-        choices=["adam", "rmsprop"],
-        help="Optimizer (rmsprop matches PyMARL).",
+    parser = build_base_qlearning_parser(
+        description="Train QPLEX (Q-attention duplex mixer) on multi-agent NCS env."
     )
-
-    parser.add_argument("--epsilon-start", type=float, default=1.0, help="Initial epsilon.")
-    parser.add_argument("--epsilon-end", type=float, default=0.05, help="Final epsilon.")
-    parser.add_argument("--epsilon-decay-steps", type=int, default=100_000, help="Linear decay steps.")
-
-    parser.add_argument("--hidden-dims", type=int, nargs="+", default=[128, 128], help="MLP hidden dims.")
-    parser.add_argument("--activation", type=str, default="tanh", choices=["relu", "tanh", "elu"], help="Activation.")
-    parser.add_argument("--layer-norm", action="store_true", help="Enable LayerNorm in MLP.")
-    parser.add_argument("--dueling", action="store_true", help="Use Dueling DQN architecture (separate V and A streams).")
-    parser.add_argument("--stream-hidden-dim", type=int, default=64, help="Hidden dim for dueling value/advantage streams.")
-    parser.add_argument("--no-agent-id", action="store_true", help="Disable appending one-hot agent id.")
-    parser.add_argument(
-        "--independent-agents",
-        action="store_true",
-        help="Use independent per-agent networks (disable parameter sharing).",
-    )
-
-    parser.add_argument("--mixing-embed-dim", type=int, default=32, help="QPLEX attention embed dim.")
-    parser.add_argument("--hypernet-embed", type=int, default=64, help="QPLEX attention hypernet embed dim.")
-    parser.add_argument("--adv-hypernet-layers", type=int, default=3, help="Advantage hypernet layers (1-3).")
-    parser.add_argument("--adv-hypernet-embed", type=int, default=64, help="Advantage hypernet embed dim.")
-    parser.add_argument("--num-kernel", type=int, default=10, help="Number of QPLEX SI-weight kernels.")
-    parser.add_argument("--n-head", type=int, default=4, help="Number of QPLEX Q-attention heads.")
-    parser.add_argument("--attend-reg-coef", type=float, default=0.001, help="QPLEX attention regularization coef.")
-    parser.add_argument("--nonlinear", action="store_true", help="Include agent Q-values in attention keys.")
-    parser.add_argument("--mask-dead", action="store_true", help="Mask dead agents in attention (action==0).")
-    parser.add_argument("--no-weighted-head", action="store_false", dest="weighted_head", help="Disable weighted heads.")
-    parser.add_argument("--no-state-bias", action="store_false", dest="state_bias", help="Disable state bias term.")
-    parser.add_argument("--no-is-minus-one", action="store_false", dest="is_minus_one", help="Disable minus-one trick.")
-
-    obs_norm_group = parser.add_mutually_exclusive_group()
-    obs_norm_group.add_argument(
-        "--normalize-obs",
-        action="store_true",
-        help="Normalize observations with running mean/std (default).",
-    )
-    obs_norm_group.add_argument(
-        "--no-normalize-obs",
-        action="store_false",
-        dest="normalize_obs",
-        help="Disable observation normalization.",
-    )
-    parser.add_argument(
-        "--obs-norm-clip",
-        type=float,
-        default=5.0,
-        help="Clip normalized observations to +/- this value (<=0 disables).",
-    )
-    parser.add_argument(
-        "--obs-norm-eps",
-        type=float,
-        default=1e-8,
-        help="Epsilon for observation normalization.",
-    )
-
-    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Torch device.")
-    parser.add_argument("--log-interval", type=int, default=10, help="Print every N episodes.")
-
-    parser.add_argument("--eval-freq", type=int, default=5000, help="Evaluation frequency in env steps.")
-    parser.add_argument("--n-eval-episodes", type=int, default=30, help="Number of evaluation episodes.")
-    parser.set_defaults(normalize_obs=True, weighted_head=True, state_bias=True, is_minus_one=True)
+    add_qplex_args(parser)
     return parser.parse_args()
 
 
@@ -216,19 +138,8 @@ def main() -> None:
 
     # Helper function to save model checkpoint
     def save_checkpoint(path: Path) -> None:
-        ckpt: Dict[str, Any] = {
-            "algorithm": "qplex",
-            "n_agents": n_agents,
-            "obs_dim": obs_dim,
-            "n_actions": n_actions,
+        mixer_params = {
             "state_dim": state_dim,
-            "use_agent_id": use_agent_id,
-            "parameter_sharing": (not args.independent_agents),
-            "agent_hidden_dims": list(args.hidden_dims),
-            "agent_activation": args.activation,
-            "agent_layer_norm": args.layer_norm,
-            "dueling": args.dueling,
-            "stream_hidden_dim": args.stream_hidden_dim if args.dueling else None,
             "mixing_embed_dim": args.mixing_embed_dim,
             "hypernet_embed": args.hypernet_embed,
             "adv_hypernet_layers": args.adv_hypernet_layers,
@@ -242,16 +153,25 @@ def main() -> None:
             "mask_dead": args.mask_dead,
             "weighted_head": args.weighted_head,
             "is_minus_one": args.is_minus_one,
-            "mixer_state_dict": learner.mixer.state_dict(),
         }
-        ckpt["obs_normalization"] = (
-            obs_normalizer.state_dict() if obs_normalizer is not None else {"enabled": False}
+        save_qlearning_checkpoint(
+            path=path,
+            algorithm="qplex",
+            n_agents=n_agents,
+            obs_dim=obs_dim,
+            n_actions=n_actions,
+            use_agent_id=use_agent_id,
+            parameter_sharing=(not args.independent_agents),
+            agent_hidden_dims=list(args.hidden_dims),
+            agent_activation=args.activation,
+            agent_layer_norm=args.layer_norm,
+            dueling=args.dueling,
+            stream_hidden_dim=args.stream_hidden_dim if args.dueling else None,
+            agent=learner.agent,
+            obs_normalizer=obs_normalizer,
+            mixer=learner.mixer,
+            mixer_params=mixer_params,
         )
-        if args.independent_agents:
-            ckpt["agent_state_dicts"] = [net.state_dict() for net in learner.agent]  # type: ignore[union-attr]
-        else:
-            ckpt["agent_state_dict"] = learner.agent.state_dict()  # type: ignore[union-attr]
-        torch.save(ckpt, path)
 
     # Open both CSV files for writing
     with rewards_csv_path.open("w", newline="", encoding="utf-8") as train_f, \
@@ -354,30 +274,7 @@ def main() -> None:
     latest_path = run_dir / "latest_model.pt"
     save_checkpoint(latest_path)
 
-    hyperparams: Dict[str, Any] = {
-        "total_timesteps": args.total_timesteps,
-        "episode_length": args.episode_length,
-        "n_agents": n_agents,
-        "buffer_size": args.buffer_size,
-        "batch_size": args.batch_size,
-        "start_learning": args.start_learning,
-        "train_interval": args.train_interval,
-        "learning_rate": args.learning_rate,
-        "gamma": args.gamma,
-        "target_update_interval": args.target_update_interval,
-        "grad_clip_norm": args.grad_clip_norm,
-        "double_q": args.double_q,
-        "optimizer": args.optimizer,
-        "epsilon_start": args.epsilon_start,
-        "epsilon_end": args.epsilon_end,
-        "epsilon_decay_steps": args.epsilon_decay_steps,
-        "hidden_dims": list(args.hidden_dims),
-        "activation": args.activation,
-        "layer_norm": args.layer_norm,
-        "dueling": args.dueling,
-        "stream_hidden_dim": args.stream_hidden_dim,
-        "use_agent_id": use_agent_id,
-        "independent_agents": args.independent_agents,
+    mixer_params = {
         "mixing_embed_dim": args.mixing_embed_dim,
         "hypernet_embed": args.hypernet_embed,
         "adv_hypernet_layers": args.adv_hypernet_layers,
@@ -385,14 +282,15 @@ def main() -> None:
         "num_kernel": args.num_kernel,
         "weighted_head": args.weighted_head,
         "is_minus_one": args.is_minus_one,
-        "normalize_obs": args.normalize_obs,
-        "obs_norm_clip": args.obs_norm_clip,
-        "obs_norm_eps": args.obs_norm_eps,
-        "eval_freq": args.eval_freq,
-        "n_eval_episodes": args.n_eval_episodes,
-        "device": str(device),
-        "seed": args.seed,
     }
+    hyperparams = build_qlearning_hyperparams(
+        algorithm="qplex",
+        args=args,
+        n_agents=n_agents,
+        use_agent_id=use_agent_id,
+        device=device,
+        mixer_params=mixer_params,
+    )
     save_config_with_hyperparameters(run_dir, args.config, "qplex", hyperparams)
 
     print_run_summary(run_dir, latest_path, rewards_csv_path, eval_csv_path)

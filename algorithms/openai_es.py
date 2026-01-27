@@ -161,13 +161,6 @@ def _init_worker(
     if normalize_obs:
         clip_value = None if obs_norm_clip <= 0 else float(obs_norm_clip)
         _worker_obs_normalizer = RunningObsNormalizer.create(
-            _worker_obs_dim, clip=clip_value, eps=float(obs_norm_eps)
-        )
-    else:
-        _worker_obs_normalizer = None
-    if normalize_obs:
-        clip_value = None if obs_norm_clip <= 0 else float(obs_norm_clip)
-        _worker_obs_normalizer = RunningObsNormalizer.create(
             obs_dim, clip=clip_value, eps=float(obs_norm_eps)
         )
     else:
