@@ -305,6 +305,7 @@ def main() -> None:
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=float(args.learning_rate))
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=float(args.learning_rate))
     value_normalizer = ValueNorm((value_dim,), device=device, beta=float(args.value_norm_beta))
+    base_lr = float(args.learning_rate)
 
     best_model_tracker = BestModelTracker()
     global_step = 0
@@ -522,6 +523,13 @@ def main() -> None:
 
             value_normalizer.update(returns_t)
             normalized_returns_t = value_normalizer.normalize(returns_t)
+
+            if args.lr_decay:
+                progress = min(float(global_step) / float(args.total_timesteps), 1.0)
+                lr = max(0.0, base_lr * (1.0 - progress))
+                for optimizer in (actor_optimizer, critic_optimizer):
+                    for param_group in optimizer.param_groups:
+                        param_group["lr"] = lr
 
             if args.team_reward:
                 advantages_actor_t = advantages_t.repeat(1, 1, n_agents)

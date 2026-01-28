@@ -77,6 +77,7 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--n-epochs", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--no-lr-decay", action="store_false", dest="lr_decay")
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-range", type=float, default=0.2)
@@ -99,5 +100,5 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--eval-freq", type=int, default=5000)
     parser.add_argument("--n-eval-episodes", type=int, default=30)
-    parser.set_defaults(normalize_obs=True)
+    parser.set_defaults(normalize_obs=True, lr_decay=True)
     return parser

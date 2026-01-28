@@ -10,8 +10,7 @@ cd "${PROJECT_ROOT}"
 SEED="${SEED:-0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 
-TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-2000000}"
-EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-1600000}"
+TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-5000000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_root="${OUTPUT_ROOT}/exp_4_mappo_team_reward_${timestamp}_seed${SEED}"
@@ -63,7 +62,7 @@ run_one() {
     --output-root "${run_root}"
     --seed "${SEED}"
     --total-timesteps "${TOTAL_TIMESTEPS}"
-    --n-eval-episodes 10
+    --n-eval-episodes 30
   )
 
   local log_path="${run_root}/logs/${run_label}.log"
