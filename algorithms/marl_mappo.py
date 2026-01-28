@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import functools
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
+from gymnasium.vector import AsyncVectorEnv
 from torch import nn
 from torch.distributions import Categorical
 from torch.nn import functional as F
@@ -22,7 +24,6 @@ from utils.marl import (
     ValueNorm,
     append_agent_id,
     run_evaluation,
-    stack_obs,
     build_mappo_parser,
     save_mappo_checkpoint,
     build_mappo_hyperparams,
@@ -30,7 +31,6 @@ from utils.marl import (
 from utils.marl_training import (
     setup_device_and_rng,
     load_config_with_overrides,
-    create_environments,
     create_obs_normalizer,
     print_run_summary,
 )
@@ -38,11 +38,50 @@ from utils.reward_normalization import reset_shared_running_normalizers
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters, BestModelTracker
 
 
+def _make_env(
+    n_agents: int,
+    episode_length: int,
+    config_path_str: Optional[str],
+    seed: Optional[int],
+    reward_override: Optional[Dict[str, Any]] = None,
+    termination_override: Optional[Dict[str, Any]] = None,
+    freeze_running_normalization: bool = False,
+) -> "NCS_Env":
+    from ncs_env.env import NCS_Env
+
+    return NCS_Env(
+        n_agents=n_agents,
+        episode_length=episode_length,
+        config_path=config_path_str,
+        seed=seed,
+        reward_override=reward_override,
+        termination_override=termination_override,
+        freeze_running_normalization=freeze_running_normalization,
+    )
+
+
+def _stack_vector_obs(obs_dict: Dict[str, Any], n_agents: int) -> np.ndarray:
+    return np.stack(
+        [np.asarray(obs_dict[f"agent_{i}"], dtype=np.float32) for i in range(n_agents)],
+        axis=1,
+    )
+
+
 class MAPPORolloutBuffer:
-    def __init__(self, n_steps: int, n_agents: int, obs_dim: int, value_dim: int) -> None:
+    def __init__(
+        self,
+        n_steps: int,
+        n_envs: int,
+        n_agents: int,
+        obs_dim: int,
+        value_dim: int,
+    ) -> None:
         if n_steps <= 0:
             raise ValueError("n_steps must be positive")
+        if n_envs <= 0:
+            raise ValueError("n_envs must be positive")
         self.n_steps = int(n_steps)
+        self.n_envs = int(n_envs)
         self.n_agents = int(n_agents)
         self.obs_dim = int(obs_dim)
         self.value_dim = int(value_dim)
@@ -53,15 +92,27 @@ class MAPPORolloutBuffer:
 
     def reset(self) -> None:
         self.step = 0
-        self.obs = np.zeros((self.n_steps, self.n_agents, self.obs_dim), dtype=np.float32)
-        self.global_obs = np.zeros((self.n_steps, self.global_obs_dim), dtype=np.float32)
-        self.next_global_obs = np.zeros((self.n_steps, self.global_obs_dim), dtype=np.float32)
-        self.actions = np.zeros((self.n_steps, self.n_agents), dtype=np.int64)
-        self.log_probs = np.zeros((self.n_steps, self.n_agents), dtype=np.float32)
-        self.rewards = np.zeros((self.n_steps, self.value_dim), dtype=np.float32)
-        self.terminated = np.zeros((self.n_steps,), dtype=np.float32)
-        self.episode_end = np.zeros((self.n_steps,), dtype=np.float32)
-        self.values = np.zeros((self.n_steps, self.value_dim), dtype=np.float32)
+        self.obs = np.zeros(
+            (self.n_steps, self.n_envs, self.n_agents, self.obs_dim), dtype=np.float32
+        )
+        self.global_obs = np.zeros(
+            (self.n_steps, self.n_envs, self.global_obs_dim), dtype=np.float32
+        )
+        self.next_global_obs = np.zeros(
+            (self.n_steps, self.n_envs, self.global_obs_dim), dtype=np.float32
+        )
+        self.actions = np.zeros(
+            (self.n_steps, self.n_envs, self.n_agents), dtype=np.int64
+        )
+        self.log_probs = np.zeros(
+            (self.n_steps, self.n_envs, self.n_agents), dtype=np.float32
+        )
+        self.rewards = np.zeros(
+            (self.n_steps, self.n_envs, self.value_dim), dtype=np.float32
+        )
+        self.terminated = np.zeros((self.n_steps, self.n_envs), dtype=np.float32)
+        self.episode_end = np.zeros((self.n_steps, self.n_envs), dtype=np.float32)
+        self.values = np.zeros((self.n_steps, self.n_envs, self.value_dim), dtype=np.float32)
 
     def add(
         self,
@@ -71,8 +122,8 @@ class MAPPORolloutBuffer:
         actions: np.ndarray,
         log_probs: np.ndarray,
         rewards: np.ndarray,
-        terminated: bool,
-        episode_end: bool,
+        terminated: np.ndarray,
+        episode_end: np.ndarray,
         values: np.ndarray,
     ) -> None:
         if self.step >= self.n_steps:
@@ -84,8 +135,8 @@ class MAPPORolloutBuffer:
         self.actions[idx] = actions
         self.log_probs[idx] = log_probs
         self.rewards[idx] = rewards
-        self.terminated[idx] = float(terminated)
-        self.episode_end[idx] = float(episode_end)
+        self.terminated[idx] = terminated.astype(np.float32)
+        self.episode_end[idx] = episode_end.astype(np.float32)
         self.values[idx] = values
         self.step += 1
 
@@ -123,11 +174,11 @@ def _compute_gae(
     gae_lambda: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
     advantages = np.zeros_like(rewards, dtype=np.float32)
-    last_adv = np.zeros((rewards.shape[1],), dtype=np.float32)
+    last_adv = np.zeros(rewards.shape[1:], dtype=np.float32)
     for t in range(rewards.shape[0] - 1, -1, -1):
-        bootstrap_mask = 1.0 - float(terminated[t])
+        bootstrap_mask = 1.0 - terminated[t].reshape(-1, 1)
         delta = rewards[t] + gamma * next_values[t] * bootstrap_mask - values[t]
-        cont = 1.0 - float(episode_end[t])
+        cont = 1.0 - episode_end[t].reshape(-1, 1)
         last_adv = delta + gamma * gae_lambda * cont * last_adv
         advantages[t] = last_adv
     returns = advantages + values
@@ -159,17 +210,36 @@ def main() -> None:
     rewards_csv_path = run_dir / "training_rewards.csv"
     eval_csv_path = run_dir / "evaluation_rewards.csv"
 
-    env, eval_env = create_environments(
+    if args.n_envs <= 0:
+        raise ValueError("n_envs must be positive")
+
+    env_seeds = None
+    if args.seed is not None:
+        env_seeds = [int(args.seed) + env_idx for env_idx in range(args.n_envs)]
+
+    env_fns = [
+        functools.partial(
+            _make_env,
+            n_agents,
+            args.episode_length,
+            config_path_str,
+            None if env_seeds is None else env_seeds[env_idx],
+        )
+        for env_idx in range(args.n_envs)
+    ]
+    env = AsyncVectorEnv(env_fns, autoreset_mode="same_step")
+    eval_env = _make_env(
         n_agents=n_agents,
         episode_length=args.episode_length,
         config_path_str=config_path_str,
         seed=args.seed,
-        eval_reward_override=eval_reward_override,
-        eval_termination_override=eval_termination_override,
+        reward_override=eval_reward_override,
+        termination_override=eval_termination_override,
+        freeze_running_normalization=True,
     )
 
-    obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
-    n_actions = int(env.action_space.spaces["agent_0"].n)
+    obs_dim = int(env.single_observation_space.spaces["agent_0"].shape[0])
+    n_actions = int(env.single_action_space.spaces["agent_0"].n)
     actor_input_dim = obs_dim + (n_agents if use_agent_id else 0)
     critic_input_dim = obs_dim * n_agents
     value_dim = 1 if args.team_reward else n_agents
@@ -229,11 +299,13 @@ def main() -> None:
         eval_writer = csv.writer(eval_f)
         eval_writer.writerow(["step", "mean_reward", "std_reward"])
 
-        obs_dict, _info = env.reset(seed=args.seed)
-        obs_raw = stack_obs(obs_dict, n_agents)
+        obs_dict, _info = env.reset(seed=env_seeds)
+        obs_raw = _stack_vector_obs(obs_dict, n_agents)
+        episode_reward_sums = np.zeros((args.n_envs,), dtype=np.float32)
+        episode_lengths = np.zeros((args.n_envs,), dtype=np.int64)
 
         while global_step < args.total_timesteps:
-            buffer = MAPPORolloutBuffer(args.n_steps, n_agents, obs_dim, value_dim)
+            buffer = MAPPORolloutBuffer(args.n_steps, args.n_envs, n_agents, obs_dim, value_dim)
 
             for _ in range(args.n_steps):
                 if global_step >= args.total_timesteps:
@@ -244,10 +316,10 @@ def main() -> None:
                 else:
                     obs = obs_raw
 
-                obs_t = torch.as_tensor(obs, device=device, dtype=torch.float32).unsqueeze(0)
+                obs_t = torch.as_tensor(obs, device=device, dtype=torch.float32)
                 if use_agent_id:
                     obs_t = append_agent_id(obs_t, n_agents)
-                obs_flat = obs_t.view(n_agents, -1)
+                obs_flat = obs_t.reshape(args.n_envs * n_agents, -1)
 
                 with torch.no_grad():
                     logits = actor(obs_flat)
@@ -255,38 +327,43 @@ def main() -> None:
                     actions_t = dist.sample()
                     log_probs_t = dist.log_prob(actions_t)
 
-                    global_obs = obs.reshape(-1).astype(np.float32)
-                    global_obs_t = torch.as_tensor(global_obs, device=device, dtype=torch.float32).unsqueeze(0)
-                    values_t = critic(global_obs_t).squeeze(0)
+                    global_obs = obs.reshape(args.n_envs, -1).astype(np.float32)
+                    global_obs_t = torch.as_tensor(global_obs, device=device, dtype=torch.float32)
+                    values_t = critic(global_obs_t)
 
-                actions = actions_t.cpu().numpy().astype(np.int64)
-                log_probs = log_probs_t.cpu().numpy().astype(np.float32)
+                actions = actions_t.cpu().numpy().astype(np.int64).reshape(args.n_envs, n_agents)
+                log_probs = log_probs_t.cpu().numpy().astype(np.float32).reshape(args.n_envs, n_agents)
                 values = values_t.cpu().numpy().astype(np.float32)
 
-                action_dict = {f"agent_{i}": int(actions[i]) for i in range(n_agents)}
+                action_dict = {f"agent_{i}": actions[:, i] for i in range(n_agents)}
                 next_obs_dict, rewards_dict, terminated, truncated, _infos = env.step(action_dict)
-                next_obs_raw = stack_obs(next_obs_dict, n_agents)
+                next_obs_raw = _stack_vector_obs(next_obs_dict, n_agents)
                 if obs_normalizer is not None:
                     next_obs = obs_normalizer.normalize(next_obs_raw, update=False)
                 else:
                     next_obs = next_obs_raw
-                raw_rewards = np.asarray(
-                    [rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32
-                )
+                raw_rewards = np.stack(
+                    [rewards_dict[f"agent_{i}"] for i in range(n_agents)], axis=1
+                ).astype(np.float32)
                 if args.team_reward:
-                    team_reward = float(raw_rewards.sum())
-                    rewards = np.asarray([team_reward], dtype=np.float32)
+                    rewards = raw_rewards.sum(axis=1, keepdims=True)
                 else:
                     rewards = raw_rewards
 
-                terminated_any = any(terminated[f"agent_{i}"] for i in range(n_agents))
-                truncated_any = any(truncated[f"agent_{i}"] for i in range(n_agents))
-                done = terminated_any or truncated_any
+                terminated_any = np.any(
+                    np.stack([terminated[f"agent_{i}"] for i in range(n_agents)], axis=1),
+                    axis=1,
+                )
+                truncated_any = np.any(
+                    np.stack([truncated[f"agent_{i}"] for i in range(n_agents)], axis=1),
+                    axis=1,
+                )
+                done = np.logical_or(terminated_any, truncated_any)
 
                 buffer.add(
                     obs=obs,
                     global_obs=global_obs,
-                    next_global_obs=next_obs.reshape(-1).astype(np.float32),
+                    next_global_obs=next_obs.reshape(args.n_envs, -1).astype(np.float32),
                     actions=actions,
                     log_probs=log_probs,
                     rewards=rewards,
@@ -295,32 +372,35 @@ def main() -> None:
                     values=values,
                 )
 
-                episode_reward_sum += float(raw_rewards.sum())
-                episode_length += 1
-                global_step += 1
+                episode_reward_sums += raw_rewards.sum(axis=1)
+                episode_lengths += 1
+                global_step += args.n_envs
 
-                if done:
-                    train_writer.writerow([episode, episode_reward_sum, episode_length, global_step])
-                    train_f.flush()
-
-                    # Save best model based on training reward
-                    best_model_tracker.update(
-                        "train", episode_reward_sum, run_dir / "best_train_model.pt", save_checkpoint
-                    )
-
-                    if episode % args.log_interval == 0:
-                        print(
-                            f"[MAPPO] episode={episode} steps={global_step} "
-                            f"reward_sum={episode_reward_sum:.3f}"
+                if np.any(done):
+                    done_indices = np.where(done)[0]
+                    for env_idx in done_indices:
+                        train_writer.writerow(
+                            [episode, float(episode_reward_sums[env_idx]), int(episode_lengths[env_idx]), global_step]
                         )
-                    episode += 1
-                    episode_reward_sum = 0.0
-                    episode_length = 0
-                    episode_seed = None if args.seed is None else args.seed + episode
-                    obs_dict, _info = env.reset(seed=episode_seed)
-                    obs_raw = stack_obs(obs_dict, n_agents)
-                else:
-                    obs_raw = next_obs_raw
+                        train_f.flush()
+
+                        best_model_tracker.update(
+                            "train",
+                            float(episode_reward_sums[env_idx]),
+                            run_dir / "best_train_model.pt",
+                            save_checkpoint,
+                        )
+
+                        if episode % args.log_interval == 0:
+                            print(
+                                f"[MAPPO] episode={episode} steps={global_step} "
+                                f"reward_sum={episode_reward_sums[env_idx]:.3f}"
+                            )
+                        episode += 1
+                        episode_reward_sums[env_idx] = 0.0
+                        episode_lengths[env_idx] = 0
+
+                obs_raw = next_obs_raw
 
                 if global_step - last_eval_step >= args.eval_freq:
                     mean_eval_reward, std_eval_reward, _ = run_evaluation(
@@ -362,12 +442,15 @@ def main() -> None:
                 values_batch,
             ) = buffer.get()
 
+            rollout_len = int(obs_batch.shape[0])
             values_t = torch.as_tensor(values_batch, device=device, dtype=torch.float32)
             next_global_obs_t = torch.as_tensor(
                 next_global_obs_batch, device=device, dtype=torch.float32
             )
             with torch.no_grad():
-                next_values_t = critic(next_global_obs_t)
+                next_values_t = critic(
+                    next_global_obs_t.reshape(-1, critic_input_dim)
+                ).reshape(rollout_len, args.n_envs, value_dim)
             values_raw = value_normalizer.denormalize(values_t).cpu().numpy()
             next_values_raw = value_normalizer.denormalize(next_values_t).cpu().numpy()
 
@@ -393,7 +476,7 @@ def main() -> None:
             normalized_returns_t = value_normalizer.normalize(returns_t)
 
             if args.team_reward:
-                advantages_actor_t = advantages_t.repeat(1, n_agents)
+                advantages_actor_t = advantages_t.repeat(1, 1, n_agents)
             else:
                 advantages_actor_t = advantages_t
 
@@ -457,7 +540,10 @@ def main() -> None:
 
                 value_targets = normalized_returns_t.squeeze(-1)
                 values_old_targets = values_old.squeeze(-1)
-                value_total_samples = int(value_targets.shape[0])
+                global_obs_flat = global_obs_t.reshape(-1, critic_input_dim)
+                value_targets_flat = value_targets.reshape(-1)
+                values_old_flat = values_old_targets.reshape(-1)
+                value_total_samples = int(value_targets_flat.shape[0])
                 value_batch_size = min(int(args.batch_size), value_total_samples)
                 if value_batch_size <= 0:
                     value_batch_size = value_total_samples
@@ -468,10 +554,10 @@ def main() -> None:
                         value_idx = value_indices[start:start + value_batch_size]
                         value_idx_t = torch.as_tensor(value_idx, device=device, dtype=torch.long)
 
-                        global_obs_mb = global_obs_t[value_idx_t]
+                        global_obs_mb = global_obs_flat[value_idx_t]
                         values_pred_mb = critic(global_obs_mb).squeeze(-1)
-                        returns_mb = value_targets[value_idx_t]
-                        values_old_mb = values_old_targets[value_idx_t]
+                        returns_mb = value_targets_flat[value_idx_t]
+                        values_old_mb = values_old_flat[value_idx_t]
 
                         value_pred_clipped = values_old_mb + (
                             values_pred_mb - values_old_mb
@@ -527,11 +613,11 @@ def main() -> None:
                         nn.utils.clip_grad_norm_(actor.parameters(), float(args.max_grad_norm))
                         actor_optimizer.step()
 
-                        time_ids_mb = mb_idx_t // n_agents
+                        time_env_ids = mb_idx_t // n_agents
                         returns_mb = returns_flat[mb_idx_t]
                         values_old_mb = values_old_flat[mb_idx_t]
 
-                        global_obs_mb = global_obs_t[time_ids_mb]
+                        global_obs_mb = global_obs_t.reshape(-1, critic_input_dim)[time_env_ids]
                         values_pred_all = critic(global_obs_mb)
                         values_pred_mb = values_pred_all.gather(1, agent_ids_mb.unsqueeze(-1)).squeeze(-1)
 
