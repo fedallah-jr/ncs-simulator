@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import functools
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -10,6 +9,7 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import torch
 from gymnasium.vector import AsyncVectorEnv
+from gymnasium.vector.async_vector_env import AutoresetMode
 from torch import nn
 from torch.distributions import Categorical
 from torch.nn import functional as F
@@ -24,6 +24,7 @@ from utils.marl import (
     ValueNorm,
     append_agent_id,
     run_evaluation,
+    stack_obs,
     build_mappo_parser,
     save_mappo_checkpoint,
     build_mappo_hyperparams,
@@ -60,11 +61,49 @@ def _make_env(
     )
 
 
+def _make_vector_env_fn(
+    n_agents: int,
+    episode_length: int,
+    config_path_str: Optional[str],
+    seed: Optional[int],
+) -> Any:
+    def _thunk() -> "_VectorEnvAdapter":
+        env = _make_env(n_agents, episode_length, config_path_str, seed)
+        return _VectorEnvAdapter(env, n_agents)
+
+    return _thunk
+
+
 def _stack_vector_obs(obs_dict: Dict[str, Any], n_agents: int) -> np.ndarray:
     return np.stack(
         [np.asarray(obs_dict[f"agent_{i}"], dtype=np.float32) for i in range(n_agents)],
         axis=1,
     )
+
+
+class _VectorEnvAdapter:
+    def __init__(self, env: Any, n_agents: int) -> None:
+        self.env = env
+        self.n_agents = int(n_agents)
+        self.action_space = env.action_space
+        self.observation_space = env.observation_space
+        self.metadata = getattr(env, "metadata", {})
+        self.render_mode = getattr(env, "render_mode", None)
+
+    def reset(self, **kwargs: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        return self.env.reset(**kwargs)
+
+    def step(self, action: Dict[str, Any]) -> Tuple[Dict[str, Any], np.ndarray, bool, bool, Dict[str, Any]]:
+        obs, rewards, terminated, truncated, info = self.env.step(action)
+        rewards_arr = np.asarray(
+            [rewards[f"agent_{i}"] for i in range(self.n_agents)], dtype=np.float32
+        )
+        terminated_any = any(terminated[f"agent_{i}"] for i in range(self.n_agents))
+        truncated_any = any(truncated[f"agent_{i}"] for i in range(self.n_agents))
+        return obs, rewards_arr, bool(terminated_any), bool(truncated_any), info
+
+    def close(self) -> None:
+        self.env.close()
 
 
 class MAPPORolloutBuffer:
@@ -217,17 +256,18 @@ def main() -> None:
     if args.seed is not None:
         env_seeds = [int(args.seed) + env_idx for env_idx in range(args.n_envs)]
 
-    env_fns = [
-        functools.partial(
-            _make_env,
-            n_agents,
-            args.episode_length,
-            config_path_str,
-            None if env_seeds is None else env_seeds[env_idx],
+    env_fns = []
+    for env_idx in range(args.n_envs):
+        seed = None if env_seeds is None else env_seeds[env_idx]
+        env_fns.append(
+            _make_vector_env_fn(
+                n_agents,
+                args.episode_length,
+                config_path_str,
+                seed,
+            )
         )
-        for env_idx in range(args.n_envs)
-    ]
-    env = AsyncVectorEnv(env_fns, autoreset_mode="same_step")
+    env = AsyncVectorEnv(env_fns, autoreset_mode=AutoresetMode.SAME_STEP)
     eval_env = _make_env(
         n_agents=n_agents,
         episode_length=args.episode_length,
@@ -336,34 +376,42 @@ def main() -> None:
                 values = values_t.cpu().numpy().astype(np.float32)
 
                 action_dict = {f"agent_{i}": actions[:, i] for i in range(n_agents)}
-                next_obs_dict, rewards_dict, terminated, truncated, _infos = env.step(action_dict)
+                next_obs_dict, rewards_arr, terminated, truncated, infos = env.step(action_dict)
                 next_obs_raw = _stack_vector_obs(next_obs_dict, n_agents)
+                next_obs_for_gae_raw = next_obs_raw
+                if infos.get("final_obs") is not None:
+                    final_obs = infos["final_obs"]
+                    done_indices = np.where(np.logical_or(terminated, truncated))[0]
+                    if len(done_indices) > 0:
+                        next_obs_for_gae_raw = next_obs_raw.copy()
+                        for env_idx in done_indices:
+                            final_env_obs = final_obs[env_idx]
+                            if final_env_obs is not None:
+                                next_obs_for_gae_raw[env_idx] = stack_obs(
+                                    final_env_obs, n_agents
+                                )
+
                 if obs_normalizer is not None:
-                    next_obs = obs_normalizer.normalize(next_obs_raw, update=False)
+                    next_obs_for_gae = obs_normalizer.normalize(
+                        next_obs_for_gae_raw, update=False
+                    )
                 else:
-                    next_obs = next_obs_raw
-                raw_rewards = np.stack(
-                    [rewards_dict[f"agent_{i}"] for i in range(n_agents)], axis=1
-                ).astype(np.float32)
+                    next_obs_for_gae = next_obs_for_gae_raw
+
+                raw_rewards = np.asarray(rewards_arr, dtype=np.float32)
                 if args.team_reward:
                     rewards = raw_rewards.sum(axis=1, keepdims=True)
                 else:
                     rewards = raw_rewards
 
-                terminated_any = np.any(
-                    np.stack([terminated[f"agent_{i}"] for i in range(n_agents)], axis=1),
-                    axis=1,
-                )
-                truncated_any = np.any(
-                    np.stack([truncated[f"agent_{i}"] for i in range(n_agents)], axis=1),
-                    axis=1,
-                )
+                terminated_any = np.asarray(terminated, dtype=np.bool_)
+                truncated_any = np.asarray(truncated, dtype=np.bool_)
                 done = np.logical_or(terminated_any, truncated_any)
 
                 buffer.add(
                     obs=obs,
                     global_obs=global_obs,
-                    next_global_obs=next_obs.reshape(args.n_envs, -1).astype(np.float32),
+                    next_global_obs=next_obs_for_gae.reshape(args.n_envs, -1).astype(np.float32),
                     actions=actions,
                     log_probs=log_probs,
                     rewards=rewards,
