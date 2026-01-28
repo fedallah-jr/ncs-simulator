@@ -603,7 +603,7 @@ def train(args):
 
     print(f"Starting training for {args.generations} generations...")
     start_time = time.time()
-    best_fitness_all_time = -float("inf")
+    best_eval_all_time = -float("inf")
 
     # 6. Training Loop
     for gen in range(1, args.generations + 1):
@@ -692,8 +692,8 @@ def train(args):
             writer = csv.writer(f)
             writer.writerow([gen, fixed_eval_mean, fixed_eval_std])
 
-        if max_fit > best_fitness_all_time:
-            best_fitness_all_time = max_fit
+        if fixed_eval_mean > best_eval_all_time:
+            best_eval_all_time = fixed_eval_mean
             np.savez(
                 run_dir / "best_model.npz",
                 **build_checkpoint_payload(population_flat[best_idx_generation]),
@@ -748,7 +748,7 @@ def train(args):
     save_config_with_hyperparameters(run_dir, args.config, "openai_es", hyperparams)
     
     print(f"\nTraining complete. Artifacts saved to {run_dir}")
-    print(f"Best fitness achieved: {best_fitness_all_time:.2f}")
+    print(f"Best fixed-seed eval achieved: {best_eval_all_time:.2f}")
 
 
 def parse_args():

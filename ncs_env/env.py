@@ -39,12 +39,13 @@ class RewardDefinition:
             "absolute",
             "absolute_sqrt",
             "estimate_error",
+            "estimate_errorl2",
             "simple",
             "simple_penalty",
         }:
             raise ValueError(
                 "state_error_reward must be 'difference', 'absolute', 'absolute_sqrt', "
-                "'estimate_error', 'simple', or 'simple_penalty'"
+                "'estimate_error', 'estimate_errorl2', 'simple', or 'simple_penalty'"
             )
         if float(self.simple_freshness_decay) < 0.0:
             raise ValueError("simple_freshness_decay must be >= 0")
@@ -98,6 +99,10 @@ class NCS_Env(gym.Env):
         self.system_cfg = self.config.get("system", {})
         self.timestep_duration = 0.01
         self.timestep = 0
+        self._init_rng: Optional[np.random.Generator] = None
+        self._process_rng: Optional[np.random.Generator] = None
+        self._measurement_rng: Optional[np.random.Generator] = None
+        self._network_rng: Optional[np.random.Generator] = None
 
         self.A = np.array(self.system_cfg.get("A"))
         self.B = np.array(self.system_cfg.get("B"))
@@ -120,6 +125,7 @@ class NCS_Env(gym.Env):
 
         # Create a local RNG instance for this environment
         self.np_random, _ = gym.utils.seeding.np_random(seed)
+        self._reset_rng_streams()
 
         self.action_space = spaces.Dict(
             {f"agent_{i}": spaces.Discrete(2) for i in range(n_agents)}
@@ -255,9 +261,9 @@ class NCS_Env(gym.Env):
                 x0 = self._fixed_initial_states[i].copy()
             else:
                 x0 = self._sample_initial_state()
-            # Pass self.np_random to Plant for isolated RNG
             A_i, B_i = agent_matrices[i]
-            self.plants.append(Plant(A_i, B_i, W, x0, rng=self.np_random))
+            process_rng = self._process_rng if self._process_rng is not None else self.np_random
+            self.plants.append(Plant(A_i, B_i, W, x0, rng=process_rng))
 
         self.controllers: List[Controller] = []
         for i in range(self.n_agents):
@@ -296,7 +302,7 @@ class NCS_Env(gym.Env):
             app_ack_enabled=network_cfg.get("app_ack_enabled", False),
             app_ack_packet_size=network_cfg.get("app_ack_packet_size", 30),
             app_ack_max_retries=network_cfg.get("app_ack_max_retries", 3),
-            rng=self.np_random,
+            rng=self._network_rng if self._network_rng is not None else self.np_random,
         )
 
     def _initialize_tracking_structures(self):
@@ -363,11 +369,12 @@ class NCS_Env(gym.Env):
         super().reset(seed=seed)
 
         self.timestep = 0
+        self._reset_rng_streams()
 
         # Update RNG references in subsystems after super().reset()
         # This ensures all subsystems use the same isolated RNG stream
         for idx, plant in enumerate(self.plants):
-            plant.rng = self.np_random
+            plant.rng = self._process_rng if self._process_rng is not None else self.np_random
             if self._fixed_initial_states is not None:
                 x0 = self._fixed_initial_states[idx].copy()
             else:
@@ -377,7 +384,7 @@ class NCS_Env(gym.Env):
         for controller in self.controllers:
             controller.reset(np.zeros(self.state_dim))
 
-        self.network.rng = self.np_random
+        self.network.rng = self._network_rng if self._network_rng is not None else self.np_random
         self.network.reset()
         self._initialize_tracking_structures()
         self._resample_measurement_noise()
@@ -668,7 +675,10 @@ class NCS_Env(gym.Env):
         Sample an initial plant state with magnitude constrained to [scale_min, scale_max]
         per dimension. Sign is chosen uniformly.
         """
-        rng = self.np_random if rng is None else rng
+        if rng is None:
+            rng = self._init_rng if self._init_rng is not None else self.np_random
+        if rng is None:
+            rng = np.random.default_rng()
         scale_min = self.initial_state_scale_min
         scale_max = self.initial_state_scale_max
         magnitudes = rng.uniform(low=scale_min, high=scale_max)
@@ -910,6 +920,9 @@ class NCS_Env(gym.Env):
 
     def _resample_measurement_noise(self) -> None:
         """Sample the per-agent measurement noise covariance for the next step."""
+        rng = self._measurement_rng if self._measurement_rng is not None else self.np_random
+        if rng is None:
+            rng = np.random.default_rng()
         if self.measurement_noise_scale_range is None:
             base_cov = self.measurement_noise_cov
             intensity = self._compute_measurement_noise_intensity(base_cov)
@@ -922,7 +935,7 @@ class NCS_Env(gym.Env):
             return
 
         min_scale, max_scale = self.measurement_noise_scale_range
-        scales = self.np_random.uniform(low=min_scale, high=max_scale, size=self.n_agents)
+        scales = rng.uniform(low=min_scale, high=max_scale, size=self.n_agents)
         covs: List[np.ndarray] = []
         intensities: List[float] = []
         for scale in scales:
@@ -936,9 +949,26 @@ class NCS_Env(gym.Env):
         """Return measurement noise vector (zero when disabled)."""
         if not self._has_measurement_noise:
             return np.zeros(self.state_dim)
-        return self.np_random.multivariate_normal(
+        rng = self._measurement_rng if self._measurement_rng is not None else self.np_random
+        if rng is None:
+            rng = np.random.default_rng()
+        return rng.multivariate_normal(
             np.zeros(self.state_dim), measurement_noise_cov
         )
+
+    def _reset_rng_streams(self) -> None:
+        """Seed per-episode RNG streams from the global environment RNG."""
+        if self.np_random is None:
+            self._init_rng = None
+            self._process_rng = None
+            self._measurement_rng = None
+            self._network_rng = None
+            return
+        seeds = self.np_random.integers(0, 2**32 - 1, size=4, dtype=np.uint32)
+        self._init_rng = np.random.default_rng(int(seeds[0]))
+        self._process_rng = np.random.default_rng(int(seeds[1]))
+        self._measurement_rng = np.random.default_rng(int(seeds[2]))
+        self._network_rng = np.random.default_rng(int(seeds[3]))
 
     def _log_successful_comm(self, agent_idx: int, send_timestamp: int, ack_timestamp: int) -> None:
         """Record ACKed packet for throughput-based penalties."""
@@ -982,10 +1012,18 @@ class NCS_Env(gym.Env):
         weighted = self.state_cost_matrix @ dx
         return float(np.sum(np.abs(weighted)))
 
+    def _compute_estimation_error_l2(self, agent_idx: int, state: np.ndarray) -> float:
+        """Weighted L2 estimation error (x - x_hat)^T Q (x - x_hat)."""
+        estimate = self.controllers[agent_idx].x_hat
+        dx = state - estimate
+        return float(dx.T @ self.state_cost_matrix @ dx)
+
     def _compute_reward_error(self, agent_idx: int, state: np.ndarray) -> float:
         """Return the error used by the selected reward mode."""
         if self.reward_definition.mode == "estimate_error":
             return self._compute_estimation_error(agent_idx, state)
+        if self.reward_definition.mode == "estimate_errorl2":
+            return self._compute_estimation_error_l2(agent_idx, state)
         return self._compute_state_error(state)
 
     def _recent_transmission_count(self, agent_idx: int) -> int:
@@ -1096,6 +1134,8 @@ class NCS_Env(gym.Env):
         elif definition.mode == "absolute_sqrt":
             error_reward = -float(np.sqrt(max(curr_error, 0.0)))
         elif definition.mode == "estimate_error":
+            error_reward = -curr_error
+        elif definition.mode == "estimate_errorl2":
             error_reward = -curr_error
         elif definition.mode == "simple_penalty":
             # Symmetric version of "simple": 0 if measurement delivered, -1 otherwise
