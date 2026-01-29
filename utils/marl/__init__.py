@@ -8,7 +8,14 @@ This package provides shared components used by executable training scripts unde
 from __future__ import annotations
 
 from .buffer import MARLReplayBuffer, MARLBatch
-from .common import select_device, epsilon_by_step, stack_obs, select_actions, run_evaluation
+from .common import (
+    select_device,
+    epsilon_by_step,
+    stack_obs,
+    select_actions,
+    select_actions_batched,
+    run_evaluation,
+)
 from .learners import IQLLearner, VDNLearner, QMIXLearner, QPLEXLearner
 from .networks import (
     CentralValueMLP,
@@ -60,6 +67,7 @@ __all__ = [
     "save_mappo_checkpoint",
     "save_qlearning_checkpoint",
     "select_actions",
+    "select_actions_batched",
     "select_device",
     "stack_obs",
     "VDNLearner",

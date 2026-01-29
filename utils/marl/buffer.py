@@ -95,6 +95,74 @@ class MARLReplayBuffer:
         self._ptr = (self._ptr + 1) % self.capacity
         self._size = min(self._size + 1, self.capacity)
 
+    def add_batch(
+        self,
+        obs: np.ndarray,
+        actions: np.ndarray,
+        rewards: np.ndarray,
+        next_obs: np.ndarray,
+        dones: np.ndarray,
+    ) -> None:
+        if obs.ndim != 3:
+            raise ValueError("obs must have shape (batch, n_agents, obs_dim)")
+        if next_obs.ndim != 3:
+            raise ValueError("next_obs must have shape (batch, n_agents, obs_dim)")
+        if actions.ndim != 2:
+            raise ValueError("actions must have shape (batch, n_agents)")
+        if rewards.ndim != 2:
+            raise ValueError("rewards must have shape (batch, n_agents)")
+        if dones.ndim != 1:
+            raise ValueError("dones must have shape (batch,)")
+
+        batch_size = int(obs.shape[0])
+        if batch_size == 0:
+            return
+        if obs.shape[1:] != (self.n_agents, self.obs_dim):
+            raise ValueError("obs must have shape (batch, n_agents, obs_dim)")
+        if next_obs.shape[1:] != (self.n_agents, self.obs_dim):
+            raise ValueError("next_obs must have shape (batch, n_agents, obs_dim)")
+        if actions.shape[1] != self.n_agents:
+            raise ValueError("actions must have shape (batch, n_agents)")
+        if rewards.shape[1] != self.n_agents:
+            raise ValueError("rewards must have shape (batch, n_agents)")
+        if dones.shape[0] != batch_size:
+            raise ValueError("dones must have shape (batch,)")
+
+        idx = self._ptr
+        end = idx + batch_size
+        obs_flat = obs.reshape(batch_size, -1)
+        next_obs_flat = next_obs.reshape(batch_size, -1)
+
+        if end <= self.capacity:
+            self._obs[idx:end] = obs
+            self._actions[idx:end] = actions
+            self._rewards[idx:end] = rewards
+            self._next_obs[idx:end] = next_obs
+            self._dones[idx:end] = dones.astype(np.float32)
+            self._states[idx:end] = obs_flat
+            self._next_states[idx:end] = next_obs_flat
+        else:
+            first = self.capacity - idx
+            second = batch_size - first
+            self._obs[idx:] = obs[:first]
+            self._actions[idx:] = actions[:first]
+            self._rewards[idx:] = rewards[:first]
+            self._next_obs[idx:] = next_obs[:first]
+            self._dones[idx:] = dones[:first].astype(np.float32)
+            self._states[idx:] = obs_flat[:first]
+            self._next_states[idx:] = next_obs_flat[:first]
+
+            self._obs[:second] = obs[first:]
+            self._actions[:second] = actions[first:]
+            self._rewards[:second] = rewards[first:]
+            self._next_obs[:second] = next_obs[first:]
+            self._dones[:second] = dones[first:].astype(np.float32)
+            self._states[:second] = obs_flat[first:]
+            self._next_states[:second] = next_obs_flat[first:]
+
+        self._ptr = end % self.capacity
+        self._size = min(self._size + batch_size, self.capacity)
+
     def sample(self, batch_size: int, *, obs_normalizer: Optional[RunningObsNormalizer] = None) -> MARLBatch:
         if self._size == 0:
             raise RuntimeError("Cannot sample from an empty buffer")

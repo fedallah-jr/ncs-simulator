@@ -61,8 +61,11 @@ def build_qlearning_hyperparams(
 ) -> Dict[str, Any]:
     hyperparams: Dict[str, Any] = {
         "total_timesteps": args.total_timesteps, "episode_length": args.episode_length,
-        "n_agents": n_agents, "buffer_size": args.buffer_size, "batch_size": args.batch_size,
-        "start_learning": args.start_learning, "train_interval": args.train_interval,
+        "n_agents": n_agents, "n_envs": args.n_envs,
+        "buffer_size": args.buffer_size, "batch_size": args.batch_size,
+        "start_learning": args.start_learning,
+        "episodes_per_update": args.episodes_per_update,
+        "updates_per_batch": args.updates_per_batch,
         "learning_rate": args.learning_rate, "gamma": args.gamma,
         "target_update_interval": args.target_update_interval,
         "grad_clip_norm": args.grad_clip_norm, "double_q": args.double_q,

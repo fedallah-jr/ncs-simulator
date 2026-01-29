@@ -87,6 +87,66 @@ def select_actions(
     return actions
 
 
+@torch.no_grad()
+def select_actions_batched(
+    agent: Union[MLPAgent, DuelingMLPAgent, Sequence[Union[MLPAgent, DuelingMLPAgent]]],
+    obs: np.ndarray,
+    n_envs: int,
+    n_agents: int,
+    n_actions: int,
+    epsilon: float,
+    rng: np.random.Generator,
+    device: torch.device,
+    use_agent_id: bool,
+) -> np.ndarray:
+    """
+    Select actions using epsilon-greedy policy for batched vector environments.
+
+    Args:
+        agent: The Q-network agent
+        obs: Observations of shape (n_envs, n_agents, obs_dim)
+        n_envs: Number of parallel environments
+        n_agents: Number of agents
+        n_actions: Number of possible actions
+        epsilon: Exploration probability
+        rng: Random number generator
+        device: Torch device
+        use_agent_id: Whether to append agent ID to observations
+
+    Returns:
+        Actions array of shape (n_envs, n_agents)
+    """
+    obs_t = torch.as_tensor(obs, device=device, dtype=torch.float32)
+    if obs_t.ndim != 3:
+        raise ValueError("obs must have shape (n_envs, n_agents, obs_dim)")
+    if obs_t.shape[0] != n_envs or obs_t.shape[1] != n_agents:
+        raise ValueError("obs leading dimensions must match n_envs and n_agents")
+
+    if use_agent_id:
+        obs_t = append_agent_id(obs_t, n_agents)
+
+    if isinstance(agent, (MLPAgent, DuelingMLPAgent)):
+        q = agent(obs_t.reshape(n_envs * n_agents, -1))
+        q = q.view(n_envs, n_agents, n_actions)
+    else:
+        if len(agent) != n_agents:
+            raise ValueError("Independent agents sequence length must equal n_agents")
+        q_per_agent: list[torch.Tensor] = []
+        for agent_idx, agent_net in enumerate(agent):
+            q_per_agent.append(agent_net(obs_t[:, agent_idx, :]))
+        q = torch.stack(q_per_agent, dim=1)
+
+    greedy = q.argmax(dim=-1).cpu().numpy().astype(np.int64)
+    actions = greedy.copy()
+    explore_mask = rng.random((n_envs, n_agents)) < float(epsilon)
+    if np.any(explore_mask):
+        random_actions = rng.integers(
+            0, n_actions, size=int(explore_mask.sum()), endpoint=False, dtype=np.int64
+        )
+        actions[explore_mask] = random_actions
+    return actions
+
+
 def run_evaluation(
     env: Any,
     agent: Union[MLPAgent, Sequence[MLPAgent]],

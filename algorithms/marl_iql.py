@@ -23,15 +23,17 @@ from utils.marl import (
     add_team_reward_arg,
     save_qlearning_checkpoint,
     build_qlearning_hyperparams,
+    select_actions_batched,
+    stack_obs,
 )
-from utils.marl.common import epsilon_by_step, stack_obs, select_actions
+from utils.marl.common import epsilon_by_step
 from utils.marl_training import (
     setup_device_and_rng,
     load_config_with_overrides,
-    create_environments,
     create_obs_normalizer,
     print_run_summary,
 )
+from utils.marl.vector_env import create_async_vector_env, make_env, stack_vector_obs
 from utils.reward_normalization import reset_shared_running_normalizers
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters, BestModelTracker
 
@@ -57,17 +59,36 @@ def main() -> None:
     rewards_csv_path = run_dir / "training_rewards.csv"
     eval_csv_path = run_dir / "evaluation_rewards.csv"
 
-    env, eval_env = create_environments(
+    if args.n_envs <= 0:
+        raise ValueError("n_envs must be positive")
+    if args.episodes_per_update is None:
+        args.episodes_per_update = args.n_envs
+    if args.episodes_per_update <= 0:
+        raise ValueError("episodes_per_update must be positive")
+    if args.updates_per_batch is None:
+        args.updates_per_batch = args.episodes_per_update
+    if args.updates_per_batch <= 0:
+        raise ValueError("updates_per_batch must be positive")
+
+    env, env_seeds = create_async_vector_env(
+        n_envs=args.n_envs,
         n_agents=n_agents,
         episode_length=args.episode_length,
         config_path_str=config_path_str,
         seed=args.seed,
-        eval_reward_override=eval_reward_override,
-        eval_termination_override=eval_termination_override,
+    )
+    eval_env = make_env(
+        n_agents=n_agents,
+        episode_length=args.episode_length,
+        config_path_str=config_path_str,
+        seed=args.seed,
+        reward_override=eval_reward_override,
+        termination_override=eval_termination_override,
+        freeze_running_normalization=True,
     )
 
-    obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
-    n_actions = int(env.action_space.spaces["agent_0"].n)
+    obs_dim = int(env.single_observation_space.spaces["agent_0"].shape[0])
+    n_actions = int(env.single_action_space.spaces["agent_0"].n)
     input_dim = obs_dim + (n_agents if use_agent_id else 0)
     obs_normalizer = create_obs_normalizer(
         obs_dim, args.normalize_obs, args.obs_norm_clip, args.obs_norm_eps
@@ -142,96 +163,127 @@ def main() -> None:
         eval_writer = csv.writer(eval_f)
         eval_writer.writerow(["step", "mean_reward", "std_reward"])
 
+        obs_dict, _info = env.reset(seed=env_seeds)
+        obs_raw = stack_vector_obs(obs_dict, n_agents)
+
+        episode_reward_sums = np.zeros((args.n_envs,), dtype=np.float32)
+        episodes_since_update = 0
+
         while global_step < args.total_timesteps:
-            episode_seed = None if args.seed is None else args.seed + episode
-            obs_dict, _info = env.reset(seed=episode_seed)
-            obs_raw = stack_obs(obs_dict, n_agents)
+            if obs_normalizer is not None:
+                obs = obs_normalizer.normalize(obs_raw, update=True)
+            else:
+                obs = obs_raw
+            epsilon = epsilon_by_step(
+                global_step, args.epsilon_start, args.epsilon_end, args.epsilon_decay_steps
+            )
+            actions = select_actions_batched(
+                agent=learner.agent,
+                obs=obs,
+                n_envs=args.n_envs,
+                n_agents=n_agents,
+                n_actions=n_actions,
+                epsilon=epsilon,
+                rng=rng,
+                device=device,
+                use_agent_id=use_agent_id,
+            )
+            action_dict = {f"agent_{i}": actions[:, i] for i in range(n_agents)}
+            next_obs_dict, rewards_arr, terminated, truncated, infos = env.step(action_dict)
+            next_obs_raw = stack_vector_obs(next_obs_dict, n_agents)
 
-            episode_reward_sum = 0.0
-            done = False
-            while not done and global_step < args.total_timesteps:
-                if obs_normalizer is not None:
-                    obs = obs_normalizer.normalize(obs_raw, update=True)
-                else:
-                    obs = obs_raw
-                epsilon = epsilon_by_step(global_step, args.epsilon_start, args.epsilon_end, args.epsilon_decay_steps)
-                actions = select_actions(
-                    agent=learner.agent,
-                    obs=obs,
-                    n_agents=n_agents,
-                    n_actions=n_actions,
-                    epsilon=epsilon,
-                    rng=rng,
-                    device=device,
-                    use_agent_id=use_agent_id,
-                )
-                action_dict = {f"agent_{i}": int(actions[i]) for i in range(n_agents)}
-                next_obs_dict, rewards_dict, terminated, truncated, _infos = env.step(action_dict)
-                next_obs_raw = stack_obs(next_obs_dict, n_agents)
-                raw_rewards = np.asarray([rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32)
-                if args.team_reward:
-                    team_reward = float(raw_rewards.sum())
-                    rewards = np.full(n_agents, team_reward, dtype=np.float32)
-                    episode_reward_sum += team_reward
-                else:
-                    rewards = raw_rewards
-                    episode_reward_sum += float(raw_rewards.sum())
-                # Distinguish termination (true end) from truncation (time limit)
-                # Only terminated should zero out bootstrap; truncated should still bootstrap
-                term = any(terminated[f"agent_{i}"] for i in range(n_agents))
-                trunc = any(truncated[f"agent_{i}"] for i in range(n_agents))
-                done = term or trunc  # For episode reset logic
+            raw_rewards = np.asarray(rewards_arr, dtype=np.float32)
+            if args.team_reward:
+                team_rewards = raw_rewards.sum(axis=1)
+                rewards = np.repeat(team_rewards[:, None], n_agents, axis=1).astype(np.float32)
+                episode_reward_sums += team_rewards
+            else:
+                rewards = raw_rewards
+                episode_reward_sums += raw_rewards.sum(axis=1)
 
-                buffer.add(
-                    obs=obs_raw,
-                    actions=actions.astype(np.int64),
-                    rewards=rewards,
-                    next_obs=next_obs_raw,
-                    done=term,  # Store only terminated for correct bootstrapping
-                )
+            terminated_any = np.asarray(terminated, dtype=np.bool_)
+            truncated_any = np.asarray(truncated, dtype=np.bool_)
+            done_reset = np.logical_or(terminated_any, truncated_any)
 
-                obs_raw = next_obs_raw
-                global_step += 1
+            next_obs_for_buffer = next_obs_raw
+            if infos.get("final_obs") is not None:
+                final_obs = infos["final_obs"]
+                done_indices = np.where(done_reset)[0]
+                if len(done_indices) > 0:
+                    next_obs_for_buffer = next_obs_raw.copy()
+                    for env_idx in done_indices:
+                        final_env_obs = final_obs[env_idx]
+                        if final_env_obs is not None:
+                            next_obs_for_buffer[env_idx] = stack_obs(final_env_obs, n_agents)
 
-                if len(buffer) >= args.start_learning and global_step % args.train_interval == 0:
-                    batch = buffer.sample(args.batch_size, obs_normalizer=obs_normalizer)
-                    learner.update(batch)
-
-                # Periodic evaluation
-                if global_step - last_eval_step >= args.eval_freq:
-                    mean_eval_reward, std_eval_reward, _ = run_evaluation(
-                        env=eval_env,
-                        agent=learner.agent,
-                        n_agents=n_agents,
-                        n_actions=n_actions,
-                        use_agent_id=use_agent_id,
-                        device=device,
-                        n_episodes=args.n_eval_episodes,
-                        seed=args.seed,
-                        obs_normalizer=obs_normalizer,
-                    )
-                    eval_writer.writerow([global_step, mean_eval_reward, std_eval_reward])
-                    eval_f.flush()
-
-                    # Save best model based on evaluation reward
-                    best_model_tracker.update(
-                        "eval", mean_eval_reward, run_dir / "best_model.pt", save_checkpoint
-                    )
-
-                    print(f"[IQL] Eval at step {global_step}: mean_reward={mean_eval_reward:.3f} std={std_eval_reward:.3f}")
-                    last_eval_step = global_step
-
-            train_writer.writerow([episode, episode_reward_sum, epsilon, global_step])
-            train_f.flush()
-
-            # Save best model based on training reward
-            best_model_tracker.update(
-                "train", episode_reward_sum, run_dir / "best_train_model.pt", save_checkpoint
+            buffer.add_batch(
+                obs=obs_raw,
+                actions=actions.astype(np.int64),
+                rewards=rewards,
+                next_obs=next_obs_for_buffer,
+                dones=terminated_any,
             )
 
-            if episode % args.log_interval == 0:
-                print(f"[IQL] episode={episode} steps={global_step} reward_sum={episode_reward_sum:.3f} eps={epsilon:.3f}")
-            episode += 1
+            obs_raw = next_obs_raw
+            global_step += args.n_envs
+
+            if np.any(done_reset):
+                done_indices = np.where(done_reset)[0]
+                for env_idx in done_indices:
+                    train_writer.writerow(
+                        [episode, float(episode_reward_sums[env_idx]), float(epsilon), global_step]
+                    )
+                    train_f.flush()
+
+                    best_model_tracker.update(
+                        "train",
+                        float(episode_reward_sums[env_idx]),
+                        run_dir / "best_train_model.pt",
+                        save_checkpoint,
+                    )
+
+                    if episode % args.log_interval == 0:
+                        print(
+                            f"[IQL] episode={episode} steps={global_step} "
+                            f"reward_sum={episode_reward_sums[env_idx]:.3f} eps={epsilon:.3f}"
+                        )
+                    episode += 1
+                    episodes_since_update += 1
+                    episode_reward_sums[env_idx] = 0.0
+
+                while episodes_since_update >= args.episodes_per_update:
+                    if len(buffer) >= args.start_learning:
+                        for _ in range(args.updates_per_batch):
+                            batch = buffer.sample(args.batch_size, obs_normalizer=obs_normalizer)
+                            learner.update(batch)
+                    episodes_since_update -= args.episodes_per_update
+
+            # Periodic evaluation
+            if global_step - last_eval_step >= args.eval_freq:
+                mean_eval_reward, std_eval_reward, _ = run_evaluation(
+                    env=eval_env,
+                    agent=learner.agent,
+                    n_agents=n_agents,
+                    n_actions=n_actions,
+                    use_agent_id=use_agent_id,
+                    device=device,
+                    n_episodes=args.n_eval_episodes,
+                    seed=args.seed,
+                    obs_normalizer=obs_normalizer,
+                )
+                eval_writer.writerow([global_step, mean_eval_reward, std_eval_reward])
+                eval_f.flush()
+
+                # Save best model based on evaluation reward
+                best_model_tracker.update(
+                    "eval", mean_eval_reward, run_dir / "best_model.pt", save_checkpoint
+                )
+
+                print(
+                    f"[IQL] Eval at step {global_step}: "
+                    f"mean_reward={mean_eval_reward:.3f} std={std_eval_reward:.3f}"
+                )
+                last_eval_step = global_step
 
     latest_path = run_dir / "latest_model.pt"
     save_checkpoint(latest_path)
