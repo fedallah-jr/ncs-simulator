@@ -62,14 +62,8 @@ def main() -> None:
 
     if args.n_envs <= 0:
         raise ValueError("n_envs must be positive")
-    if args.episodes_per_update is None:
-        args.episodes_per_update = args.n_envs
-    if args.episodes_per_update <= 0:
-        raise ValueError("episodes_per_update must be positive")
-    if args.updates_per_batch is None:
-        args.updates_per_batch = args.episodes_per_update
-    if args.updates_per_batch <= 0:
-        raise ValueError("updates_per_batch must be positive")
+    if args.train_interval <= 0:
+        raise ValueError("train_interval must be positive")
 
     env, env_seeds = create_async_vector_env(
         n_envs=args.n_envs,
@@ -183,7 +177,7 @@ def main() -> None:
         obs_raw = stack_vector_obs(obs_dict, n_agents)
 
         episode_reward_sums = np.zeros((args.n_envs,), dtype=np.float32)
-        episodes_since_update = 0
+        vector_step = 0
 
         while global_step < args.total_timesteps:
             if obs_normalizer is not None:
@@ -236,6 +230,7 @@ def main() -> None:
 
             obs_raw = next_obs_raw
             global_step += args.n_envs
+            vector_step += 1
 
             if np.any(done_reset):
                 done_indices = np.where(done_reset)[0]
@@ -258,15 +253,11 @@ def main() -> None:
                             f"reward_sum={episode_reward_sums[env_idx]:.3f} eps={epsilon:.3f}"
                         )
                     episode += 1
-                    episodes_since_update += 1
                     episode_reward_sums[env_idx] = 0.0
 
-                while episodes_since_update >= args.episodes_per_update:
-                    if len(buffer) >= args.start_learning:
-                        for _ in range(args.updates_per_batch):
-                            batch = buffer.sample(args.batch_size, obs_normalizer=obs_normalizer)
-                            learner.update(batch)
-                    episodes_since_update -= args.episodes_per_update
+            if len(buffer) >= args.start_learning and vector_step % args.train_interval == 0:
+                batch = buffer.sample(args.batch_size, obs_normalizer=obs_normalizer)
+                learner.update(batch)
 
             # Periodic evaluation
             if global_step - last_eval_step >= args.eval_freq:
