@@ -38,8 +38,8 @@ class MARLReplayBuffer:
         capacity: int,
         n_agents: int,
         obs_dim: int,
-        state_dim: Optional[int] = None,
         device: torch.device,
+        state_dim: Optional[int] = None,
         rng: Optional[np.random.Generator] = None,
     ) -> None:
         if capacity <= 0:
