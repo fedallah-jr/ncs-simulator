@@ -71,6 +71,7 @@ def main() -> None:
         episode_length=args.episode_length,
         config_path_str=config_path_str,
         seed=args.seed,
+        global_state_enabled=True,
     )
     eval_env = make_env(
         n_agents=n_agents,
@@ -80,6 +81,7 @@ def main() -> None:
         reward_override=eval_reward_override,
         termination_override=eval_termination_override,
         freeze_running_normalization=True,
+        global_state_enabled=True,
     )
 
     obs_dim = int(env.single_observation_space.spaces["agent_0"].shape[0])
@@ -88,7 +90,12 @@ def main() -> None:
         obs_dim, args.normalize_obs, args.obs_norm_clip, args.obs_norm_eps
     )
     input_dim = obs_dim + (n_agents if use_agent_id else 0)
-    state_dim = n_agents * obs_dim
+    obs_dict, info = env.reset(seed=env_seeds)
+    obs_raw = stack_vector_obs(obs_dict, n_agents)
+    global_state_raw = np.asarray(info.get("global_state"), dtype=np.float32)
+    if global_state_raw.ndim != 2:
+        raise ValueError("global_state must have shape (n_envs, state_dim)")
+    state_dim = int(global_state_raw.shape[-1])
 
     # Select network class based on --dueling flag
     AgentClass = DuelingMLPAgent if args.dueling else MLPAgent
@@ -130,6 +137,7 @@ def main() -> None:
         capacity=args.buffer_size,
         n_agents=n_agents,
         obs_dim=obs_dim,
+        state_dim=state_dim,
         device=device,
         rng=rng,
     )
@@ -173,9 +181,6 @@ def main() -> None:
         eval_writer = csv.writer(eval_f)
         eval_writer.writerow(["step", "mean_reward", "std_reward"])
 
-        obs_dict, _info = env.reset(seed=env_seeds)
-        obs_raw = stack_vector_obs(obs_dict, n_agents)
-
         episode_reward_sums = np.zeros((args.n_envs,), dtype=np.float32)
         vector_step = 0
 
@@ -201,6 +206,7 @@ def main() -> None:
             action_dict = {f"agent_{i}": actions[:, i] for i in range(n_agents)}
             next_obs_dict, rewards_arr, terminated, truncated, infos = env.step(action_dict)
             next_obs_raw = stack_vector_obs(next_obs_dict, n_agents)
+            next_global_state_raw = np.asarray(infos.get("global_state"), dtype=np.float32)
 
             rewards = np.asarray(rewards_arr, dtype=np.float32)
             episode_reward_sums += rewards.sum(axis=1)
@@ -210,6 +216,7 @@ def main() -> None:
             done_reset = np.logical_or(terminated_any, truncated_any)
 
             next_obs_for_buffer = next_obs_raw
+            next_global_state_for_buffer = next_global_state_raw
             if infos.get("final_obs") is not None:
                 final_obs = infos["final_obs"]
                 done_indices = np.where(done_reset)[0]
@@ -219,6 +226,15 @@ def main() -> None:
                         final_env_obs = final_obs[env_idx]
                         if final_env_obs is not None:
                             next_obs_for_buffer[env_idx] = stack_obs(final_env_obs, n_agents)
+                    final_info = infos.get("final_info")
+                    if final_info is not None:
+                        final_global = final_info.get("global_state")
+                        if final_global is not None:
+                            next_global_state_for_buffer = next_global_state_raw.copy()
+                            for env_idx in done_indices:
+                                final_env_state = final_global[env_idx]
+                                if final_env_state is not None:
+                                    next_global_state_for_buffer[env_idx] = final_env_state
 
             buffer.add_batch(
                 obs=obs_raw,
@@ -226,9 +242,12 @@ def main() -> None:
                 rewards=rewards,
                 next_obs=next_obs_for_buffer,
                 dones=terminated_any,
+                states=global_state_raw,
+                next_states=next_global_state_for_buffer,
             )
 
             obs_raw = next_obs_raw
+            global_state_raw = next_global_state_raw
             global_step += args.n_envs
             vector_step += 1
 

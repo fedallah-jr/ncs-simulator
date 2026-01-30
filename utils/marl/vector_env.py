@@ -16,6 +16,7 @@ def make_env(
     reward_override: Optional[Dict[str, Any]] = None,
     termination_override: Optional[Dict[str, Any]] = None,
     freeze_running_normalization: bool = False,
+    global_state_enabled: bool = False,
 ) -> "NCS_Env":
     from ncs_env.env import NCS_Env
 
@@ -27,6 +28,7 @@ def make_env(
         reward_override=reward_override,
         termination_override=termination_override,
         freeze_running_normalization=freeze_running_normalization,
+        global_state_enabled=global_state_enabled,
     )
 
 
@@ -35,9 +37,16 @@ def make_vector_env_fn(
     episode_length: int,
     config_path_str: Optional[str],
     seed: Optional[int],
+    global_state_enabled: bool = False,
 ) -> Callable[[], "VectorEnvAdapter"]:
     def _thunk() -> "VectorEnvAdapter":
-        env = make_env(n_agents, episode_length, config_path_str, seed)
+        env = make_env(
+            n_agents,
+            episode_length,
+            config_path_str,
+            seed,
+            global_state_enabled=global_state_enabled,
+        )
         return VectorEnvAdapter(env, n_agents)
 
     return _thunk
@@ -81,6 +90,7 @@ def create_async_vector_env(
     episode_length: int,
     config_path_str: Optional[str],
     seed: Optional[int],
+    global_state_enabled: bool = False,
 ) -> Tuple[AsyncVectorEnv, Optional[List[int]]]:
     if n_envs <= 0:
         raise ValueError("n_envs must be positive")
@@ -98,6 +108,7 @@ def create_async_vector_env(
                 episode_length=episode_length,
                 config_path_str=config_path_str,
                 seed=env_seed,
+                global_state_enabled=global_state_enabled,
             )
         )
 

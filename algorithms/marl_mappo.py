@@ -47,6 +47,7 @@ def _make_env(
     reward_override: Optional[Dict[str, Any]] = None,
     termination_override: Optional[Dict[str, Any]] = None,
     freeze_running_normalization: bool = False,
+    global_state_enabled: bool = False,
 ) -> "NCS_Env":
     from ncs_env.env import NCS_Env
 
@@ -58,6 +59,7 @@ def _make_env(
         reward_override=reward_override,
         termination_override=termination_override,
         freeze_running_normalization=freeze_running_normalization,
+        global_state_enabled=global_state_enabled,
     )
 
 
@@ -66,9 +68,16 @@ def _make_vector_env_fn(
     episode_length: int,
     config_path_str: Optional[str],
     seed: Optional[int],
+    global_state_enabled: bool = False,
 ) -> Any:
     def _thunk() -> "_VectorEnvAdapter":
-        env = _make_env(n_agents, episode_length, config_path_str, seed)
+        env = _make_env(
+            n_agents,
+            episode_length,
+            config_path_str,
+            seed,
+            global_state_enabled=global_state_enabled,
+        )
         return _VectorEnvAdapter(env, n_agents)
 
     return _thunk
@@ -114,6 +123,7 @@ class MAPPORolloutBuffer:
         n_agents: int,
         obs_dim: int,
         value_dim: int,
+        global_obs_dim: Optional[int] = None,
     ) -> None:
         if n_steps <= 0:
             raise ValueError("n_steps must be positive")
@@ -126,7 +136,7 @@ class MAPPORolloutBuffer:
         self.value_dim = int(value_dim)
         if self.value_dim <= 0:
             raise ValueError("value_dim must be positive")
-        self.global_obs_dim = self.n_agents * self.obs_dim
+        self.global_obs_dim = int(global_obs_dim) if global_obs_dim is not None else self.n_agents * self.obs_dim
         self.reset()
 
     def reset(self) -> None:
@@ -265,6 +275,7 @@ def main() -> None:
                 args.episode_length,
                 config_path_str,
                 seed,
+                global_state_enabled=True,
             )
         )
     env = AsyncVectorEnv(env_fns, autoreset_mode=AutoresetMode.SAME_STEP)
@@ -276,12 +287,19 @@ def main() -> None:
         reward_override=eval_reward_override,
         termination_override=eval_termination_override,
         freeze_running_normalization=True,
+        global_state_enabled=True,
     )
 
     obs_dim = int(env.single_observation_space.spaces["agent_0"].shape[0])
     n_actions = int(env.single_action_space.spaces["agent_0"].n)
+    obs_dict, info = env.reset(seed=env_seeds)
+    obs_raw = _stack_vector_obs(obs_dict, n_agents)
+    global_state_raw = np.asarray(info.get("global_state"), dtype=np.float32)
+    if global_state_raw.ndim != 2:
+        raise ValueError("global_state must have shape (n_envs, state_dim)")
+    global_state_dim = int(global_state_raw.shape[-1])
     actor_input_dim = obs_dim + (n_agents if use_agent_id else 0)
-    critic_input_dim = obs_dim * n_agents
+    critic_input_dim = global_state_dim
     value_dim = 1 if args.team_reward else n_agents
     obs_normalizer = create_obs_normalizer(
         obs_dim, args.normalize_obs, args.obs_norm_clip, args.obs_norm_eps
@@ -340,13 +358,18 @@ def main() -> None:
         eval_writer = csv.writer(eval_f)
         eval_writer.writerow(["step", "mean_reward", "std_reward"])
 
-        obs_dict, _info = env.reset(seed=env_seeds)
-        obs_raw = _stack_vector_obs(obs_dict, n_agents)
         episode_reward_sums = np.zeros((args.n_envs,), dtype=np.float32)
         episode_lengths = np.zeros((args.n_envs,), dtype=np.int64)
 
         while global_step < args.total_timesteps:
-            buffer = MAPPORolloutBuffer(args.n_steps, args.n_envs, n_agents, obs_dim, value_dim)
+            buffer = MAPPORolloutBuffer(
+                args.n_steps,
+                args.n_envs,
+                n_agents,
+                obs_dim,
+                value_dim,
+                global_obs_dim=global_state_dim,
+            )
 
             for _ in range(args.n_steps):
                 if global_step >= args.total_timesteps:
@@ -368,7 +391,7 @@ def main() -> None:
                     actions_t = dist.sample()
                     log_probs_t = dist.log_prob(actions_t)
 
-                    global_obs = obs.reshape(args.n_envs, -1).astype(np.float32)
+                    global_obs = global_state_raw.astype(np.float32)
                     global_obs_t = torch.as_tensor(global_obs, device=device, dtype=torch.float32)
                     values_t = critic(global_obs_t)
 
@@ -379,7 +402,9 @@ def main() -> None:
                 action_dict = {f"agent_{i}": actions[:, i] for i in range(n_agents)}
                 next_obs_dict, rewards_arr, terminated, truncated, infos = env.step(action_dict)
                 next_obs_raw = _stack_vector_obs(next_obs_dict, n_agents)
+                next_global_state_raw = np.asarray(infos.get("global_state"), dtype=np.float32)
                 next_obs_for_gae_raw = next_obs_raw
+                next_global_state_for_gae = next_global_state_raw
                 if infos.get("final_obs") is not None:
                     final_obs = infos["final_obs"]
                     done_indices = np.where(np.logical_or(terminated, truncated))[0]
@@ -391,6 +416,15 @@ def main() -> None:
                                 next_obs_for_gae_raw[env_idx] = stack_obs(
                                     final_env_obs, n_agents
                                 )
+                        final_info = infos.get("final_info")
+                        if final_info is not None:
+                            final_global = final_info.get("global_state")
+                            if final_global is not None:
+                                next_global_state_for_gae = next_global_state_raw.copy()
+                                for env_idx in done_indices:
+                                    final_env_state = final_global[env_idx]
+                                    if final_env_state is not None:
+                                        next_global_state_for_gae[env_idx] = final_env_state
 
                 if obs_normalizer is not None:
                     next_obs_for_gae = obs_normalizer.normalize(
@@ -412,7 +446,7 @@ def main() -> None:
                 buffer.add(
                     obs=obs,
                     global_obs=global_obs,
-                    next_global_obs=next_obs_for_gae.reshape(args.n_envs, -1).astype(np.float32),
+                    next_global_obs=next_global_state_for_gae.astype(np.float32),
                     actions=actions,
                     log_probs=log_probs,
                     rewards=rewards,
@@ -450,6 +484,7 @@ def main() -> None:
                         episode_lengths[env_idx] = 0
 
                 obs_raw = next_obs_raw
+                global_state_raw = next_global_state_raw
 
                 if global_step - last_eval_step >= args.eval_freq:
                     mean_eval_reward, std_eval_reward, _ = run_evaluation(

@@ -29,7 +29,7 @@ class MARLReplayBuffer:
       rewards:    (buffer, n_agents)
       next_obs:   (buffer, n_agents, obs_dim)
       dones:      (buffer,)
-      states:     (buffer, state_dim)      where state_dim = n_agents * obs_dim
+      states:     (buffer, state_dim)
       next_states:(buffer, state_dim)
     """
 
@@ -38,6 +38,7 @@ class MARLReplayBuffer:
         capacity: int,
         n_agents: int,
         obs_dim: int,
+        state_dim: Optional[int] = None,
         device: torch.device,
         rng: Optional[np.random.Generator] = None,
     ) -> None:
@@ -48,7 +49,8 @@ class MARLReplayBuffer:
         self.capacity = int(capacity)
         self.n_agents = int(n_agents)
         self.obs_dim = int(obs_dim)
-        self.state_dim = self.n_agents * self.obs_dim
+        self.state_dim = int(state_dim) if state_dim is not None else self.n_agents * self.obs_dim
+        self._state_dim_from_obs = self.state_dim == self.n_agents * self.obs_dim
         self.device = device
         self.rng = rng if rng is not None else np.random.default_rng()
 
@@ -73,6 +75,9 @@ class MARLReplayBuffer:
         rewards: np.ndarray,
         next_obs: np.ndarray,
         done: bool,
+        *,
+        states: Optional[np.ndarray] = None,
+        next_states: Optional[np.ndarray] = None,
     ) -> None:
         if obs.shape != (self.n_agents, self.obs_dim):
             raise ValueError("obs must have shape (n_agents, obs_dim)")
@@ -89,8 +94,15 @@ class MARLReplayBuffer:
         self._rewards[idx] = rewards
         self._next_obs[idx] = next_obs
         self._dones[idx] = float(done)
-        self._states[idx] = obs.reshape(-1)
-        self._next_states[idx] = next_obs.reshape(-1)
+        if states is None or next_states is None:
+            if not self._state_dim_from_obs:
+                raise ValueError("states and next_states must be provided when state_dim differs from n_agents * obs_dim")
+            states = obs.reshape(-1)
+            next_states = next_obs.reshape(-1)
+        if states.shape != (self.state_dim,) or next_states.shape != (self.state_dim,):
+            raise ValueError("states and next_states must have shape (state_dim,)")
+        self._states[idx] = states
+        self._next_states[idx] = next_states
 
         self._ptr = (self._ptr + 1) % self.capacity
         self._size = min(self._size + 1, self.capacity)
@@ -102,6 +114,9 @@ class MARLReplayBuffer:
         rewards: np.ndarray,
         next_obs: np.ndarray,
         dones: np.ndarray,
+        *,
+        states: Optional[np.ndarray] = None,
+        next_states: Optional[np.ndarray] = None,
     ) -> None:
         if obs.ndim != 3:
             raise ValueError("obs must have shape (batch, n_agents, obs_dim)")
@@ -132,6 +147,13 @@ class MARLReplayBuffer:
         end = idx + batch_size
         obs_flat = obs.reshape(batch_size, -1)
         next_obs_flat = next_obs.reshape(batch_size, -1)
+        if states is None or next_states is None:
+            if not self._state_dim_from_obs:
+                raise ValueError("states and next_states must be provided when state_dim differs from n_agents * obs_dim")
+            states = obs_flat
+            next_states = next_obs_flat
+        if states.shape != (batch_size, self.state_dim) or next_states.shape != (batch_size, self.state_dim):
+            raise ValueError("states and next_states must have shape (batch, state_dim)")
 
         if end <= self.capacity:
             self._obs[idx:end] = obs
@@ -139,8 +161,8 @@ class MARLReplayBuffer:
             self._rewards[idx:end] = rewards
             self._next_obs[idx:end] = next_obs
             self._dones[idx:end] = dones.astype(np.float32)
-            self._states[idx:end] = obs_flat
-            self._next_states[idx:end] = next_obs_flat
+            self._states[idx:end] = states
+            self._next_states[idx:end] = next_states
         else:
             first = self.capacity - idx
             second = batch_size - first
@@ -149,16 +171,16 @@ class MARLReplayBuffer:
             self._rewards[idx:] = rewards[:first]
             self._next_obs[idx:] = next_obs[:first]
             self._dones[idx:] = dones[:first].astype(np.float32)
-            self._states[idx:] = obs_flat[:first]
-            self._next_states[idx:] = next_obs_flat[:first]
+            self._states[idx:] = states[:first]
+            self._next_states[idx:] = next_states[:first]
 
             self._obs[:second] = obs[first:]
             self._actions[:second] = actions[first:]
             self._rewards[:second] = rewards[first:]
             self._next_obs[:second] = next_obs[first:]
             self._dones[:second] = dones[first:].astype(np.float32)
-            self._states[:second] = obs_flat[first:]
-            self._next_states[:second] = next_obs_flat[first:]
+            self._states[:second] = states[first:]
+            self._next_states[:second] = next_states[first:]
 
         self._ptr = end % self.capacity
         self._size = min(self._size + batch_size, self.capacity)
@@ -175,8 +197,12 @@ class MARLReplayBuffer:
             # Normalize on sample to keep stats consistent across the batch.
             obs = obs_normalizer.normalize(obs, update=False)
             next_obs = obs_normalizer.normalize(next_obs, update=False)
-            states = obs.reshape(obs.shape[0], -1)
-            next_states = next_obs.reshape(next_obs.shape[0], -1)
+            if self._state_dim_from_obs:
+                states = obs.reshape(obs.shape[0], -1)
+                next_states = next_obs.reshape(next_obs.shape[0], -1)
+            else:
+                states = self._states[indices]
+                next_states = self._next_states[indices]
         else:
             states = self._states[indices]
             next_states = self._next_states[indices]

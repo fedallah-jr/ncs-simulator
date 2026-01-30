@@ -85,6 +85,7 @@ class NCS_Env(gym.Env):
         termination_override: Optional[Dict[str, Any]] = None,
         freeze_running_normalization: bool = False,
         track_true_goodput: bool = False,
+        global_state_enabled: bool = False,
     ):
         super().__init__()
         self.n_agents = n_agents
@@ -93,6 +94,9 @@ class NCS_Env(gym.Env):
         self.termination_override = termination_override
         self.freeze_running_normalization = bool(freeze_running_normalization)
         self.track_true_goodput = bool(track_true_goodput)
+        self.global_state_enabled = bool(global_state_enabled)
+        if self.global_state_enabled:
+            self.track_true_goodput = True
 
         self.config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
         self.config = load_config(str(self.config_path))
@@ -343,6 +347,9 @@ class NCS_Env(gym.Env):
             self.true_goodput_seen = None
         self.comm_success_records: List[deque] = [deque() for _ in range(self.n_agents)]
         self.last_measurements: List[np.ndarray] = [
+            np.zeros(self.state_dim, dtype=float) for _ in range(self.n_agents)
+        ]
+        self.last_sensor_measurements: List[np.ndarray] = [
             np.zeros(self.state_dim, dtype=float) for _ in range(self.n_agents)
         ]
         self.reward_component_stats: Dict[str, Dict[str, float]] = {
@@ -1175,6 +1182,8 @@ class NCS_Env(gym.Env):
         current_throughputs: List[float] = []
         quantized_states: List[np.ndarray] = []
 
+        self._update_sensor_measurements()
+
         for i in range(self.n_agents):
             # decision_history maxlen may be larger than history_window, so use islice
             dh = self.decision_history[i]
@@ -1231,6 +1240,60 @@ class NCS_Env(gym.Env):
                 continue
             quantized_state = self._quantize_state(self.plants[i].get_state())
             self.state_history[i].append(quantized_state)
+
+    def _update_sensor_measurements(self) -> None:
+        if not self.global_state_enabled:
+            return
+        measurements: List[np.ndarray] = []
+        for i in range(self.n_agents):
+            state = self.plants[i].get_state()
+            measurement_noise_cov = self.current_measurement_noise_covs[i]
+            if self._has_measurement_noise:
+                measurement = state + self._sample_measurement_noise(measurement_noise_cov)
+            else:
+                measurement = state
+            measurements.append(measurement)
+        self.last_sensor_measurements = measurements
+
+    def _get_global_state(self) -> np.ndarray:
+        noise_intensity = np.asarray(self.current_measurement_noise_intensities, dtype=np.float32)
+        perceived_goodput = np.asarray(
+            [self._compute_observed_goodput_kbps(i) for i in range(self.n_agents)],
+            dtype=np.float32,
+        )
+        true_goodput = np.asarray(
+            [self._compute_true_goodput_kbps(i) for i in range(self.n_agents)],
+            dtype=np.float32,
+        )
+        channel_state = np.asarray([float(self.network.channel_state.value)], dtype=np.float32)
+        backoff_stage = np.zeros(self.n_agents, dtype=np.float32)
+        backoff_remaining = np.zeros(self.n_agents, dtype=np.float32)
+        for i in range(self.n_agents):
+            entity = self.network.entities[i]
+            backoff_stage[i] = float(entity.csma_backoffs + (1 if entity.pending_packet is not None else 0))
+            backoff_remaining[i] = float(entity.backoff_counter)
+        per_agent_features: List[np.ndarray] = []
+        for i in range(self.n_agents):
+            per_agent_features.append(
+                np.concatenate(
+                    [
+                        self.plants[i].get_state().astype(np.float32),
+                        self.controllers[i].x_hat.astype(np.float32),
+                        self.last_sensor_measurements[i].astype(np.float32),
+                        np.asarray(
+                            [
+                                noise_intensity[i],
+                                perceived_goodput[i],
+                                true_goodput[i],
+                                backoff_stage[i],
+                                backoff_remaining[i],
+                            ],
+                            dtype=np.float32,
+                        ),
+                    ]
+                )
+            )
+        return np.concatenate(per_agent_features + [channel_state])
 
     def _get_info(self) -> Dict[str, Any]:
         """Return auxiliary information."""
@@ -1310,6 +1373,8 @@ class NCS_Env(gym.Env):
             per_agent_goodput = [self._compute_true_goodput_kbps(i) for i in range(self.n_agents)]
             info["true_goodput_kbps_per_agent"] = per_agent_goodput
             info["true_goodput_kbps_total"] = float(sum(per_agent_goodput))
+        if self.global_state_enabled:
+            info["global_state"] = self._get_global_state()
         if self.last_network_tick_trace is not None:
             info["network_tick_trace"] = self.last_network_tick_trace
         return info
