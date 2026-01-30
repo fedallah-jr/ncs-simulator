@@ -124,7 +124,9 @@ class NCS_Env(gym.Env):
         observation_cfg = self.config.get("observation", {})
         self.history_window = observation_cfg.get("history_window", 10)
         self.state_history_window = observation_cfg.get("state_history_window", self.history_window)
-        self.throughput_window = max(1, observation_cfg.get("throughput_window", 50))
+        tp_window = observation_cfg.get("throughput_window", 50)
+        self.throughput_windows = [tp_window] if isinstance(tp_window, int) else list(tp_window)
+        self.n_throughput_windows = len(self.throughput_windows)
         self.quantization_step = observation_cfg.get("quantization_step", 0.05)
 
         # Create a local RNG instance for this environment
@@ -137,7 +139,7 @@ class NCS_Env(gym.Env):
 
         obs_dim = (
             self.state_dim  # current state
-            + 1  # current throughput
+            + self.n_throughput_windows  # current throughputs (one per window)
             + 1  # current measurement noise intensity
             + self.state_history_window * self.state_dim  # previous states
             + self.history_window  # previous statuses
@@ -303,7 +305,7 @@ class NCS_Env(gym.Env):
             mac_ifs_lifs_us=network_cfg.get("mac_ifs_lifs_us", 640.0),
             mac_ifs_max_sifs_frame_size=network_cfg.get("mac_ifs_max_sifs_frame_size", 18),
             tx_buffer_bytes=network_cfg.get("tx_buffer_bytes", 0),
-            app_ack_enabled=network_cfg.get("app_ack_enabled", False),
+            app_ack_enabled=network_cfg.get("app_ack_enabled", True),
             app_ack_packet_size=network_cfg.get("app_ack_packet_size", 30),
             app_ack_max_retries=network_cfg.get("app_ack_max_retries", 3),
             rng=self._network_rng if self._network_rng is not None else self.np_random,
@@ -329,6 +331,7 @@ class NCS_Env(gym.Env):
         self.pending_transmissions: List[Dict[int, Dict[str, int]]] = [
             {} for _ in range(self.n_agents)
         ]
+        self._last_cleanup_step = 0  # Track when we last cleaned up pending transmissions
         self.net_tx_attempts = np.zeros(self.n_agents, dtype=np.int64)
         self.net_tx_acks = np.zeros(self.n_agents, dtype=np.int64)
         self.net_tx_drops = np.zeros(self.n_agents, dtype=np.int64)
@@ -478,9 +481,13 @@ class NCS_Env(gym.Env):
                         measurement_noise_cov=measurement_noise_cov,
                     )
                     if not accepted:
-                        # Buffer full or MAC already busy: count as failed attempt.
+                        # Buffer full or MAC already busy: from transport layer perspective,
+                        # packet was sent but will never get ACK (dropped at MAC layer).
                         self.net_tx_drops[i] += 1
-                        self._record_decision(i, status=3)
+                        entry = self._record_decision(i, status=2)
+                        entry["send_timestamp"] = measurement_timestamp
+                        # Still track as pending since we're waiting for ACK that won't come
+                        self.pending_transmissions[i][measurement_timestamp] = entry
                         continue
                     entry = self._record_decision(i, status=2)
                     entry["send_timestamp"] = measurement_timestamp
@@ -515,9 +522,10 @@ class NCS_Env(gym.Env):
                     if existing_age is None or age_steps < existing_age:
                         delivered_message_ages[controller_id] = age_steps
 
-                for mac_ack in network_result.get("delivered_mac_acks", []):
-                    sensor_id = mac_ack.get("sensor_id")
-                    measurement_timestamp = mac_ack.get("measurement_timestamp")
+                # Transport layer uses app-level ACKs to confirm delivery
+                for app_ack in network_result.get("delivered_app_acks", []):
+                    sensor_id = app_ack.get("sensor_id")
+                    measurement_timestamp = app_ack.get("measurement_timestamp")
                     if sensor_id is None or measurement_timestamp is None:
                         continue
                     sensor_id = int(sensor_id)
@@ -530,25 +538,21 @@ class NCS_Env(gym.Env):
                         entry["status"] = 1
                         self._log_successful_comm(sensor_id, measurement_timestamp, self.timestep)
 
-                # App ACKs delivered - can be used for additional transport-layer tracking
-                # MAC ACK already handled the primary confirmation
-                for app_ack in network_result.get("delivered_app_acks", []):
-                    # App ACK received - tracking only for now
-                    # sensor_id = app_ack.get("sensor_id")
-                    # measurement_timestamp = app_ack.get("measurement_timestamp")
-                    pass
-
+                # Transport layer cannot detect dropped packets - they remain as status=2
+                # (waiting for ACK that will never arrive)
                 for packet in network_result["dropped_packets"]:
                     if packet.packet_type == "data":
                         sensor_id = packet.source_id
                         if 0 <= int(sensor_id) < self.n_agents:
                             self.net_tx_drops[int(sensor_id)] += 1
-                        measurement_timestamp = packet.payload.get("timestamp")
-                        entry = self.pending_transmissions[sensor_id].pop(measurement_timestamp, None)
-                        if entry is not None:
-                            entry["status"] = 3
+                        # Note: pending_transmissions entry remains with status=2
             if trace_this_tick:
                 self.last_network_tick_trace = self.network.finish_tick_trace()
+
+            # Periodically clean up old pending transmissions to prevent unbounded memory growth
+            if self.timestep - self._last_cleanup_step >= 100:
+                self._cleanup_old_pending_transmissions(max_age=100)
+                self._last_cleanup_step = self.timestep
 
         # Compute control and update plants
         for i in range(self.n_agents):
@@ -676,6 +680,25 @@ class NCS_Env(gym.Env):
         entry = {"timestamp": self.timestep, "status": status}
         self.decision_history[agent_idx].append(entry)
         return entry
+
+    def _cleanup_old_pending_transmissions(self, max_age: int = 100) -> None:
+        """
+        Remove pending transmissions older than max_age steps.
+
+        Since transport layer uses app ACKs and cannot detect MAC-layer drops,
+        packets that fail at MAC layer remain in pending_transmissions forever.
+        This cleanup prevents unbounded memory growth.
+
+        Args:
+            max_age: Maximum age in timesteps before considering a transmission stale
+        """
+        for agent_idx in range(self.n_agents):
+            stale_timestamps = [
+                ts for ts, entry in self.pending_transmissions[agent_idx].items()
+                if self.timestep - entry.get("timestamp", self.timestep) > max_age
+            ]
+            for ts in stale_timestamps:
+                self.pending_transmissions[agent_idx].pop(ts, None)
 
     def _sample_initial_state(self, rng: Optional[np.random.Generator] = None) -> np.ndarray:
         """
@@ -890,18 +913,25 @@ class NCS_Env(gym.Env):
             }
         )
 
-    def _compute_agent_goodput_kbps(self, records: deque) -> float:
+    def _compute_agent_goodput_kbps(self, records: deque, window: int, cleanup: bool = True) -> float:
         """Compute goodput (kbps) over the sliding window for one agent."""
         if self.perfect_communication:
             return 0.0
         if self.timestep <= 0:
             return 0.0
-        window_start = self.timestep - self.throughput_window + 1
-        while records and records[0]["timestamp"] < window_start:
-            records.popleft()
+        window_start = self.timestep - window + 1
 
-        total_bits = sum(record["bits"] for record in records)
-        effective_steps = min(self.throughput_window, self.timestep)
+        # Cleanup old records only if requested
+        if cleanup:
+            while records and records[0]["timestamp"] < window_start:
+                records.popleft()
+
+        # Sum bits in window
+        total_bits = sum(
+            record["bits"] for record in records
+            if record["timestamp"] >= window_start
+        )
+        effective_steps = min(window, self.timestep)
         window_duration = effective_steps * self.timestep_duration
         if window_duration == 0:
             return 0.0
@@ -909,8 +939,27 @@ class NCS_Env(gym.Env):
         return throughput_kbps
 
     def _compute_observed_goodput_kbps(self, agent_idx: int) -> float:
-        """Compute ACK-observed goodput (kbps) for a single agent."""
-        return self._compute_agent_goodput_kbps(self.observed_goodput_records[agent_idx])
+        """Compute ACK-observed goodput (kbps) for a single agent (first window)."""
+        return self._compute_agent_goodput_kbps(
+            self.observed_goodput_records[agent_idx], self.throughput_windows[0]
+        )
+
+    def _compute_observed_goodput_kbps_multi(self, agent_idx: int) -> List[float]:
+        """Compute observed goodput for multiple window sizes."""
+        records = self.observed_goodput_records[agent_idx]
+        # Sort windows largest to smallest for cleanup efficiency
+        sorted_windows = sorted(self.throughput_windows, reverse=True)
+        throughputs = []
+        for i, window in enumerate(sorted_windows):
+            # Only cleanup on the largest window (first iteration)
+            tp = self._compute_agent_goodput_kbps(records, window, cleanup=(i == 0))
+            throughputs.append(tp)
+
+        # Reorder to match original throughput_windows order
+        if sorted_windows != self.throughput_windows:
+            order_map = {w: tp for w, tp in zip(sorted_windows, throughputs)}
+            throughputs = [order_map[w] for w in self.throughput_windows]
+        return throughputs
 
     def _compute_true_goodput_kbps(self, agent_idx: int) -> float:
         """Compute delivered goodput (kbps) for a single agent."""
@@ -919,7 +968,7 @@ class NCS_Env(gym.Env):
         records = self.true_goodput_records
         if records is None:
             return 0.0
-        return self._compute_agent_goodput_kbps(records[agent_idx])
+        return self._compute_agent_goodput_kbps(records[agent_idx], self.throughput_windows[0])
 
     def _compute_throughput(self) -> float:
         """Compute total ACK-observed goodput (kbps) over the sliding window."""
@@ -1202,15 +1251,15 @@ class NCS_Env(gym.Env):
             # throughput_history has maxlen=history_window and is pre-filled, always full
             prev_throughputs = np.asarray(self.throughput_history[i], dtype=np.float32)
 
-            throughput = self._compute_observed_goodput_kbps(i)
+            throughputs = self._compute_observed_goodput_kbps_multi(i)
             state = self.plants[i].get_state()
             quantized_state = self._quantize_state(state)
             obs_values = np.empty(self.obs_dim, dtype=np.float32)
             cursor = 0
             obs_values[cursor : cursor + self.state_dim] = quantized_state
             cursor += self.state_dim
-            obs_values[cursor] = float(throughput)
-            cursor += 1
+            obs_values[cursor : cursor + self.n_throughput_windows] = throughputs
+            cursor += self.n_throughput_windows
             obs_values[cursor] = float(self.current_measurement_noise_intensities[i])
             cursor += 1
             obs_values[cursor : cursor + prev_states_flat.size] = prev_states_flat
@@ -1220,7 +1269,7 @@ class NCS_Env(gym.Env):
             obs_values[cursor : cursor + self.history_window] = prev_throughputs
 
             observations[f"agent_{i}"] = obs_values
-            current_throughputs.append(float(throughput))
+            current_throughputs.append(throughputs[0])  # Use first window for history
             quantized_states.append(quantized_state)
 
         self._update_history_buffers(current_throughputs, quantized_states)

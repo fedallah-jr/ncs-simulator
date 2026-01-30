@@ -270,7 +270,7 @@ def get_heuristic_policy(policy_name: str, n_agents: int = 1, seed: Optional[int
     else:
         return policy_factory(n_agents=n_agents)
 class ZeroWaitPolicy(BaseHeuristicPolicy):
-    """Policy that waits for ACK/drop before sending again."""
+    """Policy that waits for ACK before sending again (transport layer)."""
 
     def __init__(self, n_agents: int = 1, history_window: Optional[int] = None) -> None:
         super().__init__(n_agents)

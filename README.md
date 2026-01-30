@@ -53,10 +53,10 @@ When `perfect_communication=true`, the whole communication logic is bypassed dir
 ### `observation`
 - `history_window`: Number of past steps included for statuses and throughput history.
 - `state_history_window`: Number of past states appended to the observation (defaults to `history_window` if omitted).
-- `throughput_window`: Sliding window (in steps) used to estimate recent channel throughput (kbps).
+- `throughput_window`: Sliding window (in steps) used to estimate recent channel throughput (kbps). Can be a single integer (e.g., `50`) or an array of window sizes (e.g., `[200, 100, 10, 5]`) to compute multiple throughput values at different time scales. When an array is provided, all calculated throughput values are included in the observation.
 - `quantization_step`: Step size for quantizing plant states before they appear in observations. Set to `0` or omit to disable quantization.
 
-Observations are laid out as `[current_state, current_throughput, current_measurement_noise, prev_states..., prev_statuses..., prev_throughputs...]`, where each “prev” block holds `history_window` (or `state_history_window` for states) entries. `current_measurement_noise` is a scalar intensity summary of `R_k` (trace divided by state dimension).
+Observations are laid out as `[current_state, current_throughput(s), current_measurement_noise, prev_states..., prev_statuses..., prev_throughputs...]`, where each "prev" block holds `history_window` (or `state_history_window` for states) entries. When `throughput_window` is an array, multiple current throughput values are included (one per window size). `current_measurement_noise` is a scalar intensity summary of `R_k` (trace divided by state dimension).
 
 ### `network`
 - `data_rate_kbps`: Physical-layer rate used to convert packet sizes into transmission durations.
