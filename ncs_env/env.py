@@ -398,6 +398,7 @@ class NCS_Env(gym.Env):
         self.network.reset()
         self._initialize_tracking_structures()
         self._resample_measurement_noise()
+        self._update_sensor_measurements()
         self._reset_running_returns()
         self.last_network_tick_trace = None
         for idx in range(self.n_agents):
@@ -440,12 +441,8 @@ class NCS_Env(gym.Env):
                 if action == 1:
                     self.net_tx_attempts[i] += 1
                     self.net_tx_acks[i] += 1
-                    state = self.plants[i].get_state()
                     measurement_noise_cov = current_noise_covs[i]
-                    if self._has_measurement_noise:
-                        measurement = state + self._sample_measurement_noise(measurement_noise_cov)
-                    else:
-                        measurement = state
+                    measurement = self.last_sensor_measurements[i]
                     self.controllers[i].update(measurement, measurement_noise_cov)
                     self.last_measurements[i] = measurement
                     self._record_decision(i, status=1)
@@ -465,12 +462,8 @@ class NCS_Env(gym.Env):
                 action = actions[f"agent_{i}"]
                 if action == 1:
                     self.net_tx_attempts[i] += 1
-                    state = self.plants[i].get_state()
                     measurement_noise_cov = current_noise_covs[i]
-                    if self._has_measurement_noise:
-                        measurement = state + self._sample_measurement_noise(measurement_noise_cov)
-                    else:
-                        measurement = state
+                    measurement = self.last_sensor_measurements[i]
                     # Use state_index as the measurement timestamp
                     # This clearly indicates measurement is of x[state_index]
                     measurement_timestamp = state_index
@@ -662,6 +655,7 @@ class NCS_Env(gym.Env):
         # Get observations AFTER plant update (Gym step contract)
         # step() returns the resulting state s[k+1] after action a[k] is applied
         self._resample_measurement_noise()
+        self._update_sensor_measurements()
         observations = self._get_observations()
         infos = self._get_info()
         return observations, rewards, terminated, truncated, infos
@@ -1231,8 +1225,6 @@ class NCS_Env(gym.Env):
         current_throughputs: List[float] = []
         quantized_states: List[np.ndarray] = []
 
-        self._update_sensor_measurements()
-
         for i in range(self.n_agents):
             # decision_history maxlen may be larger than history_window, so use islice
             dh = self.decision_history[i]
@@ -1252,8 +1244,8 @@ class NCS_Env(gym.Env):
             prev_throughputs = np.asarray(self.throughput_history[i], dtype=np.float32)
 
             throughputs = self._compute_observed_goodput_kbps_multi(i)
-            state = self.plants[i].get_state()
-            quantized_state = self._quantize_state(state)
+            measurement = self.last_sensor_measurements[i]
+            quantized_state = self._quantize_state(measurement)
             obs_values = np.empty(self.obs_dim, dtype=np.float32)
             cursor = 0
             obs_values[cursor : cursor + self.state_dim] = quantized_state
@@ -1291,8 +1283,6 @@ class NCS_Env(gym.Env):
             self.state_history[i].append(quantized_state)
 
     def _update_sensor_measurements(self) -> None:
-        if not self.global_state_enabled:
-            return
         measurements: List[np.ndarray] = []
         for i in range(self.n_agents):
             state = self.plants[i].get_state()

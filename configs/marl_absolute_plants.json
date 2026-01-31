@@ -22,7 +22,7 @@
     "R": [[0.0]]
   },
   "reward": {
-    "state_error_reward": "estimate_errorl2",
+    "state_error_reward": "estimate_error",
     "state_cost_matrix": [[1.0, 0.0], [0.0, 1.0]],
     "comm_recent_window": 10,
     "comm_throughput_window": 200,
@@ -33,7 +33,7 @@
     "reward_clip_max": 5,
     "reward_clip_min": -7.5,
     "evaluation": {
-      "state_error_reward": "estimate_errorl2",
+      "state_error_reward": "estimate_error",
       "comm_penalty_alpha": 0.0,
       "simple_comm_penalty_alpha": 0.0,
       "normalize": false
