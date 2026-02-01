@@ -27,9 +27,9 @@
       "comm_penalty_alpha": 0.0,
       "comm_throughput_floor": 0.0,
       "normalize": false,
-    "no_normalization_scale": 10,
-    "reward_clip_max": 5,
-    "reward_clip_min": -5,
+    "no_normalization_scale": 20,
+    "reward_clip_max": 10,
+    "reward_clip_min": -10,
     "evaluation": {
       "state_error_reward": "kf_info",
       "comm_penalty_alpha": 0.0,
