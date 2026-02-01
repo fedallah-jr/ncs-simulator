@@ -11,7 +11,11 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
-from .controller import Controller, compute_discrete_lqr_gain, compute_finite_horizon_lqr_gains
+from .controller import (
+    Controller,
+    compute_discrete_lqr_solution,
+    compute_finite_horizon_lqr_solution,
+)
 from .config import DEFAULT_CONFIG_PATH, load_config, resolve_measurement_noise_scale_range
 from .network import NetworkModel
 from .plant import Plant
@@ -40,12 +44,13 @@ class RewardDefinition:
             "absolute_sqrt",
             "estimate_error",
             "estimate_errorl2",
+            "kf_info",
             "simple",
             "simple_penalty",
         }:
             raise ValueError(
                 "state_error_reward must be 'difference', 'absolute', 'absolute_sqrt', "
-                "'estimate_error', 'estimate_errorl2', 'simple', or 'simple_penalty'"
+                "'estimate_error', 'estimate_errorl2', 'kf_info', 'simple', or 'simple_penalty'"
             )
         if float(self.simple_freshness_decay) < 0.0:
             raise ValueError("simple_freshness_decay must be >= 0")
@@ -207,19 +212,23 @@ class NCS_Env(gym.Env):
 
         # Check if finite-horizon LQR is enabled (default: True)
         self.finite_horizon_enabled = bool(lqr_cfg.get("finite_horizon", True))
+        self.K_list: List[Union[np.ndarray, List[np.ndarray]]] = []
+        self.S_list: List[Union[np.ndarray, List[np.ndarray]]] = []
 
         if self.finite_horizon_enabled:
             # Compute time-varying gains for finite horizon (uses self.episode_length)
-            self.K_list: List[Union[np.ndarray, List[np.ndarray]]] = [
-                compute_finite_horizon_lqr_gains(A_i, B_i, lqr_Q, lqr_R, self.episode_length)
-                for (A_i, B_i) in agent_matrices
-            ]
+            for (A_i, B_i) in agent_matrices:
+                gains, costs = compute_finite_horizon_lqr_solution(
+                    A_i, B_i, lqr_Q, lqr_R, self.episode_length
+                )
+                self.K_list.append(gains)
+                self.S_list.append(costs)
         else:
             # Original infinite-horizon DARE solver
-            self.K_list: List[np.ndarray] = [
-                compute_discrete_lqr_gain(A_i, B_i, lqr_Q, lqr_R)
-                for (A_i, B_i) in agent_matrices
-            ]
+            for (A_i, B_i) in agent_matrices:
+                gain, cost = compute_discrete_lqr_solution(A_i, B_i, lqr_Q, lqr_R)
+                self.K_list.append(gain)
+                self.S_list.append(cost)
 
         base_reward_cfg = self.config.get("reward", {})
         reward_cfg = self._merge_config_override(base_reward_cfg, self.reward_override)
@@ -363,12 +372,14 @@ class NCS_Env(gym.Env):
             "prev_error": 0.0,
             "curr_error": 0.0,
             "comm_penalty": 0.0,
+            "kf_info_gain": 0.0,
         }
         self.last_reward_components: Dict[str, Dict[str, float]] = {
             f"agent_{i}": dict(base_components)
             for i in range(self.n_agents)
         }
         self.last_errors: List[float] = [0.0 for _ in range(self.n_agents)]
+        self.last_kf_info_gains: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_termination_reasons: List[str] = []
         self.last_termination_agents: List[int] = []
         self.last_bad_termination = False
@@ -424,6 +435,8 @@ class NCS_Env(gym.Env):
         # We use state_index to clearly refer to which x[k] we're measuring
         state_index = self.timestep - 1
         current_noise_covs = self.current_measurement_noise_covs
+        for i in range(self.n_agents):
+            self.last_kf_info_gains[i] = 0.0
 
         # Store prior for each controller at current state index
         # This enables delayed measurement handling in network mode
@@ -547,6 +560,12 @@ class NCS_Env(gym.Env):
                 self._cleanup_old_pending_transmissions(max_age=100)
                 self._last_cleanup_step = self.timestep
 
+        for i in range(self.n_agents):
+            self.last_kf_info_gains[i] = self._compute_kf_step_reward(
+                i,
+                self.controllers[i].P,
+            )
+
         # Compute control and update plants
         for i in range(self.n_agents):
             u = self.controllers[i].compute_control()
@@ -593,6 +612,7 @@ class NCS_Env(gym.Env):
                 prev_error,
                 curr_error,
                 action,
+                self.last_kf_info_gains[i],
                 info_arrived,
                 message_age_steps,
             )
@@ -1055,6 +1075,21 @@ class NCS_Env(gym.Env):
         dx = state  # reference is zero
         return float(dx.T @ self.state_cost_matrix @ dx)
 
+    def _get_cost_to_go_matrix(self, agent_idx: int) -> np.ndarray:
+        cost_entry = self.S_list[agent_idx]
+        if isinstance(cost_entry, list):
+            k = min(self.controllers[agent_idx].time_step, len(cost_entry) - 1)
+            return cost_entry[k]
+        return cost_entry
+
+    def _compute_kf_step_reward(
+        self,
+        agent_idx: int,
+        covariance: np.ndarray,
+    ) -> float:
+        cost_to_go = self._get_cost_to_go_matrix(agent_idx)
+        return -float(np.trace(cost_to_go @ covariance))
+
     def _compute_estimation_error(self, agent_idx: int, state: np.ndarray) -> float:
         """Weighted L1 estimation error ||Q (x - x_hat)||_1."""
         estimate = self.controllers[agent_idx].x_hat
@@ -1074,6 +1109,8 @@ class NCS_Env(gym.Env):
             return self._compute_estimation_error(agent_idx, state)
         if self.reward_definition.mode == "estimate_errorl2":
             return self._compute_estimation_error_l2(agent_idx, state)
+        if self.reward_definition.mode == "kf_info":
+            return 0.0
         return self._compute_state_error(state)
 
     def _recent_transmission_count(self, agent_idx: int) -> int:
@@ -1160,6 +1197,7 @@ class NCS_Env(gym.Env):
         prev_error: float,
         curr_error: float,
         action: int,
+        info_gain: float,
         info_arrived: bool,
         message_age_steps: Optional[int] = None,
         apply_normalization: bool = True,
@@ -1187,6 +1225,8 @@ class NCS_Env(gym.Env):
             error_reward = -curr_error
         elif definition.mode == "estimate_errorl2":
             error_reward = -curr_error
+        elif definition.mode == "kf_info":
+            error_reward = float(info_gain)
         elif definition.mode == "simple_penalty":
             # Symmetric version of "simple": 0 if measurement delivered, -1 otherwise
             if info_arrived:
@@ -1208,6 +1248,7 @@ class NCS_Env(gym.Env):
             "prev_error": float(prev_error),
             "curr_error": float(curr_error),
             "comm_penalty": float(comm_penalty),
+            "kf_info_gain": float(info_gain),
             "reward": reward_value,
         }
         if definition.mode in {"simple", "simple_penalty"}:

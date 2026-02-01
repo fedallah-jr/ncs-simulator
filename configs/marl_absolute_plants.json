@@ -19,19 +19,19 @@
   },
   "lqr": {
     "Q": [[1.0, 0.0], [0.0, 1.0]],
-    "R": [[0.0]]
+    "R": [[0.00001]]
   },
     "reward": {
-      "state_error_reward": "absolute",
+      "state_error_reward": "kf_info",
       "state_cost_matrix": [[1.0, 0.0], [0.0, 1.0]],
       "comm_penalty_alpha": 0.0,
       "comm_throughput_floor": 0.0,
       "normalize": false,
-    "no_normalization_scale": 5,
+    "no_normalization_scale": 10,
     "reward_clip_max": 5,
-    "reward_clip_min": -7.5,
+    "reward_clip_min": -5,
     "evaluation": {
-      "state_error_reward": "absolute",
+      "state_error_reward": "kf_info",
       "comm_penalty_alpha": 0.0,
       "simple_comm_penalty_alpha": 0.0,
       "normalize": false

@@ -1,11 +1,51 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Deque, List, Optional, Set, Union
+from typing import Deque, List, Optional, Set, Tuple, Union
 
 import numpy as np
 from filterpy.kalman import KalmanFilter
 from scipy.linalg import solve_discrete_are
+
+
+def compute_discrete_lqr_solution(
+    A: np.ndarray,
+    B: np.ndarray,
+    Q: np.ndarray,
+    R: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute the optimal LQR gain matrix and cost-to-go matrix using scipy's DARE solver.
+
+    Solves the discrete-time algebraic Riccati equation (DARE) and computes
+    the optimal feedback gain:
+        K = (R + B^T P B)^{-1} (B^T P A)
+
+    Parameters
+    ----------
+    A : np.ndarray
+        State transition matrix
+    B : np.ndarray
+        Control input matrix
+    Q : np.ndarray
+        State cost matrix
+    R : np.ndarray
+        Control cost matrix
+
+    Returns
+    -------
+    K : np.ndarray
+        Optimal LQR feedback gain matrix
+    P : np.ndarray
+        Optimal cost-to-go (Riccati) matrix
+    """
+    # Solve discrete-time algebraic Riccati equation using scipy
+    P = solve_discrete_are(A, B, Q, R)
+
+    # Compute optimal gain from solution
+    K = np.linalg.solve(R + B.T @ P @ B, B.T @ P @ A)
+
+    return K, P
 
 
 def compute_discrete_lqr_gain(
@@ -37,24 +77,19 @@ def compute_discrete_lqr_gain(
     K : np.ndarray
         Optimal LQR feedback gain matrix
     """
-    # Solve discrete-time algebraic Riccati equation using scipy
-    P = solve_discrete_are(A, B, Q, R)
-
-    # Compute optimal gain from solution
-    K = np.linalg.inv(R + B.T @ P @ B) @ (B.T @ P @ A)
-
+    K, _ = compute_discrete_lqr_solution(A, B, Q, R)
     return K
 
 
-def compute_finite_horizon_lqr_gains(
+def compute_finite_horizon_lqr_solution(
     A: np.ndarray,
     B: np.ndarray,
     Q: np.ndarray,
     R: np.ndarray,
     horizon: int,
-) -> List[np.ndarray]:
+) -> Tuple[List[np.ndarray], List[np.ndarray]]:
     """
-    Compute finite-horizon LQR gains using backward dynamic Riccati recursion.
+    Compute finite-horizon LQR gains and cost-to-go matrices using backward dynamic Riccati recursion.
 
     Solves the discrete-time dynamic Riccati equation (DRE) backward from
     terminal time k=N to k=0:
@@ -88,26 +123,49 @@ def compute_finite_horizon_lqr_gains(
     gains : List[np.ndarray]
         List of time-varying gains [K[0], K[1], ..., K[N-1]]
         where K[k] is the optimal gain at timestep k (m × n matrix)
+    costs : List[np.ndarray]
+        List of cost-to-go matrices [P[0], P[1], ..., P[N-1]]
     """
     # Terminal cost
-    P = Q.copy()
+    P_next = Q.copy()
 
     # Store gains in reverse order (computed backward)
-    gains = []
+    gains: List[np.ndarray] = []
+    costs: List[np.ndarray] = []
 
     # Backward recursion from k=N-1 down to k=0
     for k in range(horizon - 1, -1, -1):
         # Compute gain at timestep k
-        S = R + B.T @ P @ B
-        K = np.linalg.solve(S, B.T @ P @ A)  # More stable than inv(S) @ ...
-        gains.append(K)
+        S = R + B.T @ P_next @ B
+        K = np.linalg.solve(S, B.T @ P_next @ A)  # More stable than inv(S) @ ...
 
         # Update P for previous timestep
-        P = Q + A.T @ P @ A - A.T @ P @ B @ K
+        P = Q + A.T @ P_next @ A - A.T @ P_next @ B @ K
+        gains.append(K)
+        costs.append(P)
+        P_next = P
 
     # Reverse to get forward-time order [K[0], K[1], ..., K[N-1]]
     gains.reverse()
+    costs.reverse()
 
+    return gains, costs
+
+
+def compute_finite_horizon_lqr_gains(
+    A: np.ndarray,
+    B: np.ndarray,
+    Q: np.ndarray,
+    R: np.ndarray,
+    horizon: int,
+) -> List[np.ndarray]:
+    """
+    Compute finite-horizon LQR gains using backward dynamic Riccati recursion.
+
+    Solves the discrete-time dynamic Riccati equation (DRE) backward from
+    terminal time k=N to k=0.
+    """
+    gains, _ = compute_finite_horizon_lqr_solution(A, B, Q, R, horizon)
     return gains
 
 
