@@ -393,10 +393,17 @@ class Controller:
         # Sort by state_index to ensure correct order
         controls.sort(key=lambda x: x['state_index'])
 
+        prior_by_index = {entry['state_index']: entry for entry in self.prior_history}
+
         # Re-predict forward using the controls
         for ctrl_entry in controls:
             u = ctrl_entry['u'].reshape(-1, 1)
             self.kf.predict(u=u)
+            next_index = int(ctrl_entry['state_index']) + 1
+            prior_entry = prior_by_index.get(next_index)
+            if prior_entry is not None:
+                prior_entry['x'] = self.kf.x.copy()
+                prior_entry['P'] = self.kf.P.copy()
         self._record_seen_measurement(measurement_state_index)
         return True
 
