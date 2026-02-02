@@ -91,6 +91,7 @@ class NCS_Env(gym.Env):
         freeze_running_normalization: bool = False,
         track_true_goodput: bool = False,
         global_state_enabled: bool = False,
+        track_lqr_cost: bool = False,
     ):
         super().__init__()
         self.n_agents = n_agents
@@ -100,6 +101,7 @@ class NCS_Env(gym.Env):
         self.freeze_running_normalization = bool(freeze_running_normalization)
         self.track_true_goodput = bool(track_true_goodput)
         self.global_state_enabled = bool(global_state_enabled)
+        self.track_lqr_cost = bool(track_lqr_cost)
         if self.global_state_enabled:
             self.track_true_goodput = True
 
@@ -207,8 +209,10 @@ class NCS_Env(gym.Env):
         )
 
         lqr_cfg = self.config.get("lqr", {})
-        lqr_Q = np.array(lqr_cfg.get("Q", np.eye(self.state_dim)))
-        lqr_R = np.array(lqr_cfg.get("R", np.eye(self.control_dim)))
+        self.lqr_Q = np.array(lqr_cfg.get("Q", np.eye(self.state_dim)))
+        self.lqr_R = np.array(lqr_cfg.get("R", np.eye(self.control_dim)))
+        lqr_Q = self.lqr_Q
+        lqr_R = self.lqr_R
 
         # Check if finite-horizon LQR is enabled (default: True)
         self.finite_horizon_enabled = bool(lqr_cfg.get("finite_horizon", True))
@@ -233,9 +237,7 @@ class NCS_Env(gym.Env):
         base_reward_cfg = self.config.get("reward", {})
         reward_cfg = self._merge_config_override(base_reward_cfg, self.reward_override)
         self.reward_normalization_gamma = float(reward_cfg.get("normalization_gamma", 0.99))
-        self.state_cost_matrix = np.array(
-            reward_cfg.get("state_cost_matrix", np.eye(self.state_dim))
-        )
+        self.state_cost_matrix = self.lqr_Q.copy()
         self.comm_recent_window = int(reward_cfg.get("comm_recent_window", self.history_window))
         self.comm_throughput_window = int(
             reward_cfg.get("comm_throughput_window", max(5 * self.history_window, 50))
@@ -364,6 +366,7 @@ class NCS_Env(gym.Env):
         self.last_sensor_measurements: List[np.ndarray] = [
             np.zeros(self.state_dim, dtype=float) for _ in range(self.n_agents)
         ]
+        self.last_lqr_costs: List[float] = [0.0 for _ in range(self.n_agents)]
         self.reward_component_stats: Dict[str, Dict[str, float]] = {
             f"agent_{i}": {"prev_error_sum": 0.0, "curr_error_sum": 0.0, "comm_penalty_sum": 0.0, "count": 0.0}
             for i in range(self.n_agents)
@@ -501,32 +504,12 @@ class NCS_Env(gym.Env):
                 else:
                     self._record_decision(i, status=0)
             # Run the micro-slot network for this environment step
+            pending_delivered_packets: List[Any] = []
             slots_to_run = self.network.slots_per_step
             for _ in range(slots_to_run):
                 network_result = self.network.run_slot()
-
-                for packet in network_result["delivered_data"]:
-                    controller_id = packet.dest_id
-                    measurement = packet.payload["state"]
-                    measurement_timestamp = packet.payload["timestamp"]
-                    measurement_noise_cov = packet.payload.get("measurement_noise_cov")
-                    applied = self.controllers[controller_id].delayed_update(
-                        measurement, measurement_timestamp, measurement_noise_cov
-                    )
-                    if not applied:
-                        continue
-                    age_steps = max(0, int(state_index - int(measurement_timestamp)))
-
-                    if self.track_true_goodput:
-                        sensor_id = int(packet.source_id)
-                        if 0 <= sensor_id < self.n_agents:
-                            self._record_true_goodput(sensor_id, int(measurement_timestamp))
-
-                    self.last_measurements[controller_id] = measurement
-                    delivered_controller_ids.add(controller_id)
-                    existing_age = delivered_message_ages.get(controller_id)
-                    if existing_age is None or age_steps < existing_age:
-                        delivered_message_ages[controller_id] = age_steps
+                if network_result["delivered_data"]:
+                    pending_delivered_packets.extend(network_result["delivered_data"])
 
                 # Transport layer uses app-level ACKs to confirm delivery
                 for app_ack in network_result.get("delivered_app_acks", []):
@@ -552,6 +535,38 @@ class NCS_Env(gym.Env):
                         if 0 <= int(sensor_id) < self.n_agents:
                             self.net_tx_drops[int(sensor_id)] += 1
                         # Note: pending_transmissions entry remains with status=2
+
+            if pending_delivered_packets:
+                packets_by_controller: Dict[int, List[Any]] = {}
+                for packet in pending_delivered_packets:
+                    controller_id = int(packet.dest_id)
+                    packets_by_controller.setdefault(controller_id, []).append(packet)
+
+                for controller_id, packets in packets_by_controller.items():
+                    packets.sort(
+                        key=lambda packet: int(packet.payload.get("timestamp", 0)),
+                    )
+                    for packet in packets:
+                        measurement = packet.payload["state"]
+                        measurement_timestamp = packet.payload["timestamp"]
+                        measurement_noise_cov = packet.payload.get("measurement_noise_cov")
+                        applied = self.controllers[controller_id].delayed_update(
+                            measurement, measurement_timestamp, measurement_noise_cov
+                        )
+                        if not applied:
+                            continue
+                        age_steps = max(0, int(state_index - int(measurement_timestamp)))
+
+                        if self.track_true_goodput:
+                            sensor_id = int(packet.source_id)
+                            if 0 <= sensor_id < self.n_agents:
+                                self._record_true_goodput(sensor_id, int(measurement_timestamp))
+
+                        self.last_measurements[controller_id] = measurement
+                        delivered_controller_ids.add(controller_id)
+                        existing_age = delivered_message_ages.get(controller_id)
+                        if existing_age is None or age_steps < existing_age:
+                            delivered_message_ages[controller_id] = age_steps
             if trace_this_tick:
                 self.last_network_tick_trace = self.network.finish_tick_trace()
 
@@ -567,9 +582,18 @@ class NCS_Env(gym.Env):
             )
 
         # Compute control and update plants
+        lqr_costs = None
+        if self.track_lqr_cost:
+            lqr_costs = [0.0 for _ in range(self.n_agents)]
         for i in range(self.n_agents):
             u = self.controllers[i].compute_control()
+            if lqr_costs is not None:
+                x = np.asarray(self.plants[i].get_state(), dtype=float).reshape(-1)
+                u_vec = np.asarray(u, dtype=float).reshape(-1)
+                lqr_costs[i] = float(x @ self.lqr_Q @ x + u_vec @ self.lqr_R @ u_vec)
             self.plants[i].step(u)
+        if lqr_costs is not None:
+            self.last_lqr_costs = lqr_costs
 
         # Kalman filter time update (predict) - done AFTER plant update
         # This propagates estimates forward using dynamics and the control just applied
@@ -1449,6 +1473,9 @@ class NCS_Env(gym.Env):
             "termination_agents": list(self.last_termination_agents),
             "bad_termination": bool(self.last_bad_termination),
         }
+        if self.track_lqr_cost:
+            info["lqr_costs"] = [float(cost) for cost in self.last_lqr_costs]
+            info["lqr_cost_total"] = float(sum(self.last_lqr_costs))
         if self.track_true_goodput:
             per_agent_goodput = [self._compute_true_goodput_kbps(i) for i in range(self.n_agents)]
             info["true_goodput_kbps_per_agent"] = per_agent_goodput

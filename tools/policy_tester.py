@@ -53,7 +53,6 @@ TRAINING_EVAL_SEED_COUNT = 11
 DEFAULT_EVAL_SEED_START = 100
 
 REWARD_COMPARISON_KEYS: Sequence[str] = (
-    "state_cost_matrix",
     "comm_penalty_alpha",
     "simple_comm_penalty_alpha",
     "simple_freshness_decay",
@@ -79,6 +78,8 @@ class EpisodeResult:
     mean_reward: float
     mean_state_error: float
     final_state_error: float
+    total_lqr_cost: float
+    mean_lqr_cost: float
     send_rate: float
     mean_true_goodput_kbps: float
     steps: int
@@ -306,6 +307,7 @@ def _build_env(
         reward_override=reward_override,
         termination_override=termination_override,
         track_true_goodput=True,
+        track_lqr_cost=True,
     )
 
 
@@ -345,6 +347,7 @@ def _run_multi_agent_episode(
 
     total_reward = 0.0
     total_state_error = 0.0
+    total_lqr_cost = 0.0
     send_count = 0
     steps = 0
     true_goodput_sum = 0.0
@@ -355,14 +358,15 @@ def _run_multi_agent_episode(
         obs_dict, rewards, terminated, truncated, info = env.step(action_dict)
         total_reward += float(sum(rewards.values()))
         send_count += int(sum(action_dict.values()))
+        if "lqr_cost_total" in info:
+            total_lqr_cost += float(info["lqr_cost_total"])
 
         # Track state error separately from rewards
         states = np.asarray(info.get("states", []), dtype=float)
         if states.size > 0:
-            for state in states:
+            for agent_idx, state in enumerate(states):
                 state_error = env._compute_state_error(state)
                 total_state_error += float(state_error)
-
         steps += 1
         last_info = info
         if "true_goodput_kbps_total" in info:
@@ -379,6 +383,7 @@ def _run_multi_agent_episode(
         final_error = 0.0
     mean_reward = total_reward / float(max(1, steps * n_agents))
     mean_state_error = total_state_error / float(max(1, steps * n_agents))
+    mean_lqr_cost = total_lqr_cost / float(max(1, steps * n_agents))
     send_rate = float(send_count) / float(max(1, steps * n_agents))
     mean_true_goodput_kbps = true_goodput_sum / float(max(1, true_goodput_steps))
     network_totals = _extract_network_totals(last_info)
@@ -390,6 +395,8 @@ def _run_multi_agent_episode(
         mean_reward=mean_reward,
         mean_state_error=mean_state_error,
         final_state_error=final_error,
+        total_lqr_cost=total_lqr_cost,
+        mean_lqr_cost=mean_lqr_cost,
         send_rate=send_rate,
         mean_true_goodput_kbps=mean_true_goodput_kbps,
         steps=steps,
@@ -403,6 +410,8 @@ def _summarize_results(results: List[EpisodeResult]) -> Dict[str, float]:
     totals = np.array([r.total_reward for r in results], dtype=float)
     mean_state_errors = np.array([r.mean_state_error for r in results], dtype=float)
     final_errors = np.array([r.final_state_error for r in results], dtype=float)
+    total_lqr_costs = np.array([r.total_lqr_cost for r in results], dtype=float)
+    mean_lqr_costs = np.array([r.mean_lqr_cost for r in results], dtype=float)
     send_rates = np.array([r.send_rate for r in results], dtype=float)
     steps = np.array([r.steps for r in results], dtype=float)
     mean_rewards = np.array([r.mean_reward for r in results], dtype=float)
@@ -446,6 +455,10 @@ def _summarize_results(results: List[EpisodeResult]) -> Dict[str, float]:
         "std_state_error": float(np.std(mean_state_errors)) if results else 0.0,
         "mean_final_error": float(np.mean(final_errors)) if results else 0.0,
         "std_final_error": float(np.std(final_errors)) if results else 0.0,
+        "mean_total_lqr_cost": float(np.mean(total_lqr_costs)) if results else 0.0,
+        "std_total_lqr_cost": float(np.std(total_lqr_costs)) if results else 0.0,
+        "mean_lqr_cost": float(np.mean(mean_lqr_costs)) if results else 0.0,
+        "std_lqr_cost": float(np.std(mean_lqr_costs)) if results else 0.0,
         "mean_send_rate": float(np.mean(send_rates)) if results else 0.0,
         "std_send_rate": float(np.std(send_rates)) if results else 0.0,
         "mean_true_goodput_kbps": float(np.mean(true_goodputs)) if results else 0.0,
@@ -702,6 +715,8 @@ def _write_policy_results(
                 "mean_reward": result.mean_reward,
                 "mean_state_error": result.mean_state_error,
                 "final_state_error": result.final_state_error,
+                "total_lqr_cost": result.total_lqr_cost,
+                "mean_lqr_cost": result.mean_lqr_cost,
                 "send_rate": result.send_rate,
                 "mean_true_goodput_kbps": result.mean_true_goodput_kbps,
                 "steps": result.steps,
@@ -745,6 +760,8 @@ def _write_policy_results(
             "mean_reward",
             "mean_state_error",
             "final_state_error",
+            "total_lqr_cost",
+            "mean_lqr_cost",
             "send_rate",
             "mean_true_goodput_kbps",
             "steps",
@@ -781,6 +798,10 @@ def _write_policy_results(
             "std_state_error",
             "mean_final_error",
             "std_final_error",
+            "mean_total_lqr_cost",
+            "std_total_lqr_cost",
+            "mean_lqr_cost",
+            "std_lqr_cost",
             "mean_send_rate",
             "std_send_rate",
             "mean_true_goodput_kbps",
@@ -842,6 +863,8 @@ def _write_leaderboard(path: Path, rows: List[Dict[str, Any]]) -> None:
         "std_state_error",
         "mean_final_error",
         "std_final_error",
+        "mean_lqr_cost",
+        "std_lqr_cost",
         "mean_send_rate",
         "std_send_rate",
         "mean_steps",
@@ -1438,6 +1461,8 @@ def main() -> int:
                         "mean_reward": result.mean_reward,
                         "mean_state_error": result.mean_state_error,
                         "final_state_error": result.final_state_error,
+                        "total_lqr_cost": result.total_lqr_cost,
+                        "mean_lqr_cost": result.mean_lqr_cost,
                         "send_rate": result.send_rate,
                         "mean_true_goodput_kbps": result.mean_true_goodput_kbps,
                         "steps": result.steps,
@@ -1486,6 +1511,8 @@ def main() -> int:
                         "mean_reward": result.mean_reward,
                         "mean_state_error": result.mean_state_error,
                         "final_state_error": result.final_state_error,
+                        "total_lqr_cost": result.total_lqr_cost,
+                        "mean_lqr_cost": result.mean_lqr_cost,
                         "send_rate": result.send_rate,
                         "mean_true_goodput_kbps": result.mean_true_goodput_kbps,
                         "steps": result.steps,
@@ -1530,6 +1557,8 @@ def main() -> int:
                         "mean_reward": result.mean_reward,
                         "mean_state_error": result.mean_state_error,
                         "final_state_error": result.final_state_error,
+                        "total_lqr_cost": result.total_lqr_cost,
+                        "mean_lqr_cost": result.mean_lqr_cost,
                         "send_rate": result.send_rate,
                         "mean_true_goodput_kbps": result.mean_true_goodput_kbps,
                         "steps": result.steps,
@@ -1556,6 +1585,8 @@ def main() -> int:
                 "mean_reward",
                 "mean_state_error",
                 "final_state_error",
+                "total_lqr_cost",
+                "mean_lqr_cost",
                 "send_rate",
                 "mean_true_goodput_kbps",
                 "steps",
@@ -1576,6 +1607,10 @@ def main() -> int:
                 "std_state_error",
                 "mean_final_error",
                 "std_final_error",
+                "mean_total_lqr_cost",
+                "std_total_lqr_cost",
+                "mean_lqr_cost",
+                "std_lqr_cost",
                 "mean_send_rate",
                 "std_send_rate",
                 "mean_true_goodput_kbps",

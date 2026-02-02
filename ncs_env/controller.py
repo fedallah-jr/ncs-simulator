@@ -1,11 +1,35 @@
 from __future__ import annotations
 
 from collections import deque
+import warnings
 from typing import Deque, List, Optional, Set, Tuple, Union
 
 import numpy as np
 from filterpy.kalman import KalmanFilter
 from scipy.linalg import solve_discrete_are
+
+
+def _regularize_control_cost(
+    R: np.ndarray,
+    eps: float = 1e-8,
+) -> Tuple[np.ndarray, bool]:
+    """Return a regularized control cost if R is near-singular."""
+    R_sym = 0.5 * (R + R.T)
+    try:
+        min_eig = float(np.min(np.linalg.eigvalsh(R_sym)))
+    except np.linalg.LinAlgError:
+        min_eig = -np.inf
+
+    if min_eig <= eps:
+        warnings.warn(
+            "Control cost matrix R is near-singular "
+            f"(min eigenvalue {min_eig:.3e}); regularizing with {eps:g} * I.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return R + eps * np.eye(R.shape[0]), True
+
+    return R, False
 
 
 def compute_discrete_lqr_solution(
@@ -39,11 +63,13 @@ def compute_discrete_lqr_solution(
     P : np.ndarray
         Optimal cost-to-go (Riccati) matrix
     """
+    R_eff, _ = _regularize_control_cost(R)
+
     # Solve discrete-time algebraic Riccati equation using scipy
-    P = solve_discrete_are(A, B, Q, R)
+    P = solve_discrete_are(A, B, Q, R_eff)
 
     # Compute optimal gain from solution
-    K = np.linalg.solve(R + B.T @ P @ B, B.T @ P @ A)
+    K = np.linalg.solve(R_eff + B.T @ P @ B, B.T @ P @ A)
 
     return K, P
 
@@ -126,6 +152,8 @@ def compute_finite_horizon_lqr_solution(
     costs : List[np.ndarray]
         List of cost-to-go matrices [P[0], P[1], ..., P[N-1]]
     """
+    R_eff, _ = _regularize_control_cost(R)
+
     # Terminal cost
     P_next = Q.copy()
 
@@ -136,7 +164,7 @@ def compute_finite_horizon_lqr_solution(
     # Backward recursion from k=N-1 down to k=0
     for k in range(horizon - 1, -1, -1):
         # Compute gain at timestep k
-        S = R + B.T @ P_next @ B
+        S = R_eff + B.T @ P_next @ B
         K = np.linalg.solve(S, B.T @ P_next @ A)  # More stable than inv(S) @ ...
 
         # Update P for previous timestep
@@ -348,18 +376,14 @@ class Controller:
         # Restore the prior state
         x_prior = prior_entry['x'].copy()
         P_prior = prior_entry['P'].copy()
-        # Apply Kalman update equations manually
-        # y = z - H @ x_prior (innovation)
-        H = self.kf.H
-        R = measurement_noise_cov if measurement_noise_cov is not None else self.kf.R
         z = measurement.reshape(-1, 1)
 
-        y = z - H @ x_prior
-        S = H @ P_prior @ H.T + R
-        K_gain = P_prior @ H.T @ np.linalg.inv(S)
-
-        x_posterior = x_prior + K_gain @ y
-        P_posterior = (np.eye(P_prior.shape[0]) - K_gain @ H) @ P_prior
+        self.kf.x = x_prior
+        self.kf.P = P_prior
+        if measurement_noise_cov is None:
+            self.kf.update(z)
+        else:
+            self.kf.update(z, R=measurement_noise_cov)
         # Collect controls from measurement_state_index to current_state_index
         controls = []
         for entry in self.control_history:
@@ -370,18 +394,9 @@ class Controller:
         controls.sort(key=lambda x: x['state_index'])
 
         # Re-predict forward using the controls
-        x_current = x_posterior
-        P_current = P_posterior
-
         for ctrl_entry in controls:
             u = ctrl_entry['u'].reshape(-1, 1)
-            # Predict: x = A @ x + B @ u, P = A @ P @ A.T + Q
-            x_current = self.A @ x_current + self.B @ u
-            P_current = self.A @ P_current @ self.A.T + self.kf.Q
-
-        # Update the Kalman filter state
-        self.kf.x = x_current
-        self.kf.P = P_current
+            self.kf.predict(u=u)
         self._record_seen_measurement(measurement_state_index)
         return True
 

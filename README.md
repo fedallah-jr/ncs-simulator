@@ -20,7 +20,7 @@ The configuration file is divided into sections; each key controls a specific as
 - `Q`, `R`: Cost matrices used to solve the discrete algebraic Riccati equation. They define how much the optimal controller cares about state deviation versus control effort.
 
 ### `reward`
-- `state_cost_matrix`: Matrix (Q) used to compute the quadratic tracking error `(x - x_ref)^T Q (x - x_ref)`. Rewards are the improvement in this error between consecutive steps (`r_t = e_{t-1} - e_t`), minus the communication penalty.
+- Tracking error always uses `lqr.Q` to compute `(x - x_ref)^T Q (x - x_ref)`. Rewards are the improvement in this error between consecutive steps (`r_t = e_{t-1} - e_t`), minus the communication penalty.
 - `state_error_reward`: Reward mode for tracking error. Options:
   - `"difference"` (default): Reward is improvement in tracking error (`r_t = e_{t-1} - e_t`).
   - `"absolute"`: Reward equals negative tracking error (`r_t = -e_t`).
@@ -45,7 +45,7 @@ When `perfect_communication=true`, the whole communication logic is bypassed dir
 
 ### `termination`
 - `enabled`: End the episode early when any agent exceeds `state_error_max`.
-- `state_error_max`: Threshold on `x^T Q x` using `reward.state_cost_matrix`. Any agent crossing it terminates the episode for all agents (use larger values when `Q` scales the error more aggressively).
+- `state_error_max`: Threshold on `x^T Q x` using `lqr.Q`. Any agent crossing it terminates the episode for all agents (use larger values when `Q` scales the error more aggressively).
 - `penalty`: Extra reward added when early termination is triggered by `state_error_max` or non-finite errors (default `0.0`; use a negative value to discourage failures).
 - `evaluation`: Optional override dictionary applied to evaluation environments (e.g., `{"penalty": 0.0}` to disable the termination penalty during eval).
 - Non-finite state errors always terminate to avoid NaNs/infs.
