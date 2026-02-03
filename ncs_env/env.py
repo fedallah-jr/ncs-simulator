@@ -218,6 +218,7 @@ class NCS_Env(gym.Env):
         self.finite_horizon_enabled = bool(lqr_cfg.get("finite_horizon", True))
         self.K_list: List[Union[np.ndarray, List[np.ndarray]]] = []
         self.S_list: List[Union[np.ndarray, List[np.ndarray]]] = []
+        self.M_list: List[Union[np.ndarray, List[np.ndarray]]] = []
 
         if self.finite_horizon_enabled:
             # Compute time-varying gains for finite horizon (uses self.episode_length)
@@ -227,12 +228,20 @@ class NCS_Env(gym.Env):
                 )
                 self.K_list.append(gains)
                 self.S_list.append(costs)
+                m_costs = []
+                for t, K_t in enumerate(gains):
+                    s_next = costs[t + 1] if t + 1 < len(costs) else lqr_Q
+                    gain_weight = lqr_R + B_i.T @ s_next @ B_i
+                    m_costs.append(K_t.T @ gain_weight @ K_t)
+                self.M_list.append(m_costs)
         else:
             # Original infinite-horizon DARE solver
             for (A_i, B_i) in agent_matrices:
                 gain, cost = compute_discrete_lqr_solution(A_i, B_i, lqr_Q, lqr_R)
                 self.K_list.append(gain)
                 self.S_list.append(cost)
+                gain_weight = lqr_R + B_i.T @ cost @ B_i
+                self.M_list.append(gain.T @ gain_weight @ gain)
 
         base_reward_cfg = self.config.get("reward", {})
         reward_cfg = self._merge_config_override(base_reward_cfg, self.reward_override)
@@ -1099,20 +1108,20 @@ class NCS_Env(gym.Env):
         dx = state  # reference is zero
         return float(dx.T @ self.state_cost_matrix @ dx)
 
-    def _get_cost_to_go_matrix(self, agent_idx: int) -> np.ndarray:
-        cost_entry = self.S_list[agent_idx]
-        if isinstance(cost_entry, list):
-            k = min(self.controllers[agent_idx].time_step, len(cost_entry) - 1)
-            return cost_entry[k]
-        return cost_entry
+    def _get_kf_info_matrix(self, agent_idx: int) -> np.ndarray:
+        info_entry = self.M_list[agent_idx]
+        if isinstance(info_entry, list):
+            k = min(self.controllers[agent_idx].time_step, len(info_entry) - 1)
+            return info_entry[k]
+        return info_entry
 
     def _compute_kf_step_reward(
         self,
         agent_idx: int,
         covariance: np.ndarray,
     ) -> float:
-        cost_to_go = self._get_cost_to_go_matrix(agent_idx)
-        return -float(np.trace(cost_to_go @ covariance))
+        weight = self._get_kf_info_matrix(agent_idx)
+        return -float(np.trace(weight @ covariance))
 
     def _compute_estimation_error(self, agent_idx: int, state: np.ndarray) -> float:
         """Weighted L1 estimation error ||Q (x - x_hat)||_1."""

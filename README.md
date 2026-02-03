@@ -27,7 +27,7 @@ The configuration file is divided into sections; each key controls a specific as
   - `"absolute_sqrt"`: Reward equals negative sqrt tracking error (`r_t = -sqrt(e_t)`).
   - `"estimate_error"`: Reward equals negative weighted L1 estimation error between the real state and the controller estimate (`r_t = -||Q (x - x_hat)||_1`).
   - `"estimate_errorl2"`: Reward equals negative weighted L2 estimation error between the real state and the controller estimate (`r_t = -(x - x_hat)^T Q (x - x_hat)`).
-  - `"kf_info"`: Reward equals the per-step estimation penalty `r_t = -tr(S P_t)` using the LQR Riccati matrix (more negative when uncertainty is higher).
+  - `"kf_info"`: Reward equals `r_t = -tr(M_t P_t)` where `M_t = K_t^T (R + B^T S_{t+1} B) K_t` (certainty-equivalent LQG weighting).
   - `"simple"`: Reward +1 if measurement delivered this step, 0 otherwise. Range: [0, max_steps].
   - `"simple_penalty"`: Reward 0 if measurement delivered, -1 otherwise. Range: [-max_steps, 0]. Symmetric version of "simple".
 - `comm_recent_window`: Short window (steps) used to count how many recent transmission attempts (`p>0`) an agent has initiated.
