@@ -214,6 +214,7 @@ def configure_shared_running_normalizers(
     *,
     sync_interval: int = _DEFAULT_SHARED_SYNC_INTERVAL,
     namespace: Optional[str] = None,
+    reset_store: bool = True,
 ) -> None:
     """
     Configure the backend store used for shared running reward normalizers.
@@ -221,7 +222,9 @@ def configure_shared_running_normalizers(
     Pass a multiprocessing.Manager().dict() and a shared lock when using
     multiple processes so statistics stay synchronized across workers. Passing
     None reverts to a process-local dictionary. The sync interval batches
-    updates to reduce IPC overhead, and the namespace isolates runs.
+    updates to reduce IPC overhead, and the namespace isolates runs. Set
+    reset_store=False when attaching workers to an existing shared store to
+    avoid clearing accumulated statistics.
     """
     global _SHARED_RUNNING_NORMALIZER_STORE, _SHARED_RUNNING_NORMALIZER_LOCK
     global _SHARED_RUNNING_NORMALIZER_SYNC_INTERVAL
@@ -237,7 +240,7 @@ def configure_shared_running_normalizers(
     else:
         set_running_normalizer_namespace(namespace or "shared")
     _SHARED_RUNNING_NORMALIZERS.clear()
-    if _SHARED_RUNNING_NORMALIZER_STORE is not None:
+    if reset_store and _SHARED_RUNNING_NORMALIZER_STORE is not None:
         if _SHARED_RUNNING_NORMALIZER_LOCK is not None:
             with _SHARED_RUNNING_NORMALIZER_LOCK:
                 _SHARED_RUNNING_NORMALIZER_STORE.clear()

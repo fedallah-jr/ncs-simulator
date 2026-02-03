@@ -10,6 +10,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 
+import multiprocessing
+from multiprocessing.managers import SyncManager
+
 import numpy as np
 import torch
 
@@ -189,3 +192,44 @@ def print_run_summary(
     print(f"  - Training rewards: {rewards_csv_path}")
     print(f"  - Evaluation rewards: {eval_csv_path}")
     print(f"  - Config with hyperparameters: {run_dir / 'config.json'}")
+
+
+def setup_shared_reward_normalizer(
+    reward_cfg: Dict[str, Any],
+    run_dir: Path,
+    *,
+    sync_interval: int = 32,
+) -> Tuple[Optional["SharedRewardNormalizerConfig"], Optional[SyncManager]]:
+    """
+    Configure shared running reward normalization for async vector env workers.
+
+    Returns:
+        Tuple of (shared normalizer config, manager). Manager is kept alive by caller.
+    """
+    if not bool(reward_cfg.get("normalize", False)):
+        return None, None
+
+    from utils.marl.vector_env import SharedRewardNormalizerConfig
+    from utils.reward_normalization import configure_shared_running_normalizers
+
+    manager = multiprocessing.Manager()
+    store = manager.dict()
+    lock = manager.Lock()
+    namespace = f"reward_norm:{run_dir.name}"
+
+    configure_shared_running_normalizers(
+        store,
+        lock,
+        sync_interval=sync_interval,
+        namespace=namespace,
+        reset_store=True,
+    )
+
+    config = SharedRewardNormalizerConfig(
+        store=store,
+        lock=lock,
+        namespace=namespace,
+        sync_interval=sync_interval,
+        reset_store=False,
+    )
+    return config, manager

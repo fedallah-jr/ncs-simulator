@@ -33,6 +33,7 @@ from utils.marl_training import (
     load_config_with_overrides,
     create_obs_normalizer,
     print_run_summary,
+    setup_shared_reward_normalizer,
 )
 from utils.marl.vector_env import create_async_vector_env, make_env, stack_vector_obs
 from utils.reward_normalization import reset_shared_running_normalizers
@@ -52,7 +53,7 @@ def main() -> None:
     args = parse_args()
     device, rng = setup_device_and_rng(args.device, args.seed)
 
-    _, config_path_str, n_agents, use_agent_id, eval_reward_override, eval_termination_override = (
+    cfg, config_path_str, n_agents, use_agent_id, eval_reward_override, eval_termination_override = (
         load_config_with_overrides(args.config, args.n_agents, not args.no_agent_id)
     )
 
@@ -65,6 +66,10 @@ def main() -> None:
     if args.train_interval <= 0:
         raise ValueError("train_interval must be positive")
 
+    shared_reward_normalizer, _shared_reward_manager = setup_shared_reward_normalizer(
+        cfg.get("reward", {}), run_dir
+    )
+
     env, env_seeds = create_async_vector_env(
         n_envs=args.n_envs,
         n_agents=n_agents,
@@ -72,6 +77,7 @@ def main() -> None:
         config_path_str=config_path_str,
         seed=args.seed,
         global_state_enabled=True,
+        shared_reward_normalizer=shared_reward_normalizer,
     )
     eval_env = make_env(
         n_agents=n_agents,

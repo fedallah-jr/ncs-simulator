@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, Dict, Optional, Tuple, List
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional, Tuple, List, MutableMapping
 
 import numpy as np
 from gymnasium.vector import AsyncVectorEnv
 from gymnasium.vector.async_vector_env import AutoresetMode
+
+
+@dataclass(frozen=True)
+class SharedRewardNormalizerConfig:
+    store: MutableMapping[str, Dict[str, float]]
+    lock: Any
+    namespace: str
+    sync_interval: int = 32
+    reset_store: bool = False
 
 
 def make_env(
@@ -17,8 +27,20 @@ def make_env(
     termination_override: Optional[Dict[str, Any]] = None,
     freeze_running_normalization: bool = False,
     global_state_enabled: bool = False,
+    shared_reward_normalizer: Optional[SharedRewardNormalizerConfig] = None,
 ) -> "NCS_Env":
     from ncs_env.env import NCS_Env
+
+    if shared_reward_normalizer is not None:
+        from utils.reward_normalization import configure_shared_running_normalizers
+
+        configure_shared_running_normalizers(
+            shared_reward_normalizer.store,
+            shared_reward_normalizer.lock,
+            sync_interval=shared_reward_normalizer.sync_interval,
+            namespace=shared_reward_normalizer.namespace,
+            reset_store=shared_reward_normalizer.reset_store,
+        )
 
     return NCS_Env(
         n_agents=n_agents,
@@ -38,6 +60,7 @@ def make_vector_env_fn(
     config_path_str: Optional[str],
     seed: Optional[int],
     global_state_enabled: bool = False,
+    shared_reward_normalizer: Optional[SharedRewardNormalizerConfig] = None,
 ) -> Callable[[], "VectorEnvAdapter"]:
     def _thunk() -> "VectorEnvAdapter":
         env = make_env(
@@ -46,6 +69,7 @@ def make_vector_env_fn(
             config_path_str,
             seed,
             global_state_enabled=global_state_enabled,
+            shared_reward_normalizer=shared_reward_normalizer,
         )
         return VectorEnvAdapter(env, n_agents)
 
@@ -91,6 +115,7 @@ def create_async_vector_env(
     config_path_str: Optional[str],
     seed: Optional[int],
     global_state_enabled: bool = False,
+    shared_reward_normalizer: Optional[SharedRewardNormalizerConfig] = None,
 ) -> Tuple[AsyncVectorEnv, Optional[List[int]]]:
     if n_envs <= 0:
         raise ValueError("n_envs must be positive")
@@ -109,6 +134,7 @@ def create_async_vector_env(
                 config_path_str=config_path_str,
                 seed=env_seed,
                 global_state_enabled=global_state_enabled,
+                shared_reward_normalizer=shared_reward_normalizer,
             )
         )
 

@@ -34,6 +34,7 @@ from utils.marl_training import (
     load_config_with_overrides,
     create_obs_normalizer,
     print_run_summary,
+    setup_shared_reward_normalizer,
 )
 from utils.reward_normalization import reset_shared_running_normalizers
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters, BestModelTracker
@@ -48,8 +49,20 @@ def _make_env(
     termination_override: Optional[Dict[str, Any]] = None,
     freeze_running_normalization: bool = False,
     global_state_enabled: bool = False,
+    shared_reward_normalizer: Optional["SharedRewardNormalizerConfig"] = None,
 ) -> "NCS_Env":
     from ncs_env.env import NCS_Env
+
+    if shared_reward_normalizer is not None:
+        from utils.reward_normalization import configure_shared_running_normalizers
+
+        configure_shared_running_normalizers(
+            shared_reward_normalizer.store,
+            shared_reward_normalizer.lock,
+            sync_interval=shared_reward_normalizer.sync_interval,
+            namespace=shared_reward_normalizer.namespace,
+            reset_store=shared_reward_normalizer.reset_store,
+        )
 
     return NCS_Env(
         n_agents=n_agents,
@@ -69,6 +82,7 @@ def _make_vector_env_fn(
     config_path_str: Optional[str],
     seed: Optional[int],
     global_state_enabled: bool = False,
+    shared_reward_normalizer: Optional["SharedRewardNormalizerConfig"] = None,
 ) -> Any:
     def _thunk() -> "_VectorEnvAdapter":
         env = _make_env(
@@ -77,6 +91,7 @@ def _make_vector_env_fn(
             config_path_str,
             seed,
             global_state_enabled=global_state_enabled,
+            shared_reward_normalizer=shared_reward_normalizer,
         )
         return _VectorEnvAdapter(env, n_agents)
 
@@ -251,7 +266,7 @@ def main() -> None:
     args = parse_args()
     device, rng = setup_device_and_rng(args.device, args.seed)
 
-    _, config_path_str, n_agents, use_agent_id, eval_reward_override, eval_termination_override = (
+    cfg, config_path_str, n_agents, use_agent_id, eval_reward_override, eval_termination_override = (
         load_config_with_overrides(args.config, args.n_agents, not args.no_agent_id)
     )
 
@@ -266,6 +281,10 @@ def main() -> None:
     if args.seed is not None:
         env_seeds = [int(args.seed) + env_idx for env_idx in range(args.n_envs)]
 
+    shared_reward_normalizer, _shared_reward_manager = setup_shared_reward_normalizer(
+        cfg.get("reward", {}), run_dir
+    )
+
     env_fns = []
     for env_idx in range(args.n_envs):
         seed = None if env_seeds is None else env_seeds[env_idx]
@@ -276,6 +295,7 @@ def main() -> None:
                 config_path_str,
                 seed,
                 global_state_enabled=True,
+                shared_reward_normalizer=shared_reward_normalizer,
             )
         )
     env = AsyncVectorEnv(env_fns, autoreset_mode=AutoresetMode.SAME_STEP)
