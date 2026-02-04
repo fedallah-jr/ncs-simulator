@@ -8,12 +8,12 @@
       { "A": [[1.0001, 0.0], [0.00, 1.00103]], "B": [[0.00012], [0.003]]},
       { "A": [[1, 0.00], [0.0, 1.0006]], "B": [ [0.002],[0.00011]]}
     ],
-    "process_noise_cov": [[0.0003, 0.0], [0.0, 0.0003]],
+    "process_noise_cov": [[1.0113, 0.0], [0.0, 1.0113]],
     "measurement_noise_scale_range": 0.0,
     "measurement_noise_cov": [[0.000, 0.0], [0.0, 0.000]],
     "initial_estimate_cov": [[1.0, 0.0], [0.0, 1.0]],
     "initial_state_scale_min": 0.8,
-    "initial_state_scale_max": 1.1,
+    "initial_state_scale_max": 2.2,
     "initial_state_fixed": true,
     "initial_state_fixed_seed": 0
   },
@@ -22,7 +22,7 @@
     "R": [[0.05]]
   },
     "reward": {
-      "state_error_reward": "kf_info",
+      "state_error_reward": "kf_info_m",
       "comm_penalty_alpha": 0.0,
       "comm_throughput_floor": 0.0,
       "normalize": false,
@@ -30,7 +30,7 @@
     "reward_clip_max": 10,
     "reward_clip_min": -10,
     "evaluation": {
-      "state_error_reward": "kf_info",
+      "state_error_reward": "kf_info_m",
       "comm_penalty_alpha": 0.0,
       "simple_comm_penalty_alpha": 0.0,
       "normalize": false
@@ -56,6 +56,6 @@
     "perfect_communication": false,
     "app_ack_enabled": true,
     "app_ack_packet_size": 30,
-    "tx_buffer_bytes": 150
+    "tx_buffer_bytes": 125
   }
 }

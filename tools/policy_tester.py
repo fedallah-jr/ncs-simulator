@@ -211,16 +211,15 @@ def _write_perfect_comm_config(config: Dict[str, Any], output_path: Path) -> Pat
     return output_path
 
 
-def _write_perfect_comm_perfect_measurements_config(
+def _write_perfect_control_config(
     config: Dict[str, Any],
     output_path: Path,
 ) -> Path:
     config_copy = copy.deepcopy(config)
     network_cfg = config_copy.setdefault("network", {})
     network_cfg["perfect_communication"] = True
-    system_cfg = config_copy.setdefault("system", {})
-    system_cfg["measurement_noise_cov"] = 0.0
-    system_cfg["measurement_noise_scale_range"] = 0.0
+    controller_cfg = config_copy.setdefault("controller", {})
+    controller_cfg["use_true_state_control"] = True
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w") as handle:
         json.dump(config_copy, handle, indent=2, sort_keys=True, ensure_ascii=True)
@@ -517,7 +516,7 @@ def _filter_rows(rows: List[Dict[str, Any]], fieldnames: Sequence[str]) -> List[
 
 def _extract_env_signature(config: Dict[str, Any]) -> Dict[str, Any]:
     signature: Dict[str, Any] = {}
-    for key in ("system", "lqr", "network", "observation", "termination"):
+    for key in ("system", "lqr", "network", "observation", "termination", "controller"):
         if key in config:
             signature[key] = config.get(key)
     reward_cfg = config.get("reward", {})
@@ -1116,6 +1115,20 @@ def _plot_combined_rewards(
         std_rewards = eval_df[std_reward_col].values if std_reward_col is not None else None
         smoothed_eval = _smooth_rewards(mean_rewards, window_size=20)
 
+        # Compute y-axis limits based on smoothed mean values only (not std bands)
+        all_smoothed = np.concatenate([smoothed_train, smoothed_eval])
+        y_min, y_max = float(np.min(all_smoothed)), float(np.max(all_smoothed))
+        y_range = y_max - y_min
+        y_padding = y_range * 0.15  # 15% padding to accommodate some variance
+        y_lim_min = y_min - y_padding
+        y_lim_max = y_max + y_padding
+
+        # Pre-compute smoothed std for plotting
+        if std_rewards is not None:
+            smoothed_std = _smooth_rewards(std_rewards, window_size=20)
+        else:
+            smoothed_std = None
+
         fig, ax_train = plt.subplots(figsize=(7, 5))
         ax_eval = ax_train.twiny()
 
@@ -1125,8 +1138,7 @@ def _plot_combined_rewards(
         ax_eval.plot(steps, mean_rewards, alpha=0.3, linewidth=0.5, color="green", label="Eval Raw")
         ax_eval.plot(steps, smoothed_eval, linewidth=2, color="green", label="Eval Smoothed (window=20)")
 
-        if std_rewards is not None:
-            smoothed_std = _smooth_rewards(std_rewards, window_size=20)
+        if smoothed_std is not None:
             ax_eval.fill_between(
                 steps,
                 smoothed_eval - smoothed_std,
@@ -1135,6 +1147,9 @@ def _plot_combined_rewards(
                 color="green",
                 label="Eval +/- 1 std",
             )
+
+        # Set y-axis limits based on smoothed values
+        ax_train.set_ylim(y_lim_min, y_lim_max)
 
         train_xlabel = "Generation" if "generation" in episode_col.lower() else "Episode"
         ax_train.set_xlabel(train_xlabel)
@@ -1190,9 +1205,20 @@ def _plot_training_rewards(
         rewards = train_df[reward_col].values
         smoothed = _smooth_rewards(rewards, window_size=200)
 
+        # Compute y-axis limits based on smoothed values with padding
+        y_min, y_max = float(np.min(smoothed)), float(np.max(smoothed))
+        y_range = y_max - y_min
+        y_padding = y_range * 0.15  # 15% padding to accommodate some variance
+        y_lim_min = y_min - y_padding
+        y_lim_max = y_max + y_padding
+
         fig, ax = plt.subplots(figsize=(7, 5))
         ax.plot(episodes, rewards, alpha=0.3, linewidth=0.5, color="blue", label="Raw")
         ax.plot(episodes, smoothed, linewidth=2, color="blue", label="Smoothed (window=200)")
+
+        # Set y-axis limits based on smoothed values
+        ax.set_ylim(y_lim_min, y_lim_max)
+
         ax.set_xlabel("Episode")
         ax.set_ylabel("Training Reward")
         ax.set_title(f"{model_name} - Training Rewards")
@@ -1244,12 +1270,24 @@ def _plot_evaluation_rewards(
         std_rewards = eval_df[std_reward_col].values if std_reward_col is not None else None
         smoothed = _smooth_rewards(mean_rewards, window_size=20)
 
+        # Compute y-axis limits based on smoothed mean values only (not std bands)
+        y_min, y_max = float(np.min(smoothed)), float(np.max(smoothed))
+        y_range = y_max - y_min
+        y_padding = y_range * 0.15  # 15% padding to accommodate some variance
+        y_lim_min = y_min - y_padding
+        y_lim_max = y_max + y_padding
+
+        # Pre-compute smoothed std for plotting
+        if std_rewards is not None:
+            smoothed_std = _smooth_rewards(std_rewards, window_size=20)
+        else:
+            smoothed_std = None
+
         fig, ax = plt.subplots(figsize=(7, 5))
         ax.plot(steps, mean_rewards, alpha=0.3, linewidth=0.5, color="green", label="Raw")
         ax.plot(steps, smoothed, linewidth=2, color="green", label="Smoothed (window=20)")
 
-        if std_rewards is not None:
-            smoothed_std = _smooth_rewards(std_rewards, window_size=20)
+        if smoothed_std is not None:
             ax.fill_between(
                 steps,
                 smoothed - smoothed_std,
@@ -1258,6 +1296,9 @@ def _plot_evaluation_rewards(
                 color="green",
                 label="+/- 1 std",
             )
+
+        # Set y-axis limits based on smoothed values
+        ax.set_ylim(y_lim_min, y_lim_max)
 
         ax.set_xlabel("Environment Steps")
         ax.set_ylabel("Evaluation Reward (mean)")
@@ -1528,18 +1569,18 @@ def main() -> int:
                     **_summarize_results(perfect_comm_results),
                 }
             )
-            perfect_comm_perfect_meas_config_path = _write_perfect_comm_perfect_measurements_config(
-                config, run_dir / "perfect_comm_perfect_meas_config.json"
+            perfect_control_config_path = _write_perfect_control_config(
+                config, run_dir / "perfect_control_config.json"
             )
-            _log("Perfect communication + perfect measurements baseline:")
-            perfect_comm_perfect_meas_spec = PolicySpec(
-                label="perfect_comm_perfect_meas_always_send",
+            _log("Perfect control baseline:")
+            perfect_control_spec = PolicySpec(
+                label="perfect_control_always_send",
                 policy_type="heuristic",
                 policy_path="always_send",
             )
-            perfect_comm_perfect_meas_results = _evaluate_policy(
-                perfect_comm_perfect_meas_spec,
-                config_path=perfect_comm_perfect_meas_config_path,
+            perfect_control_results = _evaluate_policy(
+                perfect_control_spec,
+                config_path=perfect_control_config_path,
                 episode_length=int(args.episode_length),
                 n_agents=resolved_n_agents,
                 seeds=seeds,
@@ -1547,7 +1588,7 @@ def main() -> int:
                 reward_override=reward_override,
                 num_workers=int(args.num_workers),
             )
-            for result in perfect_comm_perfect_meas_results:
+            for result in perfect_control_results:
                 per_seed_rows.append(
                     {
                         "policy_label": result.policy_label,
@@ -1568,10 +1609,10 @@ def main() -> int:
                 )
             summary_rows.append(
                 {
-                    "policy_label": "perfect_comm_perfect_meas_always_send",
+                    "policy_label": "perfect_control_always_send",
                     "policy_type": "heuristic",
-                    "num_seeds": len(perfect_comm_perfect_meas_results),
-                    **_summarize_results(perfect_comm_perfect_meas_results),
+                    "num_seeds": len(perfect_control_results),
+                    **_summarize_results(perfect_control_results),
                 }
             )
 
@@ -1848,21 +1889,21 @@ def main() -> int:
     leaderboard_rows.append(perfect_comm_summary)
     _log(f"results: {perfect_comm_dir / 'summary_results.csv'}", indent=2)
 
-    perfect_comm_perfect_meas_root = models_root / "perfect_comm_perfect_meas"
-    perfect_comm_perfect_meas_config_path = _write_perfect_comm_perfect_measurements_config(
+    perfect_control_root = models_root / "perfect_control"
+    perfect_control_config_path = _write_perfect_control_config(
         reference_config,
-        perfect_comm_perfect_meas_root / "perfect_comm_perfect_meas_config.json",
+        perfect_control_root / "perfect_control_config.json",
     )
-    _log("Perfect communication + perfect measurements baseline:")
-    _log(f"config: {perfect_comm_perfect_meas_config_path}", indent=2)
-    perfect_comm_perfect_meas_spec = PolicySpec(
-        label="perfect_comm_perfect_meas/always_send",
+    _log("Perfect control baseline:")
+    _log(f"config: {perfect_control_config_path}", indent=2)
+    perfect_control_spec = PolicySpec(
+        label="perfect_control/always_send",
         policy_type="heuristic",
         policy_path="always_send",
     )
-    perfect_comm_perfect_meas_results = _evaluate_policy(
-        perfect_comm_perfect_meas_spec,
-        config_path=perfect_comm_perfect_meas_config_path,
+    perfect_control_results = _evaluate_policy(
+        perfect_control_spec,
+        config_path=perfect_control_config_path,
         episode_length=int(args.episode_length),
         n_agents=resolved_n_agents,
         seeds=seeds,
@@ -1870,18 +1911,16 @@ def main() -> int:
         reward_override=reward_override,
         num_workers=int(args.num_workers),
     )
-    perfect_comm_perfect_meas_dir = (
-        perfect_comm_perfect_meas_root / "policy_tests" / "always_send_eval"
+    perfect_control_dir = perfect_control_root / "policy_tests" / "always_send_eval"
+    perfect_control_summary = _write_policy_results(
+        perfect_control_dir,
+        perfect_control_spec,
+        perfect_control_results,
     )
-    perfect_comm_perfect_meas_summary = _write_policy_results(
-        perfect_comm_perfect_meas_dir,
-        perfect_comm_perfect_meas_spec,
-        perfect_comm_perfect_meas_results,
-    )
-    perfect_comm_perfect_meas_summary["model_name"] = "perfect_comm_perfect_meas"
-    perfect_comm_perfect_meas_summary["checkpoint"] = "always_send"
-    leaderboard_rows.append(perfect_comm_perfect_meas_summary)
-    _log(f"results: {perfect_comm_perfect_meas_dir / 'summary_results.csv'}", indent=2)
+    perfect_control_summary["model_name"] = "perfect_control"
+    perfect_control_summary["checkpoint"] = "always_send"
+    leaderboard_rows.append(perfect_control_summary)
+    _log(f"results: {perfect_control_dir / 'summary_results.csv'}", indent=2)
 
     leaderboard_rows.sort(key=lambda row: float(row["mean_total_reward"]), reverse=True)
     ranked_rows: List[Dict[str, Any]] = []

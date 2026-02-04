@@ -45,12 +45,15 @@ class RewardDefinition:
             "estimate_error",
             "estimate_errorl2",
             "kf_info",
+            "kf_info_s",
+            "kf_info_m",
             "simple",
             "simple_penalty",
         }:
             raise ValueError(
                 "state_error_reward must be 'difference', 'absolute', 'absolute_sqrt', "
-                "'estimate_error', 'estimate_errorl2', 'kf_info', 'simple', or 'simple_penalty'"
+                "'estimate_error', 'estimate_errorl2', 'kf_info', 'kf_info_s', 'kf_info_m', "
+                "'simple', or 'simple_penalty'"
             )
         if float(self.simple_freshness_decay) < 0.0:
             raise ValueError("simple_freshness_decay must be >= 0")
@@ -213,6 +216,9 @@ class NCS_Env(gym.Env):
         self.lqr_R = np.array(lqr_cfg.get("R", np.eye(self.control_dim)))
         lqr_Q = self.lqr_Q
         lqr_R = self.lqr_R
+
+        controller_cfg = self.config.get("controller", {})
+        self.use_true_state_control = bool(controller_cfg.get("use_true_state_control", False))
 
         # Check if finite-horizon LQR is enabled (default: True)
         self.finite_horizon_enabled = bool(lqr_cfg.get("finite_horizon", True))
@@ -385,6 +391,8 @@ class NCS_Env(gym.Env):
             "curr_error": 0.0,
             "comm_penalty": 0.0,
             "kf_info_gain": 0.0,
+            "kf_info_gain_m": 0.0,
+            "kf_info_gain_s": 0.0,
         }
         self.last_reward_components: Dict[str, Dict[str, float]] = {
             f"agent_{i}": dict(base_components)
@@ -392,6 +400,8 @@ class NCS_Env(gym.Env):
         }
         self.last_errors: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_kf_info_gains: List[float] = [0.0 for _ in range(self.n_agents)]
+        self.last_kf_info_gains_m: List[float] = [0.0 for _ in range(self.n_agents)]
+        self.last_kf_info_gains_s: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_termination_reasons: List[str] = []
         self.last_termination_agents: List[int] = []
         self.last_bad_termination = False
@@ -449,6 +459,8 @@ class NCS_Env(gym.Env):
         current_noise_covs = self.current_measurement_noise_covs
         for i in range(self.n_agents):
             self.last_kf_info_gains[i] = 0.0
+            self.last_kf_info_gains_m[i] = 0.0
+            self.last_kf_info_gains_s[i] = 0.0
 
         # Store prior for each controller at current state index
         # This enables delayed measurement handling in network mode
@@ -585,19 +597,26 @@ class NCS_Env(gym.Env):
                 self._last_cleanup_step = self.timestep
 
         for i in range(self.n_agents):
-            self.last_kf_info_gains[i] = self._compute_kf_step_reward(
-                i,
-                self.controllers[i].P,
-            )
+            covariance = self.controllers[i].P
+            m_gain = self._compute_kf_step_reward(i, covariance, mode="m")
+            s_gain = self._compute_kf_step_reward(i, covariance, mode="s")
+            self.last_kf_info_gains_m[i] = m_gain
+            self.last_kf_info_gains_s[i] = s_gain
+            self.last_kf_info_gains[i] = m_gain + s_gain
 
         # Compute control and update plants
         lqr_costs = None
         if self.track_lqr_cost:
             lqr_costs = [0.0 for _ in range(self.n_agents)]
         for i in range(self.n_agents):
-            u = self.controllers[i].compute_control()
-            if lqr_costs is not None:
+            if self.use_true_state_control:
                 x = np.asarray(self.plants[i].get_state(), dtype=float).reshape(-1)
+                u = self.controllers[i].compute_control_from_state(x)
+            else:
+                u = self.controllers[i].compute_control()
+            if lqr_costs is not None:
+                if not self.use_true_state_control:
+                    x = np.asarray(self.plants[i].get_state(), dtype=float).reshape(-1)
                 u_vec = np.asarray(u, dtype=float).reshape(-1)
                 lqr_costs[i] = float(x @ self.lqr_Q @ x + u_vec @ self.lqr_R @ u_vec)
             self.plants[i].step(u)
@@ -639,16 +658,19 @@ class NCS_Env(gym.Env):
             info_arrived = i in delivered_controller_ids
             message_age_steps = delivered_message_ages.get(i) if info_arrived else None
 
+            info_gain = self._select_kf_info_gain(i, self.reward_definition.mode)
             components = self._compute_reward_for_definition(
                 i,
                 self.reward_definition,
                 prev_error,
                 curr_error,
                 action,
-                self.last_kf_info_gains[i],
+                info_gain,
                 info_arrived,
                 message_age_steps,
             )
+            components["kf_info_gain_m"] = float(self.last_kf_info_gains_m[i])
+            components["kf_info_gain_s"] = float(self.last_kf_info_gains_s[i])
             reward_value = components.pop("reward")
             combined_reward = reward_value
             combined_comm_penalty = components.get("comm_penalty", 0.0)
@@ -1115,13 +1137,40 @@ class NCS_Env(gym.Env):
             return info_entry[k]
         return info_entry
 
+    def _get_kf_state_cost_matrix(self, agent_idx: int) -> np.ndarray:
+        state_entry = self.S_list[agent_idx]
+        if isinstance(state_entry, list):
+            k = min(self.controllers[agent_idx].time_step, len(state_entry) - 1)
+            return state_entry[k]
+        return state_entry
+
     def _compute_kf_step_reward(
         self,
         agent_idx: int,
         covariance: np.ndarray,
+        *,
+        mode: str = "combined",
     ) -> float:
-        weight = self._get_kf_info_matrix(agent_idx)
+        info_weight = self._get_kf_info_matrix(agent_idx)
+        state_weight = self._get_kf_state_cost_matrix(agent_idx)
+        if mode == "m":
+            weight = info_weight
+        elif mode == "s":
+            weight = state_weight
+        elif mode == "combined":
+            weight = info_weight + state_weight
+        else:
+            raise ValueError(f"Unsupported kf_info mode: {mode}")
         return -float(np.trace(weight @ covariance))
+
+    def _select_kf_info_gain(self, agent_idx: int, mode: str) -> float:
+        if mode == "kf_info_m":
+            return self.last_kf_info_gains_m[agent_idx]
+        if mode == "kf_info_s":
+            return self.last_kf_info_gains_s[agent_idx]
+        if mode == "kf_info":
+            return self.last_kf_info_gains[agent_idx]
+        return 0.0
 
     def _compute_estimation_error(self, agent_idx: int, state: np.ndarray) -> float:
         """Weighted L1 estimation error ||Q (x - x_hat)||_1."""
@@ -1142,7 +1191,7 @@ class NCS_Env(gym.Env):
             return self._compute_estimation_error(agent_idx, state)
         if self.reward_definition.mode == "estimate_errorl2":
             return self._compute_estimation_error_l2(agent_idx, state)
-        if self.reward_definition.mode == "kf_info":
+        if self.reward_definition.mode in {"kf_info", "kf_info_s", "kf_info_m"}:
             return 0.0
         return self._compute_state_error(state)
 
@@ -1258,7 +1307,7 @@ class NCS_Env(gym.Env):
             error_reward = -curr_error
         elif definition.mode == "estimate_errorl2":
             error_reward = -curr_error
-        elif definition.mode == "kf_info":
+        elif definition.mode in {"kf_info", "kf_info_s", "kf_info_m"}:
             error_reward = float(info_gain)
         elif definition.mode == "simple_penalty":
             # Symmetric version of "simple": 0 if measurement delivered, -1 otherwise

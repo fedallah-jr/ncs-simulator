@@ -430,6 +430,28 @@ class Controller:
 
         return u
 
+    def compute_control_from_state(self, state: np.ndarray) -> np.ndarray:
+        """Compute control input using the provided true state (no estimation)."""
+        x = np.asarray(state, dtype=float).reshape(-1)
+        if self.use_finite_horizon:
+            k = min(self.time_step, len(self.K_list) - 1)
+            K_now = self.K_list[k]
+            u = -K_now @ x
+            self.time_step += 1
+        else:
+            u = -self.K @ x
+
+        self.last_u = u.copy()
+
+        # Store control for delayed measurement handling
+        # Control u[k] is computed at state index k and applied to transition x[k] -> x[k+1]
+        self.control_history.append({
+            'state_index': self.current_state_index,
+            'u': u.copy()
+        })
+
+        return u
+
     def reset(self, initial_estimate: np.ndarray):
         """Reset controller state and covariance."""
         self.kf.x = initial_estimate.copy().reshape(-1, 1)

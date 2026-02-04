@@ -27,7 +27,9 @@ The configuration file is divided into sections; each key controls a specific as
   - `"absolute_sqrt"`: Reward equals negative sqrt tracking error (`r_t = -sqrt(e_t)`).
   - `"estimate_error"`: Reward equals negative weighted L1 estimation error between the real state and the controller estimate (`r_t = -||Q (x - x_hat)||_1`).
   - `"estimate_errorl2"`: Reward equals negative weighted L2 estimation error between the real state and the controller estimate (`r_t = -(x - x_hat)^T Q (x - x_hat)`).
-  - `"kf_info"`: Reward equals `r_t = -tr(M_t P_t)` where `M_t = K_t^T (R + B^T S_{t+1} B) K_t` (certainty-equivalent LQG weighting).
+- `"kf_info"`: Reward equals `r_t = -tr((M_t + S_t) P_t)` where `M_t = K_t^T (R + B^T S_{t+1} B) K_t` (certainty-equivalent LQG weighting).
+- `"kf_info_m"`: Reward equals `r_t = -tr(M_t P_t)` (control-weighted estimation uncertainty).
+- `"kf_info_s"`: Reward equals `r_t = -tr(S_t P_t)` (state-cost-weighted estimation uncertainty).
   - `"simple"`: Reward +1 if measurement delivered this step, 0 otherwise. Range: [0, max_steps].
   - `"simple_penalty"`: Reward 0 if measurement delivered, -1 otherwise. Range: [-max_steps, 0]. Symmetric version of "simple".
 - `comm_recent_window`: Short window (steps) used to count how many recent transmission attempts (`p>0`) an agent has initiated.
@@ -77,6 +79,9 @@ Observations are laid out as `[current_measurement, current_throughput(s), curre
 - `tx_buffer_bytes`: Optional per-sensor TX buffer capacity in bytes for queued data packets (beyond the in-flight packet). Set to `0` to disable buffering (current behavior). When set, packets are queued FIFO until the buffer is full.
 
 Note: `tx_buffer_bytes` applies only to data packets; MAC/app ACKs are still sent immediately and are not buffered.
+
+### `controller`
+- `use_true_state_control`: When `true`, controllers compute `u = -K x` using the true plant state instead of the Kalman estimate (`x_hat`). The Kalman filter still runs, but control no longer depends on it.
 
 Adjusting these parameters lets you explore different plant dynamics, estimator fidelity, reward shaping, or network congestion levels without modifying the source code.
 
@@ -154,7 +159,7 @@ Policy testing lives in `tools/policy_tester.py` and evaluates a target policy a
   - Expects subfolders like `model_1/config.json`, `model_1/best_model.pt`, `model_1/latest_model.pt`.
   - Writes `leaderboard.csv` at the models root plus per-model evaluation folders under `model_*/policy_tests/`.
 - Example (heuristics only): `python -m tools.policy_tester --config configs/marl_mixed_plants.json --only-heuristics --num-seeds 50`
-  - Evaluates the three heuristic baselines (`zero_wait`, `always_send`, `random_50`) plus a perfect communication baseline (`always_send` with `network.perfect_communication=true`).
+  - Evaluates the three heuristic baselines (`zero_wait`, `always_send`, `random_50`) plus a perfect communication baseline (`always_send` with `network.perfect_communication=true`) and a perfect control baseline (`always_send` with `controller.use_true_state_control=true`).
   - Useful for establishing baseline performance metrics before training.
 
 ### Saved Configuration Format
