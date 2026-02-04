@@ -1509,6 +1509,7 @@ class NCS_Env(gym.Env):
             "channel_state": "PERFECT" if self.perfect_communication else self.network.channel_state.name,
             "states": [plant.get_state() for plant in self.plants],
             "estimates": [controller.x_hat.copy() for controller in self.controllers],
+            "estimate_covariances": [controller.P.copy() for controller in self.controllers],
             "throughput_kbps": 0.0 if self.perfect_communication else self._compute_throughput(),
             "collided_packets": 0 if self.perfect_communication else self.network.total_collided_packets,
             "network_stats": {

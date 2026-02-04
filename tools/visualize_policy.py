@@ -382,6 +382,7 @@ def run_episode_multi_agent(
 
     states = np.zeros((episode_length + 1, n_agents, state_dim), dtype=np.float32)
     estimates = np.zeros((episode_length + 1, n_agents, state_dim), dtype=np.float32)
+    estimate_covariances = np.zeros((episode_length + 1, n_agents, state_dim, state_dim), dtype=np.float32)
     actions = np.zeros((episode_length, n_agents), dtype=np.int64)
     rewards = np.zeros((episode_length, n_agents), dtype=np.float32)
     state_errors = np.zeros((episode_length + 1, n_agents), dtype=np.float32)
@@ -397,6 +398,7 @@ def run_episode_multi_agent(
 
     states[0] = np.asarray(info.get("states", states[0]), dtype=np.float32)
     estimates[0] = np.asarray(info.get("estimates", estimates[0]), dtype=np.float32)
+    estimate_covariances[0] = np.asarray(info.get("estimate_covariances", estimate_covariances[0]), dtype=np.float32)
     state_errors[0] = np.linalg.norm(states[0], axis=1).astype(np.float32)
     throughputs[0] = float(info.get("true_goodput_kbps_total", info.get("throughput_kbps", 0.0)))
     collided_packets[0] = float(info.get("collided_packets", 0.0))
@@ -411,6 +413,7 @@ def run_episode_multi_agent(
 
         states[t + 1] = np.asarray(info.get("states", states[t + 1]), dtype=np.float32)
         estimates[t + 1] = np.asarray(info.get("estimates", estimates[t + 1]), dtype=np.float32)
+        estimate_covariances[t + 1] = np.asarray(info.get("estimate_covariances", estimate_covariances[t + 1]), dtype=np.float32)
         state_errors[t + 1] = np.linalg.norm(states[t + 1], axis=1).astype(np.float32)
         throughputs[t + 1] = float(info.get("true_goodput_kbps_total", info.get("throughput_kbps", 0.0)))
         collided_packets[t + 1] = float(info.get("collided_packets", 0.0))
@@ -426,6 +429,7 @@ def run_episode_multi_agent(
             end = t + 1
             states = states[: end + 1]
             estimates = estimates[: end + 1]
+            estimate_covariances = estimate_covariances[: end + 1]
             actions = actions[:end]
             rewards = rewards[:end]
             state_errors = state_errors[: end + 1]
@@ -436,6 +440,7 @@ def run_episode_multi_agent(
     return {
         "states": states,
         "estimates": estimates,
+        "estimate_covariances": estimate_covariances,
         "actions": actions,
         "rewards": rewards,
         "state_errors": state_errors,
@@ -619,19 +624,69 @@ def plot_marl_action_raster(
     actions = np.asarray(traj["actions"], dtype=np.int64)
     n_steps, n_agents = actions.shape
 
-    fig, ax = plt.subplots(1, 1, figsize=(14, 3 + 0.3 * n_agents))
-    im = ax.imshow(actions.T, aspect="auto", interpolation="nearest", cmap="Greys", vmin=0, vmax=1)
-    ax.set_xlabel("Timestep", fontsize=12)
-    ax.set_ylabel("Agent", fontsize=12)
-    ax.set_yticks(np.arange(n_agents))
-    ax.set_yticklabels([f"agent_{i}" for i in range(n_agents)])
-    ax.set_title(f"{title} - {label}", fontsize=14, fontweight="bold")
-    fig.colorbar(im, ax=ax, fraction=0.02, pad=0.02, ticks=[0, 1], label="Action (0/1)")
-    ax.grid(False)
+    # Get state errors and error covariances
+    state_errors = np.asarray(traj["state_errors"], dtype=np.float32)
+    estimate_covariances = np.asarray(traj["estimate_covariances"], dtype=np.float32)
+
+    # Align state_errors with actions (state_errors has n_steps+1, actions has n_steps)
+    # Use state_errors[1:] to show state errors after each action
+    state_errors_aligned = state_errors[1:, :]  # Shape: (n_steps, n_agents)
+
+    # Compute trace of P for each agent at each timestep (measure of total uncertainty)
+    # estimate_covariances shape: (n_steps+1, n_agents, state_dim, state_dim)
+    covariances_aligned = estimate_covariances[1:, :, :, :]  # Shape: (n_steps, n_agents, state_dim, state_dim)
+    trace_P = np.trace(covariances_aligned, axis1=2, axis2=3)  # Shape: (n_steps, n_agents)
+
+    # Create figure with 3 subplots
+    fig, axes = plt.subplots(3, 1, figsize=(14, 9 + 0.3 * n_agents), sharex=True)
+
+    # Plot 1: Actions
+    ax1 = axes[0]
+    im1 = ax1.imshow(actions.T, aspect="auto", interpolation="nearest", cmap="Greys", vmin=0, vmax=1)
+    ax1.set_ylabel("Agent", fontsize=12)
+    ax1.set_yticks(np.arange(n_agents))
+    ax1.set_yticklabels([f"agent_{i}" for i in range(n_agents)])
+    ax1.set_title(f"Actions - {label}", fontsize=14, fontweight="bold")
+    cbar1 = fig.colorbar(im1, ax=ax1, fraction=0.02, pad=0.02)
+    cbar1.set_label("Action (0=No Send, 1=Send)", fontsize=10)
+    cbar1.set_ticks([0, 1])
+    ax1.grid(False)
+
+    # Plot 2: State Errors
+    ax2 = axes[1]
+    state_errors_vis = state_errors_aligned.T
+    vmin_error = np.percentile(state_errors_vis, 1)
+    vmax_error = np.percentile(state_errors_vis, 99)
+    im2 = ax2.imshow(state_errors_vis, aspect="auto", interpolation="nearest",
+                     cmap="YlOrRd", vmin=vmin_error, vmax=vmax_error)
+    ax2.set_ylabel("Agent", fontsize=12)
+    ax2.set_yticks(np.arange(n_agents))
+    ax2.set_yticklabels([f"agent_{i}" for i in range(n_agents)])
+    ax2.set_title(f"State Error (||x||) - {label}", fontsize=14, fontweight="bold")
+    cbar2 = fig.colorbar(im2, ax=ax2, fraction=0.02, pad=0.02)
+    cbar2.set_label("State Error", fontsize=10)
+    ax2.grid(False)
+
+    # Plot 3: Estimation Error Covariance (trace of P)
+    ax3 = axes[2]
+    trace_P_vis = trace_P.T
+    vmin_cov = np.percentile(trace_P_vis, 1)
+    vmax_cov = np.percentile(trace_P_vis, 99)
+    im3 = ax3.imshow(trace_P_vis, aspect="auto", interpolation="nearest",
+                     cmap="RdPu", vmin=vmin_cov, vmax=vmax_cov)
+    ax3.set_xlabel("Timestep", fontsize=12)
+    ax3.set_ylabel("Agent", fontsize=12)
+    ax3.set_yticks(np.arange(n_agents))
+    ax3.set_yticklabels([f"agent_{i}" for i in range(n_agents)])
+    ax3.set_title(f"Estimation Uncertainty (tr(P)) - {label}", fontsize=14, fontweight="bold")
+    cbar3 = fig.colorbar(im3, ax=ax3, fraction=0.02, pad=0.02)
+    cbar3.set_label("Trace of P", fontsize=10)
+    ax3.grid(False)
+
     plt.tight_layout()
     plt.savefig(str(save_path), dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print(f"✓ Saved action raster to {save_path}")
+    print(f"✓ Saved action raster with state errors and estimation uncertainty to {save_path}")
 
 
 def plot_marl_state_space_2d(

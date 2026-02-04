@@ -37,7 +37,12 @@ from tools.visualize_policy import (
 )
 
 # Heuristic policies to compare against (edit as needed).
-HEURISTIC_POLICY_NAMES: Sequence[str] = ("zero_wait", "always_send", "random_50")
+HEURISTIC_POLICY_NAMES: Sequence[str] = (
+    "zero_wait",
+    "always_send",
+    "never_send",
+    "random_50",
+)
 
 # Names for stochastic heuristics that should use non-deterministic actions.
 STOCHASTIC_HEURISTICS: Sequence[str] = ("random_50",)
@@ -1391,7 +1396,7 @@ def main() -> int:
     parser.add_argument(
         "--only-heuristics",
         action="store_true",
-        help="Evaluate only heuristic baselines (zero_wait, random_50, always_send)",
+        help="Evaluate only heuristic baselines (zero_wait, always_send, never_send, random_50)",
     )
     args = parser.parse_args()
 
