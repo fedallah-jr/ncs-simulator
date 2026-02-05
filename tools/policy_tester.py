@@ -3,6 +3,21 @@ Policy testing tool for the NCS simulator.
 
 Evaluates a target policy against a fixed set of heuristic baselines across multiple seeds.
 By default uses raw absolute reward without normalization; enable normalization via CLI.
+
+Replay Testing:
+    Use --test-replay to test policy determinism by recording actions on a recording seed
+    (default 424242), then comparing original vs replay policies on test seeds.
+
+    Works in both single-policy and batch (--models-root) modes:
+    - Single mode: Creates replay_test/ subdirectory with comparison results
+    - Batch mode: Creates separate replayboard.csv with original vs replay for each model
+      (not included in main leaderboard)
+
+    Reports for each policy:
+    - How many environments yielded the same reward (exact matches)
+    - How many times replay wins (replay reward > original reward)
+    - How many times original wins (original reward > replay reward)
+    - Statistical analysis of reward differences
 """
 
 from __future__ import annotations
@@ -48,9 +63,12 @@ HEURISTIC_POLICY_NAMES: Sequence[str] = (
 STOCHASTIC_HEURISTICS: Sequence[str] = ("random_50",)
 
 # Reward override for evaluation: absolute reward, no normalization by default.
+# Always disable reward clipping during evaluation.
 EVAL_REWARD_OVERRIDE: Dict[str, Any] = {
     "state_error_reward": "absolute",
     "normalize": False,
+    "reward_clip_min": None,
+    "reward_clip_max": None,
 }
 
 # Keep evaluation seeds disjoint from training-time evaluation (0-10).
@@ -135,6 +153,25 @@ class MultiAgentHeuristicPolicy:
         return actions
 
 
+class ReplayPolicy:
+    """Policy that replays a pre-recorded action sequence."""
+    def __init__(self, recorded_actions: List[Dict[str, int]], n_agents: int) -> None:
+        self.recorded_actions = recorded_actions
+        self.n_agents = int(n_agents)
+        self.step_index = 0
+
+    def reset(self) -> None:
+        self.step_index = 0
+
+    def act(self, obs_dict: Dict[str, np.ndarray]) -> Dict[str, int]:
+        if self.step_index >= len(self.recorded_actions):
+            # Return zero actions if we've exhausted the recording
+            return {f"agent_{i}": 0 for i in range(self.n_agents)}
+        actions = dict(self.recorded_actions[self.step_index])
+        self.step_index += 1
+        return actions
+
+
 def _sanitize_filename(value: str) -> str:
     keep = []
     for ch in value:
@@ -199,10 +236,126 @@ def _safe_rate(numerator: float, denominator: float) -> float:
     return float(numerator) / float(denominator)
 
 
+def _record_policy_actions(
+    policy: Any,
+    config_path: Path,
+    episode_length: int,
+    n_agents: int,
+    recording_seed: int,
+    termination_override: Optional[Dict[str, Any]],
+    reward_override: Optional[Dict[str, Any]],
+) -> List[Dict[str, int]]:
+    """Record actions from a policy for one episode."""
+    env = _build_env(
+        config_path,
+        episode_length,
+        n_agents,
+        recording_seed,
+        termination_override,
+        reward_override,
+    )
+    try:
+        if hasattr(policy, "reset"):
+            policy.reset()
+        obs_dict, _ = env.reset(seed=recording_seed)
+        recorded_actions: List[Dict[str, int]] = []
+
+        for _ in range(episode_length):
+            action_dict = policy.act(obs_dict)
+            recorded_actions.append(dict(action_dict))
+            obs_dict, _, terminated, truncated, _ = env.step(action_dict)
+
+            done = any(
+                bool(terminated[f"agent_{i}"]) or bool(truncated[f"agent_{i}"])
+                for i in range(n_agents)
+            )
+            if done:
+                break
+
+        return recorded_actions
+    finally:
+        if hasattr(env, "close"):
+            env.close()
+
+
+@dataclass
+class ReplayComparison:
+    """Results of comparing replay vs original policy."""
+    seed: int
+    original_reward: float
+    replay_reward: float
+    reward_diff: float
+    match: bool  # True if rewards are exactly equal
+    original_wins: bool  # True if original > replay
+    replay_wins: bool  # True if replay > original
+
+
+def _compare_replay_vs_original(
+    original_results: List[EpisodeResult],
+    replay_results: List[EpisodeResult],
+    tolerance: float = 1e-6,
+) -> Tuple[List[ReplayComparison], Dict[str, Any]]:
+    """Compare original policy vs replay policy results."""
+    if len(original_results) != len(replay_results):
+        raise ValueError("Result lists must have the same length")
+
+    comparisons: List[ReplayComparison] = []
+    for orig, replay in zip(original_results, replay_results):
+        if orig.seed != replay.seed:
+            raise ValueError(f"Seed mismatch: {orig.seed} vs {replay.seed}")
+
+        reward_diff = float(orig.total_reward - replay.total_reward)
+        match = abs(reward_diff) < tolerance
+        original_wins = reward_diff > tolerance
+        replay_wins = reward_diff < -tolerance
+
+        comparisons.append(
+            ReplayComparison(
+                seed=orig.seed,
+                original_reward=orig.total_reward,
+                replay_reward=replay.total_reward,
+                reward_diff=reward_diff,
+                match=match,
+                original_wins=original_wins,
+                replay_wins=replay_wins,
+            )
+        )
+
+    # Compute summary statistics
+    n_total = len(comparisons)
+    n_matches = sum(1 for c in comparisons if c.match)
+    n_original_wins = sum(1 for c in comparisons if c.original_wins)
+    n_replay_wins = sum(1 for c in comparisons if c.replay_wins)
+
+    avg_reward_diff = float(np.mean([c.reward_diff for c in comparisons]))
+    std_reward_diff = float(np.std([c.reward_diff for c in comparisons]))
+    max_reward_diff = float(max(abs(c.reward_diff) for c in comparisons))
+
+    summary = {
+        "n_total": n_total,
+        "n_matches": n_matches,
+        "n_original_wins": n_original_wins,
+        "n_replay_wins": n_replay_wins,
+        "match_rate": float(n_matches) / float(n_total) if n_total > 0 else 0.0,
+        "original_win_rate": float(n_original_wins) / float(n_total) if n_total > 0 else 0.0,
+        "replay_win_rate": float(n_replay_wins) / float(n_total) if n_total > 0 else 0.0,
+        "avg_reward_diff": avg_reward_diff,
+        "std_reward_diff": std_reward_diff,
+        "max_reward_diff": max_reward_diff,
+        "avg_original_reward": float(np.mean([c.original_reward for c in comparisons])),
+        "avg_replay_reward": float(np.mean([c.replay_reward for c in comparisons])),
+    }
+
+    return comparisons, summary
+
+
 def _build_reward_override(use_reward_normalization: bool) -> Dict[str, Any]:
     reward_override = dict(EVAL_REWARD_OVERRIDE)
     if use_reward_normalization:
         reward_override["normalize"] = True
+    # Always disable reward clipping during evaluation
+    reward_override["reward_clip_min"] = None
+    reward_override["reward_clip_max"] = None
     return reward_override
 
 
@@ -853,6 +1006,54 @@ def _write_policy_results(
     return summary_row
 
 
+def _write_replay_comparison(
+    run_dir: Path,
+    comparisons: List[ReplayComparison],
+    summary: Dict[str, Any],
+    recording_seed: int,
+) -> None:
+    """Write replay vs original comparison results to files."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write per-seed comparison
+    comparison_rows: List[Dict[str, Any]] = []
+    for comp in comparisons:
+        comparison_rows.append(
+            {
+                "seed": comp.seed,
+                "original_reward": comp.original_reward,
+                "replay_reward": comp.replay_reward,
+                "reward_diff": comp.reward_diff,
+                "match": comp.match,
+                "original_wins": comp.original_wins,
+                "replay_wins": comp.replay_wins,
+            }
+        )
+
+    _write_csv(
+        run_dir / "replay_comparison.csv",
+        [
+            "seed",
+            "original_reward",
+            "replay_reward",
+            "reward_diff",
+            "match",
+            "original_wins",
+            "replay_wins",
+        ],
+        comparison_rows,
+    )
+
+    # Write summary with recording info
+    summary_with_meta = {
+        "recording_seed": recording_seed,
+        **summary,
+    }
+
+    with (run_dir / "replay_summary.json").open("w") as f:
+        json.dump(summary_with_meta, f, indent=2, sort_keys=True, ensure_ascii=True)
+
+
 def _write_leaderboard(path: Path, rows: List[Dict[str, Any]]) -> None:
     fieldnames = [
         "rank",
@@ -922,6 +1123,32 @@ def _write_network_stats_leaderboard(path: Path, rows: List[Dict[str, Any]]) -> 
         "std_ack_collision_rate",
         "mean_ack_timeout_rate",
         "std_ack_timeout_rate",
+    ]
+    _write_csv(path, fieldnames, _filter_rows(rows, fieldnames))
+
+
+def _write_replayboard(path: Path, rows: List[Dict[str, Any]]) -> None:
+    """Write replayboard comparing original vs replay policies."""
+    fieldnames = [
+        "model_name",
+        "checkpoint",
+        "policy_type",
+        "num_seeds",
+        "mean_total_reward",
+        "std_total_reward",
+        "mean_state_error",
+        "std_state_error",
+        "mean_final_error",
+        "std_final_error",
+        "mean_lqr_cost",
+        "std_lqr_cost",
+        "mean_send_rate",
+        "std_send_rate",
+        "mean_steps",
+        "std_steps",
+        "mean_reward_per_step",
+        "std_reward_per_step",
+        "completion_rate",
     ]
     _write_csv(path, fieldnames, _filter_rows(rows, fieldnames))
 
@@ -1398,15 +1625,42 @@ def main() -> int:
         action="store_true",
         help="Evaluate only heuristic baselines (zero_wait, always_send, never_send, random_50)",
     )
+    parser.add_argument(
+        "--test-replay",
+        action="store_true",
+        help="Test determinism by recording actions and comparing replay vs original policy",
+    )
+    parser.add_argument(
+        "--replay-recording-seed",
+        type=int,
+        default=424242,
+        help="Seed to use for recording actions (default: 424242, unlikely to conflict with eval seeds)",
+    )
+    parser.add_argument(
+        "--replay-tolerance",
+        type=float,
+        default=1e-6,
+        help="Tolerance for considering rewards as matching (default: 1e-6)",
+    )
     args = parser.parse_args()
 
     if args.num_seeds < 1:
         raise ValueError("--num-seeds must be >= 1")
     if args.num_workers < 1:
         raise ValueError("--num-workers must be >= 1")
-    reward_override = None if args.no_override else _build_reward_override(bool(args.use_reward_normalization))
+    # Always disable reward clipping during evaluation, even with --no-override
+    if args.no_override:
+        reward_override = {
+            "reward_clip_min": None,
+            "reward_clip_max": None,
+        }
+    else:
+        reward_override = _build_reward_override(bool(args.use_reward_normalization))
     if args.no_override and args.use_reward_normalization:
         _log("Note: --use-reward-normalization ignored because --no-override is set.")
+
+    if args.test_replay and args.only_heuristics:
+        raise ValueError("--test-replay cannot be used with --only-heuristics.")
 
     if args.only_heuristics:
         if args.models_root or args.policy or args.policy_type:
@@ -1472,6 +1726,8 @@ def main() -> int:
         _log(f"Seeds: {_format_seed_range(seeds)} ({len(seeds)})")
         if args.num_workers > 1:
             _log(f"Workers: {args.num_workers}")
+        if args.test_replay and not args.only_heuristics:
+            _log(f"Replay testing: enabled (recording seed {args.replay_recording_seed})")
         if args.no_override:
             _log("Evaluation: reward from config (no override).")
         elif args.use_reward_normalization:
@@ -1620,6 +1876,121 @@ def main() -> int:
                     **_summarize_results(perfect_control_results),
                 }
             )
+
+        # Replay test: compare original policy vs replay on test seeds
+        if args.test_replay and not args.only_heuristics and policy_type is not None:
+            _log("\nReplay determinism test:")
+            _log(f"Recording actions on seed {args.replay_recording_seed}")
+
+            # Load the target policy
+            env_for_loading = _build_env(
+                config_path,
+                int(args.episode_length),
+                resolved_n_agents,
+                args.replay_recording_seed,
+                termination_override,
+                reward_override,
+            )
+            try:
+                target_spec = PolicySpec(
+                    label=target_label,
+                    policy_type=policy_type,
+                    policy_path=args.policy,
+                )
+                original_policy = _load_policy(target_spec, env_for_loading, seed=args.replay_recording_seed)
+            finally:
+                if hasattr(env_for_loading, "close"):
+                    env_for_loading.close()
+
+            # Record actions
+            _log("Recording policy actions...")
+            recorded_actions = _record_policy_actions(
+                original_policy,
+                config_path,
+                int(args.episode_length),
+                resolved_n_agents,
+                args.replay_recording_seed,
+                termination_override,
+                reward_override,
+            )
+            _log(f"Recorded {len(recorded_actions)} timesteps")
+
+            # Evaluate original policy on test seeds
+            _log(f"Evaluating original policy on {len(seeds)} test seeds...")
+            original_results = _evaluate_policy(
+                target_spec,
+                config_path=config_path,
+                episode_length=int(args.episode_length),
+                n_agents=resolved_n_agents,
+                seeds=seeds,
+                termination_override=termination_override,
+                reward_override=reward_override,
+                num_workers=int(args.num_workers),
+            )
+
+            # Create and evaluate replay policy
+            _log(f"Evaluating replay policy on {len(seeds)} test seeds...")
+            replay_spec = PolicySpec(
+                label=f"{target_label}_replay",
+                policy_type="replay",
+                policy_path="replay",
+            )
+
+            # For replay, we need to manually run episodes since we need the custom policy
+            replay_results: List[EpisodeResult] = []
+            for seed in seeds:
+                replay_policy = ReplayPolicy(recorded_actions, resolved_n_agents)
+                env = _build_env(
+                    config_path,
+                    int(args.episode_length),
+                    resolved_n_agents,
+                    seed,
+                    termination_override,
+                    reward_override,
+                )
+                try:
+                    episode = _run_multi_agent_episode(
+                        env,
+                        replay_policy,
+                        seed=seed,
+                        episode_length=int(args.episode_length),
+                    )
+                    episode.policy_label = replay_spec.label
+                    episode.policy_type = replay_spec.policy_type
+                    replay_results.append(episode)
+                finally:
+                    if hasattr(env, "close"):
+                        env.close()
+
+            # Compare results
+            _log("Comparing original vs replay...")
+            comparisons, summary = _compare_replay_vs_original(
+                original_results,
+                replay_results,
+                tolerance=args.replay_tolerance,
+            )
+
+            # Write comparison results
+            replay_dir = run_dir / "replay_test"
+            _write_replay_comparison(
+                replay_dir,
+                comparisons,
+                summary,
+                args.replay_recording_seed,
+            )
+
+            # Log summary
+            _log("\nReplay test results:")
+            _log(f"  Total episodes: {summary['n_total']}")
+            _log(f"  Exact matches: {summary['n_matches']} ({summary['match_rate']:.2%})")
+            _log(f"  Original wins: {summary['n_original_wins']} ({summary['original_win_rate']:.2%})")
+            _log(f"  Replay wins: {summary['n_replay_wins']} ({summary['replay_win_rate']:.2%})")
+            _log(f"  Avg reward diff: {summary['avg_reward_diff']:.6f} ± {summary['std_reward_diff']:.6f}")
+            _log(f"  Max reward diff: {summary['max_reward_diff']:.6f}")
+            _log(f"  Avg original reward: {summary['avg_original_reward']:.2f}")
+            _log(f"  Avg replay reward: {summary['avg_replay_reward']:.2f}")
+            _log(f"\nReplay test results saved to: {replay_dir}")
+            _log("")
 
         _write_csv(
             run_dir / "per_seed_results.csv",
@@ -1792,6 +2163,7 @@ def main() -> int:
 
     seeds = _iter_seeds(args.seed_start, args.num_seeds)
     leaderboard_rows: List[Dict[str, Any]] = []
+    replayboard_rows: List[Dict[str, Any]] = []
 
     total_models = len(model_specs_by_run)
     total_checkpoints = sum(len(specs) for specs in model_specs_by_run.values())
@@ -1801,6 +2173,8 @@ def main() -> int:
     _log(f"Seeds: {_format_seed_range(seeds)} ({len(seeds)})")
     if args.num_workers > 1:
         _log(f"Workers: {args.num_workers}")
+    if args.test_replay:
+        _log(f"Replay testing: enabled (recording seed {args.replay_recording_seed})")
     if args.no_override:
         _log("Evaluation: reward from config (no override).")
     elif args.use_reward_normalization:
@@ -1832,6 +2206,98 @@ def main() -> int:
             leaderboard_rows.append(summary_row)
             _write_reward_stats(run_dir, training_stats, evaluation_stats)
             _log(f"    results: {run_dir / 'summary_results.csv'}")
+
+            # Replay test for this checkpoint
+            if args.test_replay:
+                _log(f"    replay test: recording seed {args.replay_recording_seed}")
+
+                # Load policy for recording
+                env_for_loading = _build_env(
+                    run.config_path,
+                    int(args.episode_length),
+                    resolved_n_agents,
+                    args.replay_recording_seed,
+                    termination_override,
+                    reward_override,
+                )
+                try:
+                    policy_for_recording = _load_policy(spec, env_for_loading, seed=args.replay_recording_seed)
+                finally:
+                    if hasattr(env_for_loading, "close"):
+                        env_for_loading.close()
+
+                # Record actions
+                recorded_actions = _record_policy_actions(
+                    policy_for_recording,
+                    run.config_path,
+                    int(args.episode_length),
+                    resolved_n_agents,
+                    args.replay_recording_seed,
+                    termination_override,
+                    reward_override,
+                )
+
+                # Evaluate replay policy
+                replay_results: List[EpisodeResult] = []
+                for seed in seeds:
+                    replay_policy = ReplayPolicy(recorded_actions, resolved_n_agents)
+                    env = _build_env(
+                        run.config_path,
+                        int(args.episode_length),
+                        resolved_n_agents,
+                        seed,
+                        termination_override,
+                        reward_override,
+                    )
+                    try:
+                        episode = _run_multi_agent_episode(
+                            env,
+                            replay_policy,
+                            seed=seed,
+                            episode_length=int(args.episode_length),
+                        )
+                        episode.policy_label = f"{spec.label}_replay"
+                        episode.policy_type = "replay"
+                        replay_results.append(episode)
+                    finally:
+                        if hasattr(env, "close"):
+                            env.close()
+
+                # Write replay results
+                replay_run_dir = models_root / model_name / "policy_tests" / f"{checkpoint_name}_replay_eval"
+                replay_summary_row = _write_policy_results(replay_run_dir,
+                    PolicySpec(label=f"{spec.label}_replay", policy_type="replay", policy_path="replay"),
+                    replay_results)
+                replay_summary_row["model_name"] = model_name
+                replay_summary_row["checkpoint"] = checkpoint_name
+
+                # Compare and write comparison
+                comparisons, comparison_summary = _compare_replay_vs_original(
+                    results,
+                    replay_results,
+                    tolerance=args.replay_tolerance,
+                )
+                replay_comparison_dir = models_root / model_name / "policy_tests" / f"{checkpoint_name}_replay_comparison"
+                _write_replay_comparison(
+                    replay_comparison_dir,
+                    comparisons,
+                    comparison_summary,
+                    args.replay_recording_seed,
+                )
+
+                # Add to replayboard (both original and replay)
+                original_row = dict(summary_row)
+                original_row["policy_type"] = "original"
+                replayboard_rows.append(original_row)
+
+                replay_row = dict(replay_summary_row)
+                replay_row["policy_type"] = "replay"
+                replayboard_rows.append(replay_row)
+
+                _log(f"    replay: matches={comparison_summary['n_matches']}/{comparison_summary['n_total']} "
+                     f"({comparison_summary['match_rate']:.1%}), "
+                     f"orig_wins={comparison_summary['n_original_wins']}, "
+                     f"replay_wins={comparison_summary['n_replay_wins']}")
 
         plotted_paths = _plot_reward_curves(
             run.path,
@@ -1940,6 +2406,13 @@ def main() -> int:
     network_stats_path = models_root / "leaderboard_network_stats.csv"
     _write_network_stats_leaderboard(network_stats_path, ranked_rows)
     _log(f"Network stats: {network_stats_path}")
+
+    # Write replayboard if replay testing was enabled
+    if args.test_replay and replayboard_rows:
+        replayboard_path = models_root / "replayboard.csv"
+        _write_replayboard(replayboard_path, replayboard_rows)
+        _log(f"Replayboard (original vs replay): {replayboard_path}")
+
     return 0
 
 

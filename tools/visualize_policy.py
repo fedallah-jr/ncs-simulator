@@ -1193,12 +1193,18 @@ def main():
     config = load_config(args.config)
     reward_override = config.get("reward", {}).get("evaluation")
     if not isinstance(reward_override, dict):
-        reward_override = None
+        reward_override = {}
+    else:
+        reward_override = dict(reward_override)
+    # Always disable reward clipping during evaluation
+    reward_override["reward_clip_min"] = None
+    reward_override["reward_clip_max"] = None
     termination_override = config.get("termination", {}).get("evaluation")
     if not isinstance(termination_override, dict):
         termination_override = None
     print(f"✓ Configuration loaded")
-    if reward_override is not None or termination_override is not None:
+    print("✓ Reward clipping disabled for evaluation")
+    if reward_override or termination_override is not None:
         print("✓ Using evaluation reward/termination overrides")
     print()
 
