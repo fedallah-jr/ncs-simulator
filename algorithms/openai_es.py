@@ -674,7 +674,7 @@ def train(args):
                 obs_normalizer.update_from_moments(batch_mean, batch_var, obs_count_total)
 
         strategy_rng, rng_tell = jax.random.split(strategy_rng)
-        context_state, _ = strategy_context["tell_step"](rng_tell, x, fitness_array, context_state)
+        context_state, _ = strategy_context["tell_step"](rng_tell, x, -fitness_array, context_state)
         strategy_context["state"] = context_state
 
         mean_fit = float(jnp.mean(fitness_array))
