@@ -57,6 +57,8 @@ _worker_use_agent_id: bool = False
 _worker_agent_id_eye: Optional[np.ndarray] = None
 _worker_obs_normalizer: Optional[RunningObsNormalizer] = None
 _worker_obs_dim: int = 0
+_worker_predict: Any = None
+_worker_unravel_fn: Any = None
 
 
 def _build_obs_batch(obs_dict: Dict[str, np.ndarray]) -> np.ndarray:
@@ -143,7 +145,7 @@ def _init_worker(
     """Initialize the environment and model in the worker process."""
     global _worker_env, _worker_model, _worker_params, _worker_config_path, _worker_episode_length
     global _worker_n_agents, _worker_use_agent_id, _worker_agent_id_eye, _worker_obs_dim
-    global _worker_obs_normalizer
+    global _worker_obs_normalizer, _worker_predict, _worker_unravel_fn
     
     # Set JAX to use CPU BEFORE importing JAX
     os.environ["JAX_PLATFORMS"] = "cpu"
@@ -191,6 +193,15 @@ def _init_worker(
     dummy_obs = jnp.zeros((1, input_dim))
     _worker_params = _worker_model.init(rng, dummy_obs)
 
+    from jax import flatten_util
+    _worker_unravel_fn = flatten_util.ravel_pytree(_worker_params)[1]
+
+    @jax.jit
+    def _predict(params, obs):
+        return jnp.argmax(_worker_model.apply(params, obs), axis=1)
+
+    _worker_predict = _predict
+
 
 def _run_single_episode(
     flat_params: np.ndarray,
@@ -199,12 +210,8 @@ def _run_single_episode(
     """Run one episode with the given flattened parameters and seed."""
     global _worker_env, _worker_model, _worker_params, _worker_n_agents
     
-    import jax.numpy as jnp
-    from jax import flatten_util
-    
-    _, unravel_fn = flatten_util.ravel_pytree(_worker_params)
-    params = unravel_fn(flat_params)
-    
+    params = _worker_unravel_fn(flat_params)
+
     obs_dict, _ = _worker_env.reset(seed=episode_seed)
     total_reward = 0.0
     done = False
@@ -220,9 +227,7 @@ def _run_single_episode(
             obs_count += int(obs_batch.shape[0])
             obs_batch = _worker_obs_normalizer.normalize(obs_batch, update=False)
         obs_batch = _append_agent_id(obs_batch)
-        obs_jax = jnp.asarray(obs_batch)
-        logits = _worker_model.apply(params, obs_jax)
-        actions = np.asarray(jnp.argmax(logits, axis=1))
+        actions = np.asarray(_worker_predict(params, obs_batch))
         action_dict = {f"agent_{i}": int(actions[i]) for i in range(_worker_n_agents)}
 
         obs_dict, rewards, terminated, truncated, _ = _worker_env.step(action_dict)
@@ -621,11 +626,12 @@ def train(args):
         strategy_rng, rng_ask = jax.random.split(strategy_rng)
         x, context_state = strategy_context["ask_step"](rng_ask, strategy_context["state"])
 
-        population_flat = []
-        for i in range(args.popsize):
-            individual = jax.tree_util.tree_map(lambda arr: arr[i], x)
-            flat_individual, _ = flatten_util.ravel_pytree(individual)
-            population_flat.append(np.array(flat_individual))
+        # Vectorized flatten: reshape each leaf to (popsize, -1) and concatenate
+        leaves = jax.tree_util.tree_leaves(x)
+        flat_population = np.asarray(
+            jnp.concatenate([leaf.reshape(args.popsize, -1) for leaf in leaves], axis=1)
+        )  # (popsize, num_params) — single device-to-host transfer
+        population_flat = [flat_population[i] for i in range(args.popsize)]
 
         obs_state = None
         if obs_normalizer is not None:
