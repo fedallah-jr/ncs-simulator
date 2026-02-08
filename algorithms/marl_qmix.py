@@ -19,7 +19,7 @@ from utils.marl import (
     MLPAgent,
     DuelingMLPAgent,
     QMixer,
-    run_evaluation,
+    run_evaluation_vectorized,
     build_base_qlearning_parser,
     add_qmix_args,
     save_qlearning_checkpoint,
@@ -35,7 +35,7 @@ from utils.marl_training import (
     print_run_summary,
     setup_shared_reward_normalizer,
 )
-from utils.marl.vector_env import create_async_vector_env, make_env, stack_vector_obs
+from utils.marl.vector_env import create_async_vector_env, create_eval_async_vector_env, stack_vector_obs
 from utils.reward_normalization import reset_shared_running_normalizers
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters, BestModelTracker
 
@@ -79,14 +79,14 @@ def main() -> None:
         global_state_enabled=True,
         shared_reward_normalizer=shared_reward_normalizer,
     )
-    eval_env = make_env(
+    eval_env = create_eval_async_vector_env(
+        n_eval_envs=args.n_eval_envs,
         n_agents=n_agents,
         episode_length=args.episode_length,
         config_path_str=config_path_str,
         seed=args.seed,
         reward_override=eval_reward_override,
         termination_override=eval_termination_override,
-        freeze_running_normalization=True,
         global_state_enabled=True,
     )
 
@@ -286,9 +286,10 @@ def main() -> None:
 
             # Periodic evaluation
             if global_step - last_eval_step >= args.eval_freq:
-                mean_eval_reward, std_eval_reward, _ = run_evaluation(
-                    env=eval_env,
+                mean_eval_reward, std_eval_reward, _ = run_evaluation_vectorized(
+                    eval_env=eval_env,
                     agent=learner.agent,
+                    n_eval_envs=args.n_eval_envs,
                     n_agents=n_agents,
                     n_actions=n_actions,
                     use_agent_id=use_agent_id,

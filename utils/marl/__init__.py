@@ -15,6 +15,7 @@ from .common import (
     select_actions,
     select_actions_batched,
     run_evaluation,
+    run_evaluation_vectorized,
 )
 from .learners import IQLLearner, VDNLearner, QMIXLearner, QPLEXLearner
 from .networks import (
@@ -64,6 +65,7 @@ __all__ = [
     "QPLEXMixer",
     "RunningObsNormalizer",
     "run_evaluation",
+    "run_evaluation_vectorized",
     "save_mappo_checkpoint",
     "save_qlearning_checkpoint",
     "select_actions",

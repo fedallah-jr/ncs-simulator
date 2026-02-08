@@ -61,6 +61,9 @@ def make_vector_env_fn(
     seed: Optional[int],
     global_state_enabled: bool = False,
     shared_reward_normalizer: Optional[SharedRewardNormalizerConfig] = None,
+    reward_override: Optional[Dict[str, Any]] = None,
+    termination_override: Optional[Dict[str, Any]] = None,
+    freeze_running_normalization: bool = False,
 ) -> Callable[[], "VectorEnvAdapter"]:
     def _thunk() -> "VectorEnvAdapter":
         env = make_env(
@@ -68,6 +71,9 @@ def make_vector_env_fn(
             episode_length,
             config_path_str,
             seed,
+            reward_override=reward_override,
+            termination_override=termination_override,
+            freeze_running_normalization=freeze_running_normalization,
             global_state_enabled=global_state_enabled,
             shared_reward_normalizer=shared_reward_normalizer,
         )
@@ -149,3 +155,43 @@ def create_async_vector_env(
         autoreset_mode=AutoresetMode.SAME_STEP,
     )
     return env, env_seeds
+
+
+def create_eval_async_vector_env(
+    n_eval_envs: int,
+    n_agents: int,
+    episode_length: int,
+    config_path_str: Optional[str],
+    seed: Optional[int],
+    reward_override: Optional[Dict[str, Any]] = None,
+    termination_override: Optional[Dict[str, Any]] = None,
+    global_state_enabled: bool = False,
+) -> AsyncVectorEnv:
+    if n_eval_envs <= 0:
+        raise ValueError("n_eval_envs must be positive")
+
+    env_seeds: Optional[List[int]] = None
+    if seed is not None:
+        env_seeds = [int(seed) + env_idx for env_idx in range(n_eval_envs)]
+
+    env_fns = []
+    for env_idx in range(n_eval_envs):
+        env_seed = None if env_seeds is None else env_seeds[env_idx]
+        env_fns.append(
+            make_vector_env_fn(
+                n_agents=n_agents,
+                episode_length=episode_length,
+                config_path_str=config_path_str,
+                seed=env_seed,
+                global_state_enabled=global_state_enabled,
+                reward_override=reward_override,
+                termination_override=termination_override,
+                freeze_running_normalization=True,
+            )
+        )
+
+    env = AsyncVectorEnv(
+        env_fns,
+        autoreset_mode=AutoresetMode.SAME_STEP,
+    )
+    return env

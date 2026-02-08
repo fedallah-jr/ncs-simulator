@@ -75,7 +75,7 @@ def build_qlearning_hyperparams(
         "independent_agents": args.independent_agents, "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip, "obs_norm_eps": args.obs_norm_eps,
         "eval_freq": args.eval_freq, "n_eval_episodes": args.n_eval_episodes,
-        "device": str(device), "seed": args.seed,
+        "n_eval_envs": args.n_eval_envs, "device": str(device), "seed": args.seed,
     }
     if algorithm == "iql" and hasattr(args, "team_reward"):
         hyperparams["team_reward"] = args.team_reward
@@ -100,5 +100,6 @@ def build_mappo_hyperparams(
         "max_grad_norm": args.max_grad_norm, "hidden_dims": list(args.hidden_dims),
         "activation": args.activation, "layer_norm": args.layer_norm,
         "use_agent_id": use_agent_id, "eval_freq": args.eval_freq,
-        "n_eval_episodes": args.n_eval_episodes, "device": str(device), "seed": args.seed,
+        "n_eval_episodes": args.n_eval_episodes, "n_eval_envs": args.n_eval_envs,
+        "device": str(device), "seed": args.seed,
     }

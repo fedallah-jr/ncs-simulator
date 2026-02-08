@@ -10,9 +10,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
+from gymnasium.vector import AsyncVectorEnv
 
 from utils.marl.networks import MLPAgent, DuelingMLPAgent, append_agent_id
 from utils.marl.obs_normalization import RunningObsNormalizer
+from utils.marl.vector_env import stack_vector_obs
 
 
 def select_device(device_str: str) -> torch.device:
@@ -212,6 +214,82 @@ def run_evaluation(
             obs = next_obs
 
         episode_rewards.append(episode_reward_sum)
+
+    mean_reward = float(np.mean(episode_rewards))
+    std_reward = float(np.std(episode_rewards))
+    return mean_reward, std_reward, episode_rewards
+
+
+def run_evaluation_vectorized(
+    eval_env: AsyncVectorEnv,
+    agent: Union[MLPAgent, Sequence[MLPAgent]],
+    n_eval_envs: int,
+    n_agents: int,
+    n_actions: int,
+    use_agent_id: bool,
+    device: torch.device,
+    n_episodes: int,
+    seed: Optional[int] = None,
+    obs_normalizer: Optional[RunningObsNormalizer] = None,
+) -> Tuple[float, float, List[float]]:
+    """
+    Run deterministic evaluation episodes using parallel async vector environments.
+
+    Args:
+        eval_env: AsyncVectorEnv wrapping n_eval_envs evaluation environments.
+        agent: The agent network(s).
+        n_eval_envs: Number of parallel evaluation environments.
+        n_agents: Number of agents per environment.
+        n_actions: Number of actions per agent.
+        use_agent_id: Whether to append one-hot agent ID to observations.
+        device: Torch device.
+        n_episodes: Total number of evaluation episodes to collect.
+        seed: Optional base seed for reproducibility.
+        obs_normalizer: Optional observation normalizer (stats frozen during eval).
+
+    Returns:
+        Tuple of (mean_reward, std_reward, episode_rewards).
+    """
+    episode_rewards: List[float] = []
+    dummy_rng = np.random.default_rng(0)
+
+    env_seeds = None if seed is None else [seed + i for i in range(n_eval_envs)]
+    obs_dict, _infos = eval_env.reset(seed=env_seeds)
+    obs = stack_vector_obs(obs_dict, n_agents)
+    if obs_normalizer is not None:
+        obs = obs_normalizer.normalize(obs, update=False)
+
+    env_reward_sums = np.zeros(n_eval_envs, dtype=np.float64)
+
+    while len(episode_rewards) < n_episodes:
+        actions = select_actions_batched(
+            agent=agent,
+            obs=obs,
+            n_envs=n_eval_envs,
+            n_agents=n_agents,
+            n_actions=n_actions,
+            epsilon=0.0,
+            rng=dummy_rng,
+            device=device,
+            use_agent_id=use_agent_id,
+        )
+        action_dict = {f"agent_{i}": actions[:, i] for i in range(n_agents)}
+        next_obs_dict, rewards, terminated, truncated, _infos = eval_env.step(action_dict)
+
+        rewards_arr = np.asarray(rewards, dtype=np.float64)
+        env_reward_sums += rewards_arr.sum(axis=1)
+
+        done = np.logical_or(terminated, truncated)
+        if np.any(done):
+            for env_idx in np.where(done)[0]:
+                if len(episode_rewards) < n_episodes:
+                    episode_rewards.append(float(env_reward_sums[env_idx]))
+                env_reward_sums[env_idx] = 0.0
+
+        next_obs = stack_vector_obs(next_obs_dict, n_agents)
+        if obs_normalizer is not None:
+            next_obs = obs_normalizer.normalize(next_obs, update=False)
+        obs = next_obs
 
     mean_reward = float(np.mean(episode_rewards))
     std_reward = float(np.std(episode_rewards))

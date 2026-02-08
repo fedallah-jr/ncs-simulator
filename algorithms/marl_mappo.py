@@ -23,12 +23,13 @@ from utils.marl import (
     MLPAgent,
     ValueNorm,
     append_agent_id,
-    run_evaluation,
+    run_evaluation_vectorized,
     stack_obs,
     build_mappo_parser,
     save_mappo_checkpoint,
     build_mappo_hyperparams,
 )
+from utils.marl.vector_env import create_eval_async_vector_env
 from utils.marl_training import (
     setup_device_and_rng,
     load_config_with_overrides,
@@ -299,14 +300,14 @@ def main() -> None:
             )
         )
     env = AsyncVectorEnv(env_fns, autoreset_mode=AutoresetMode.SAME_STEP)
-    eval_env = _make_env(
+    eval_env = create_eval_async_vector_env(
+        n_eval_envs=args.n_eval_envs,
         n_agents=n_agents,
         episode_length=args.episode_length,
         config_path_str=config_path_str,
         seed=args.seed,
         reward_override=eval_reward_override,
         termination_override=eval_termination_override,
-        freeze_running_normalization=True,
         global_state_enabled=True,
     )
 
@@ -507,9 +508,10 @@ def main() -> None:
                 global_state_raw = next_global_state_raw
 
                 if global_step - last_eval_step >= args.eval_freq:
-                    mean_eval_reward, std_eval_reward, _ = run_evaluation(
-                        env=eval_env,
+                    mean_eval_reward, std_eval_reward, _ = run_evaluation_vectorized(
+                        eval_env=eval_env,
                         agent=actor,
+                        n_eval_envs=args.n_eval_envs,
                         n_agents=n_agents,
                         n_actions=n_actions,
                         use_agent_id=use_agent_id,

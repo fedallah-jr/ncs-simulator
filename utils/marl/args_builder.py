@@ -40,6 +40,7 @@ def build_base_qlearning_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--eval-freq", type=int, default=5000)
     parser.add_argument("--n-eval-episodes", type=int, default=30)
+    parser.add_argument("--n-eval-envs", type=int, default=4)
     parser.set_defaults(normalize_obs=True)
     return parser
 
@@ -101,5 +102,6 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--eval-freq", type=int, default=5000)
     parser.add_argument("--n-eval-episodes", type=int, default=30)
+    parser.add_argument("--n-eval-envs", type=int, default=4)
     parser.set_defaults(normalize_obs=True, lr_decay=True)
     return parser
