@@ -6,7 +6,7 @@ This module contains shared functions used across IQL, VDN, and QMIX implementat
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -294,3 +294,114 @@ def run_evaluation_vectorized(
     mean_reward = float(np.mean(episode_rewards))
     std_reward = float(np.std(episode_rewards))
     return mean_reward, std_reward, episode_rewards
+
+
+def patch_autoreset_final_obs(
+    next_obs_raw: np.ndarray,
+    infos: Dict[str, Any],
+    done_reset: np.ndarray,
+    n_agents: int,
+    next_global_state_raw: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Patch next_obs (and optionally global_state) with final_obs/final_info from auto-reset envs.
+
+    Returns:
+        Tuple of (next_obs_for_buffer, next_global_state_for_buffer).
+        When *next_global_state_raw* is None the second element is None.
+    """
+    next_obs_for_buffer = next_obs_raw
+    next_global_state_for_buffer = next_global_state_raw
+
+    if infos.get("final_obs") is not None:
+        final_obs = infos["final_obs"]
+        done_indices = np.where(done_reset)[0]
+        if len(done_indices) > 0:
+            next_obs_for_buffer = next_obs_raw.copy()
+            for env_idx in done_indices:
+                final_env_obs = final_obs[env_idx]
+                if final_env_obs is not None:
+                    next_obs_for_buffer[env_idx] = stack_obs(final_env_obs, n_agents)
+
+            if next_global_state_raw is not None:
+                final_info = infos.get("final_info")
+                if final_info is not None:
+                    final_global = final_info.get("global_state")
+                    if final_global is not None:
+                        next_global_state_for_buffer = next_global_state_raw.copy()
+                        for env_idx in done_indices:
+                            final_env_state = final_global[env_idx]
+                            if final_env_state is not None:
+                                next_global_state_for_buffer[env_idx] = final_env_state
+
+    return next_obs_for_buffer, next_global_state_for_buffer
+
+
+class QLearnStepResult(NamedTuple):
+    obs: np.ndarray            # normalized obs
+    epsilon: float
+    actions: np.ndarray        # (n_envs, n_agents)
+    next_obs_raw: np.ndarray
+    rewards_arr: np.ndarray    # raw rewards from env
+    terminated: np.ndarray
+    done_reset: np.ndarray
+    infos: Dict[str, Any]
+
+
+def qlearning_collect_transition(
+    *,
+    env: Any,
+    agent: Any,
+    obs_raw: np.ndarray,
+    obs_normalizer: Optional[RunningObsNormalizer],
+    global_step: int,
+    epsilon_start: float,
+    epsilon_end: float,
+    epsilon_decay_steps: int,
+    n_envs: int,
+    n_agents: int,
+    n_actions: int,
+    use_agent_id: bool,
+    rng: np.random.Generator,
+    device: torch.device,
+) -> QLearnStepResult:
+    """Collect a single vectorized transition for Q-learning algorithms.
+
+    Normalizes observations, computes epsilon, selects actions, and steps the env.
+    """
+    if obs_normalizer is not None:
+        obs = obs_normalizer.normalize(obs_raw, update=True)
+    else:
+        obs = obs_raw
+
+    eps = epsilon_by_step(global_step, epsilon_start, epsilon_end, epsilon_decay_steps)
+
+    actions = select_actions_batched(
+        agent=agent,
+        obs=obs,
+        n_envs=n_envs,
+        n_agents=n_agents,
+        n_actions=n_actions,
+        epsilon=eps,
+        rng=rng,
+        device=device,
+        use_agent_id=use_agent_id,
+    )
+
+    action_dict = {f"agent_{i}": actions[:, i] for i in range(n_agents)}
+    next_obs_dict, rewards_arr, terminated, truncated, infos = env.step(action_dict)
+    next_obs_raw = stack_vector_obs(next_obs_dict, n_agents)
+
+    terminated_any = np.asarray(terminated, dtype=np.bool_)
+    truncated_any = np.asarray(truncated, dtype=np.bool_)
+    done_reset = np.logical_or(terminated_any, truncated_any)
+
+    return QLearnStepResult(
+        obs=obs,
+        epsilon=eps,
+        actions=actions,
+        next_obs_raw=next_obs_raw,
+        rewards_arr=np.asarray(rewards_arr, dtype=np.float32),
+        terminated=terminated_any,
+        done_reset=done_reset,
+        infos=infos,
+    )

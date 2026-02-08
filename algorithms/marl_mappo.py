@@ -8,8 +8,6 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
-from gymnasium.vector import AsyncVectorEnv
-from gymnasium.vector.async_vector_env import AutoresetMode
 from torch import nn
 from torch.distributions import Categorical
 from torch.nn import functional as F
@@ -23,112 +21,23 @@ from utils.marl import (
     MLPAgent,
     ValueNorm,
     append_agent_id,
-    run_evaluation_vectorized,
-    stack_obs,
     build_mappo_parser,
     save_mappo_checkpoint,
     build_mappo_hyperparams,
+    patch_autoreset_final_obs,
 )
-from utils.marl.vector_env import create_eval_async_vector_env
+from utils.marl.vector_env import create_async_vector_env, create_eval_async_vector_env, stack_vector_obs
 from utils.marl_training import (
     setup_device_and_rng,
     load_config_with_overrides,
     create_obs_normalizer,
     print_run_summary,
     setup_shared_reward_normalizer,
+    evaluate_and_log,
+    log_completed_episodes,
 )
 from utils.reward_normalization import reset_shared_running_normalizers
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters, BestModelTracker
-
-
-def _make_env(
-    n_agents: int,
-    episode_length: int,
-    config_path_str: Optional[str],
-    seed: Optional[int],
-    reward_override: Optional[Dict[str, Any]] = None,
-    termination_override: Optional[Dict[str, Any]] = None,
-    freeze_running_normalization: bool = False,
-    global_state_enabled: bool = False,
-    shared_reward_normalizer: Optional["SharedRewardNormalizerConfig"] = None,
-) -> "NCS_Env":
-    from ncs_env.env import NCS_Env
-
-    if shared_reward_normalizer is not None:
-        from utils.reward_normalization import configure_shared_running_normalizers
-
-        configure_shared_running_normalizers(
-            shared_reward_normalizer.store,
-            shared_reward_normalizer.lock,
-            sync_interval=shared_reward_normalizer.sync_interval,
-            namespace=shared_reward_normalizer.namespace,
-            reset_store=shared_reward_normalizer.reset_store,
-        )
-
-    return NCS_Env(
-        n_agents=n_agents,
-        episode_length=episode_length,
-        config_path=config_path_str,
-        seed=seed,
-        reward_override=reward_override,
-        termination_override=termination_override,
-        freeze_running_normalization=freeze_running_normalization,
-        global_state_enabled=global_state_enabled,
-    )
-
-
-def _make_vector_env_fn(
-    n_agents: int,
-    episode_length: int,
-    config_path_str: Optional[str],
-    seed: Optional[int],
-    global_state_enabled: bool = False,
-    shared_reward_normalizer: Optional["SharedRewardNormalizerConfig"] = None,
-) -> Any:
-    def _thunk() -> "_VectorEnvAdapter":
-        env = _make_env(
-            n_agents,
-            episode_length,
-            config_path_str,
-            seed,
-            global_state_enabled=global_state_enabled,
-            shared_reward_normalizer=shared_reward_normalizer,
-        )
-        return _VectorEnvAdapter(env, n_agents)
-
-    return _thunk
-
-
-def _stack_vector_obs(obs_dict: Dict[str, Any], n_agents: int) -> np.ndarray:
-    return np.stack(
-        [np.asarray(obs_dict[f"agent_{i}"], dtype=np.float32) for i in range(n_agents)],
-        axis=1,
-    )
-
-
-class _VectorEnvAdapter:
-    def __init__(self, env: Any, n_agents: int) -> None:
-        self.env = env
-        self.n_agents = int(n_agents)
-        self.action_space = env.action_space
-        self.observation_space = env.observation_space
-        self.metadata = getattr(env, "metadata", {})
-        self.render_mode = getattr(env, "render_mode", None)
-
-    def reset(self, **kwargs: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        return self.env.reset(**kwargs)
-
-    def step(self, action: Dict[str, Any]) -> Tuple[Dict[str, Any], np.ndarray, bool, bool, Dict[str, Any]]:
-        obs, rewards, terminated, truncated, info = self.env.step(action)
-        rewards_arr = np.asarray(
-            [rewards[f"agent_{i}"] for i in range(self.n_agents)], dtype=np.float32
-        )
-        terminated_any = any(terminated[f"agent_{i}"] for i in range(self.n_agents))
-        truncated_any = any(truncated[f"agent_{i}"] for i in range(self.n_agents))
-        return obs, rewards_arr, bool(terminated_any), bool(truncated_any), info
-
-    def close(self) -> None:
-        self.env.close()
 
 
 class MAPPORolloutBuffer:
@@ -278,28 +187,19 @@ def main() -> None:
     if args.n_envs <= 0:
         raise ValueError("n_envs must be positive")
 
-    env_seeds = None
-    if args.seed is not None:
-        env_seeds = [int(args.seed) + env_idx for env_idx in range(args.n_envs)]
-
     shared_reward_normalizer, _shared_reward_manager = setup_shared_reward_normalizer(
         cfg.get("reward", {}), run_dir
     )
 
-    env_fns = []
-    for env_idx in range(args.n_envs):
-        seed = None if env_seeds is None else env_seeds[env_idx]
-        env_fns.append(
-            _make_vector_env_fn(
-                n_agents,
-                args.episode_length,
-                config_path_str,
-                seed,
-                global_state_enabled=True,
-                shared_reward_normalizer=shared_reward_normalizer,
-            )
-        )
-    env = AsyncVectorEnv(env_fns, autoreset_mode=AutoresetMode.SAME_STEP)
+    env, env_seeds = create_async_vector_env(
+        n_envs=args.n_envs,
+        n_agents=n_agents,
+        episode_length=args.episode_length,
+        config_path_str=config_path_str,
+        seed=args.seed,
+        global_state_enabled=True,
+        shared_reward_normalizer=shared_reward_normalizer,
+    )
     eval_env = create_eval_async_vector_env(
         n_eval_envs=args.n_eval_envs,
         n_agents=n_agents,
@@ -314,7 +214,7 @@ def main() -> None:
     obs_dim = int(env.single_observation_space.spaces["agent_0"].shape[0])
     n_actions = int(env.single_action_space.spaces["agent_0"].n)
     obs_dict, info = env.reset(seed=env_seeds)
-    obs_raw = _stack_vector_obs(obs_dict, n_agents)
+    obs_raw = stack_vector_obs(obs_dict, n_agents)
     global_state_raw = np.asarray(info.get("global_state"), dtype=np.float32)
     if global_state_raw.ndim != 2:
         raise ValueError("global_state must have shape (n_envs, state_dim)")
@@ -422,30 +322,17 @@ def main() -> None:
 
                 action_dict = {f"agent_{i}": actions[:, i] for i in range(n_agents)}
                 next_obs_dict, rewards_arr, terminated, truncated, infos = env.step(action_dict)
-                next_obs_raw = _stack_vector_obs(next_obs_dict, n_agents)
+                next_obs_raw = stack_vector_obs(next_obs_dict, n_agents)
                 next_global_state_raw = np.asarray(infos.get("global_state"), dtype=np.float32)
-                next_obs_for_gae_raw = next_obs_raw
-                next_global_state_for_gae = next_global_state_raw
-                if infos.get("final_obs") is not None:
-                    final_obs = infos["final_obs"]
-                    done_indices = np.where(np.logical_or(terminated, truncated))[0]
-                    if len(done_indices) > 0:
-                        next_obs_for_gae_raw = next_obs_raw.copy()
-                        for env_idx in done_indices:
-                            final_env_obs = final_obs[env_idx]
-                            if final_env_obs is not None:
-                                next_obs_for_gae_raw[env_idx] = stack_obs(
-                                    final_env_obs, n_agents
-                                )
-                        final_info = infos.get("final_info")
-                        if final_info is not None:
-                            final_global = final_info.get("global_state")
-                            if final_global is not None:
-                                next_global_state_for_gae = next_global_state_raw.copy()
-                                for env_idx in done_indices:
-                                    final_env_state = final_global[env_idx]
-                                    if final_env_state is not None:
-                                        next_global_state_for_gae[env_idx] = final_env_state
+
+                terminated_any = np.asarray(terminated, dtype=np.bool_)
+                truncated_any = np.asarray(truncated, dtype=np.bool_)
+                done = np.logical_or(terminated_any, truncated_any)
+
+                next_obs_for_gae_raw, next_global_state_for_gae = patch_autoreset_final_obs(
+                    next_obs_raw, infos, done, n_agents,
+                    next_global_state_raw=next_global_state_raw,
+                )
 
                 if obs_normalizer is not None:
                     next_obs_for_gae = obs_normalizer.normalize(
@@ -459,10 +346,6 @@ def main() -> None:
                     rewards = raw_rewards.sum(axis=1, keepdims=True)
                 else:
                     rewards = raw_rewards
-
-                terminated_any = np.asarray(terminated, dtype=np.bool_)
-                truncated_any = np.asarray(truncated, dtype=np.bool_)
-                done = np.logical_or(terminated_any, truncated_any)
 
                 buffer.add(
                     obs=obs,
@@ -480,56 +363,29 @@ def main() -> None:
                 episode_lengths += 1
                 global_step += args.n_envs
 
-                if np.any(done):
-                    done_indices = np.where(done)[0]
-                    for env_idx in done_indices:
-                        train_writer.writerow(
-                            [episode, float(episode_reward_sums[env_idx]), int(episode_lengths[env_idx]), global_step]
-                        )
-                        train_f.flush()
-
-                        best_model_tracker.update(
-                            "train",
-                            float(episode_reward_sums[env_idx]),
-                            run_dir / "best_train_model.pt",
-                            save_checkpoint,
-                        )
-
-                        if episode % args.log_interval == 0:
-                            print(
-                                f"[MAPPO] episode={episode} steps={global_step} "
-                                f"reward_sum={episode_reward_sums[env_idx]:.3f}"
-                            )
-                        episode += 1
-                        episode_reward_sums[env_idx] = 0.0
-                        episode_lengths[env_idx] = 0
+                episode = log_completed_episodes(
+                    done_reset=done, episode_reward_sums=episode_reward_sums,
+                    global_step=global_step, episode=episode,
+                    train_writer=train_writer, train_f=train_f,
+                    best_model_tracker=best_model_tracker, run_dir=run_dir,
+                    save_checkpoint=save_checkpoint, log_interval=args.log_interval,
+                    algo_name="MAPPO",
+                    episode_lengths=episode_lengths,
+                )
 
                 obs_raw = next_obs_raw
                 global_state_raw = next_global_state_raw
 
                 if global_step - last_eval_step >= args.eval_freq:
-                    mean_eval_reward, std_eval_reward, _ = run_evaluation_vectorized(
-                        eval_env=eval_env,
-                        agent=actor,
-                        n_eval_envs=args.n_eval_envs,
-                        n_agents=n_agents,
-                        n_actions=n_actions,
-                        use_agent_id=use_agent_id,
-                        device=device,
-                        n_episodes=args.n_eval_episodes,
-                        seed=args.seed,
-                        obs_normalizer=obs_normalizer,
-                    )
-                    eval_writer.writerow([global_step, mean_eval_reward, std_eval_reward])
-                    eval_f.flush()
-
-                    best_model_tracker.update(
-                        "eval", mean_eval_reward, run_dir / "best_model.pt", save_checkpoint
-                    )
-
-                    print(
-                        f"[MAPPO] Eval at step {global_step}: "
-                        f"mean_reward={mean_eval_reward:.3f} std={std_eval_reward:.3f}"
+                    evaluate_and_log(
+                        eval_env=eval_env, agent=actor,
+                        n_eval_envs=args.n_eval_envs, n_agents=n_agents, n_actions=n_actions,
+                        use_agent_id=use_agent_id, device=device,
+                        n_episodes=args.n_eval_episodes, seed=args.seed,
+                        obs_normalizer=obs_normalizer, eval_writer=eval_writer, eval_f=eval_f,
+                        best_model_tracker=best_model_tracker, run_dir=run_dir,
+                        save_checkpoint=save_checkpoint, global_step=global_step,
+                        algo_name="MAPPO",
                     )
                     last_eval_step = global_step
 

@@ -7,8 +7,9 @@ all MARL training algorithms (IQL, VDN, QMIX, QPLEX, MAPPO).
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
 
 import multiprocessing
 from multiprocessing.managers import SyncManager
@@ -19,6 +20,7 @@ import torch
 if TYPE_CHECKING:
     from ncs_env.env import NCS_Env
     from utils.marl import RunningObsNormalizer
+    from utils.run_utils import BestModelTracker
 
 
 def setup_device_and_rng(
@@ -233,3 +235,114 @@ def setup_shared_reward_normalizer(
         reset_store=False,
     )
     return config, manager
+
+
+def evaluate_and_log(
+    *,
+    eval_env: Any,
+    agent: Any,
+    n_eval_envs: int,
+    n_agents: int,
+    n_actions: int,
+    use_agent_id: bool,
+    device: torch.device,
+    n_episodes: int,
+    seed: Optional[int],
+    obs_normalizer: Optional["RunningObsNormalizer"],
+    eval_writer: csv.writer,
+    eval_f: Any,
+    best_model_tracker: "BestModelTracker",
+    run_dir: Path,
+    save_checkpoint: Callable[[Path], None],
+    global_step: int,
+    algo_name: str,
+) -> None:
+    """Run vectorized evaluation, write CSV row, update best model, and print."""
+    from utils.marl.common import run_evaluation_vectorized
+
+    mean_eval_reward, std_eval_reward, _ = run_evaluation_vectorized(
+        eval_env=eval_env,
+        agent=agent,
+        n_eval_envs=n_eval_envs,
+        n_agents=n_agents,
+        n_actions=n_actions,
+        use_agent_id=use_agent_id,
+        device=device,
+        n_episodes=n_episodes,
+        seed=seed,
+        obs_normalizer=obs_normalizer,
+    )
+    eval_writer.writerow([global_step, mean_eval_reward, std_eval_reward])
+    eval_f.flush()
+
+    best_model_tracker.update(
+        "eval", mean_eval_reward, run_dir / "best_model.pt", save_checkpoint
+    )
+
+    print(
+        f"[{algo_name}] Eval at step {global_step}: "
+        f"mean_reward={mean_eval_reward:.3f} std={std_eval_reward:.3f}"
+    )
+
+
+def log_completed_episodes(
+    *,
+    done_reset: np.ndarray,
+    episode_reward_sums: np.ndarray,
+    global_step: int,
+    episode: int,
+    train_writer: csv.writer,
+    train_f: Any,
+    best_model_tracker: "BestModelTracker",
+    run_dir: Path,
+    save_checkpoint: Callable[[Path], None],
+    log_interval: int,
+    algo_name: str,
+    extra_csv_values: Any = None,
+    extra_log_str: str = "",
+    episode_lengths: Optional[np.ndarray] = None,
+) -> int:
+    """Log completed episodes to CSV, update best train model, and print.
+
+    Args:
+        extra_csv_values: For Q-learning, a scalar (epsilon) appended to each row.
+            For MAPPO, pass None and use *episode_lengths* instead.
+        extra_log_str: Extra string appended to the print line (e.g. " eps=0.100").
+        episode_lengths: If provided, the per-env episode length array.
+            Values for done envs are written to CSV and then reset to 0.
+
+    Returns:
+        Updated episode counter.
+    """
+    if not np.any(done_reset):
+        return episode
+
+    done_indices = np.where(done_reset)[0]
+    for env_idx in done_indices:
+        row = [episode, float(episode_reward_sums[env_idx])]
+        if episode_lengths is not None:
+            row.append(int(episode_lengths[env_idx]))
+        if extra_csv_values is not None:
+            row.append(float(extra_csv_values))
+        row.append(global_step)
+        train_writer.writerow(row)
+        train_f.flush()
+
+        best_model_tracker.update(
+            "train",
+            float(episode_reward_sums[env_idx]),
+            run_dir / "best_train_model.pt",
+            save_checkpoint,
+        )
+
+        if episode % log_interval == 0:
+            print(
+                f"[{algo_name}] episode={episode} steps={global_step} "
+                f"reward_sum={episode_reward_sums[env_idx]:.3f}{extra_log_str}"
+            )
+        episode += 1
+        episode_reward_sums[env_idx] = 0.0
+        if episode_lengths is not None:
+            episode_lengths[env_idx] = 0
+
+    return episode

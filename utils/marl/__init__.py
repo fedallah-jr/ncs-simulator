@@ -16,6 +16,9 @@ from .common import (
     select_actions_batched,
     run_evaluation,
     run_evaluation_vectorized,
+    patch_autoreset_final_obs,
+    QLearnStepResult,
+    qlearning_collect_transition,
 )
 from .learners import IQLLearner, VDNLearner, QMIXLearner, QPLEXLearner
 from .networks import (
@@ -46,6 +49,7 @@ from .checkpoint_utils import (
 __all__ = [
     "MARLBatch",
     "MARLReplayBuffer",
+    "QLearnStepResult",
     "add_qmix_args",
     "add_qplex_args",
     "add_team_reward_arg",
@@ -64,6 +68,8 @@ __all__ = [
     "QPLEXLearner",
     "QPLEXMixer",
     "RunningObsNormalizer",
+    "patch_autoreset_final_obs",
+    "qlearning_collect_transition",
     "run_evaluation",
     "run_evaluation_vectorized",
     "save_mappo_checkpoint",
