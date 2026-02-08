@@ -326,6 +326,8 @@ def train(args):
     import optax
     from evosax.algorithms.distribution_based import Open_ES
     
+    if args.init_checkpoint is not None and args.bc_dataset is not None:
+        raise ValueError("--init-checkpoint and --bc-dataset are mutually exclusive")
     if args.bc_epochs > 0 and args.bc_dataset is None:
         raise ValueError("--bc-epochs requires --bc-dataset")
     if args.bc_dataset is not None and args.bc_epochs <= 0:
@@ -450,6 +452,26 @@ def train(args):
         pretrained_params = bc_result.params
         pretrained_flat = np.array(flatten_util.ravel_pytree(pretrained_params)[0])
         print(f"[BC] Pretrained actor with avg loss {bc_result.metrics.get('loss', 0.0):.6f}")
+
+    # Load from checkpoint if provided
+    if args.init_checkpoint is not None:
+        ckpt = np.load(args.init_checkpoint, allow_pickle=False)
+        pretrained_flat = np.asarray(ckpt["flat_params"])
+        if pretrained_flat.shape[0] != num_params:
+            raise ValueError(
+                f"Checkpoint has {pretrained_flat.shape[0]} params, model expects {num_params}"
+            )
+        pretrained_params = unravel_fn(pretrained_flat)
+        if args.normalize_obs and "obs_norm_mean" in ckpt:
+            clip_value = None if args.obs_norm_clip <= 0 else float(args.obs_norm_clip)
+            obs_normalizer = RunningObsNormalizer(
+                mean=np.asarray(ckpt["obs_norm_mean"]),
+                m2=np.asarray(ckpt["obs_norm_m2"]),
+                count=int(ckpt["obs_norm_count"]),
+                clip=clip_value,
+                eps=float(args.obs_norm_eps),
+            )
+        print(f"[Checkpoint] Loaded from {args.init_checkpoint} ({num_params} params)")
 
     # Create fresh obs normalizer if not initialized from BC dataset
     if obs_normalizer is None and args.normalize_obs:
@@ -750,6 +772,7 @@ def train(args):
         "bc_batch_size": args.bc_batch_size,
         "bc_lr": bc_lr,
         "bc_init_std": args.bc_init_std,
+        "init_checkpoint": str(args.init_checkpoint) if args.init_checkpoint is not None else None,
     }
     save_config_with_hyperparameters(run_dir, args.config, "openai_es", hyperparams)
     
@@ -804,6 +827,12 @@ def parse_args():
         type=float,
         default=0.005,
         help="L2 regularization coefficient applied to fitness (default: 0.005).",
+    )
+    parser.add_argument(
+        "--init-checkpoint",
+        type=Path,
+        default=None,
+        help="Path to .npz checkpoint to initialize from (must contain flat_params).",
     )
     parser.add_argument(
         "--bc-dataset",
