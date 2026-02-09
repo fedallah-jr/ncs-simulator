@@ -10,7 +10,7 @@ def build_base_qlearning_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--n-agents", type=int, default=3)
     parser.add_argument("--episode-length", type=int, default=500)
     parser.add_argument("--total-timesteps", type=int, default=200_000)
-    parser.add_argument("--n-envs", type=int, default=8)
+    parser.add_argument("--n-envs", type=int, default=1)
     parser.add_argument("--buffer-size", type=int, default=200_000)
     parser.add_argument("--batch-size", type=int, default=2048)
     parser.add_argument("--start-learning", type=int, default=1_000)
