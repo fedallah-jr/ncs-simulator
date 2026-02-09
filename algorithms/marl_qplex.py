@@ -136,7 +136,6 @@ def main() -> None:
         attend_reg_coef=args.attend_reg_coef,
         state_bias=args.state_bias,
         nonlinear=args.nonlinear,
-        mask_dead=args.mask_dead,
         weighted_head=args.weighted_head,
         is_minus_one=args.is_minus_one,
     )
@@ -182,7 +181,6 @@ def main() -> None:
             "attend_reg_coef": args.attend_reg_coef,
             "state_bias": args.state_bias,
             "nonlinear": args.nonlinear,
-            "mask_dead": args.mask_dead,
             "weighted_head": args.weighted_head,
             "is_minus_one": args.is_minus_one,
         }

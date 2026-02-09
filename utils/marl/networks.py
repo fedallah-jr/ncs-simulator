@@ -363,7 +363,6 @@ class QPLEXQattenWeight(nn.Module):
         weighted_head: bool = False,
         state_bias: bool = True,
         nonlinear: bool = False,
-        mask_dead: bool = False,
     ) -> None:
         super().__init__()
         if n_agents <= 0 or n_actions <= 0 or state_dim <= 0:
@@ -391,7 +390,6 @@ class QPLEXQattenWeight(nn.Module):
         self.weighted_head = bool(weighted_head)
         self.state_bias = bool(state_bias)
         self.nonlinear = bool(nonlinear)
-        self.mask_dead = bool(mask_dead)
 
         self.key_extractors = nn.ModuleList()
         self.selector_extractors = nn.ModuleList()
@@ -434,8 +432,6 @@ class QPLEXQattenWeight(nn.Module):
             raise ValueError("states second dimension must equal state_dim")
         if agent_qs.shape[1] != self.n_agents:
             raise ValueError("agent_qs second dimension must equal n_agents")
-        if self.mask_dead and actions is None:
-            raise ValueError("actions are required when mask_dead is True")
 
         states = states.reshape(-1, self.state_dim)
         unit_states = states[:, : self.unit_dim * self.n_agents]
@@ -457,17 +453,6 @@ class QPLEXQattenWeight(nn.Module):
                 torch.stack(curr_head_keys).permute(1, 2, 0),
             )
             scaled_attend_logits = attend_logits / math.sqrt(self.embed_dim)
-            if self.mask_dead:
-                if actions is None:
-                    raise ValueError("actions are required when mask_dead is True")
-                if actions.ndim == 3:
-                    action_indices = actions.argmax(dim=-1)
-                elif actions.ndim == 2:
-                    action_indices = actions
-                else:
-                    raise ValueError("actions must have shape (batch, n_agents) or (batch, n_agents, n_actions)")
-                mask = action_indices == 0
-                scaled_attend_logits = scaled_attend_logits.masked_fill(mask.unsqueeze(1), -1e9)
             attend_weights = F.softmax(scaled_attend_logits, dim=2)
             head_attend_logits.append(attend_logits)
             head_attend_weights.append(attend_weights)
@@ -509,7 +494,6 @@ class QPLEXMixer(nn.Module):
         attend_reg_coef: float = 0.001,
         state_bias: bool = True,
         nonlinear: bool = False,
-        mask_dead: bool = False,
         weighted_head: bool = True,
         is_minus_one: bool = True,
     ) -> None:
@@ -543,7 +527,6 @@ class QPLEXMixer(nn.Module):
             weighted_head=weighted_head,
             state_bias=state_bias,
             nonlinear=nonlinear,
-            mask_dead=mask_dead,
         )
         self.si_weight = QPLEXSIWeight(
             n_agents=self.n_agents,
