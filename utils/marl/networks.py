@@ -422,7 +422,6 @@ class QPLEXQattenWeight(nn.Module):
         self,
         agent_qs: torch.Tensor,
         states: torch.Tensor,
-        actions: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]:
         if agent_qs.ndim != 2:
             raise ValueError("agent_qs must have shape (batch, n_agents)")
@@ -561,8 +560,6 @@ class QPLEXMixer(nn.Module):
         states: torch.Tensor,
         actions_onehot: Optional[torch.Tensor] = None,
         max_q_i: Optional[torch.Tensor] = None,
-        is_v: bool = False,
-        actions: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
         if agent_qs.ndim != 2:
             raise ValueError("agent_qs must have shape (batch, n_agents)")
@@ -574,30 +571,23 @@ class QPLEXMixer(nn.Module):
         if states.shape[0] != batch_size or states.shape[1] != self.state_dim:
             raise ValueError("states must have shape (batch, state_dim)")
 
-        if not is_v and (actions_onehot is None or max_q_i is None):
-            raise ValueError("actions_onehot and max_q_i are required when is_v is False")
-
         w_final, v, attend_mag_regs, head_entropies = self.attention_weight(
             agent_qs=agent_qs,
             states=states,
-            actions=actions,
         )
         w_final = w_final.view(-1, self.n_agents) + 1e-10
         v = v.view(-1, 1).repeat(1, self.n_agents) / float(self.n_agents)
 
         agent_qs = agent_qs.view(-1, self.n_agents)
         agent_qs = w_final * agent_qs + v
-        if not is_v:
-            if max_q_i is None:
-                raise ValueError("max_q_i is required when is_v is False")
+
+        # V component (always computed)
+        q_tot = self._calc_v(agent_qs)
+
+        # A component (when advantage inputs are provided)
+        if actions_onehot is not None and max_q_i is not None:
             max_q_i = max_q_i.view(-1, self.n_agents)
             max_q_i = w_final * max_q_i + v
-
-        if is_v:
-            q_tot = self._calc_v(agent_qs)
-        else:
-            if actions_onehot is None:
-                raise ValueError("actions_onehot is required when is_v is False")
-            q_tot = self._calc_adv(agent_qs, states, actions_onehot, max_q_i)
+            q_tot = q_tot + self._calc_adv(agent_qs, states, actions_onehot, max_q_i)
 
         return q_tot, attend_mag_regs, head_entropies

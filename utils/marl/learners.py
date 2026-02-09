@@ -373,16 +373,10 @@ class QPLEXLearner:
         max_q_i = q_all.max(dim=-1).values
         actions_onehot = F.one_hot(actions, num_classes=self.n_actions).float()
 
-        v_tot, attend_reg, _ = self.mixer(q_taken, states, actions=actions, is_v=True)
-        adv_tot, _, _ = self.mixer(
-            q_taken,
-            states,
-            actions_onehot=actions_onehot,
-            max_q_i=max_q_i,
-            actions=actions,
-            is_v=False,
+        q_tot_raw, attend_reg, _ = self.mixer(
+            q_taken, states, actions_onehot=actions_onehot, max_q_i=max_q_i,
         )
-        q_tot = (v_tot + adv_tot).squeeze(-1)
+        q_tot = q_tot_raw.squeeze(-1)
 
         with torch.no_grad():
             if self.double_q:
@@ -393,25 +387,17 @@ class QPLEXLearner:
                 target_max_qvals = target_next_q.max(dim=-1).values
                 next_actions_onehot = F.one_hot(next_actions, num_classes=self.n_actions).float()
 
-                target_v_tot, _, _ = self.target_mixer(
-                    target_chosen_qvals,
-                    next_states,
-                    actions=next_actions,
-                    is_v=True,
-                )
-                target_adv_tot, _, _ = self.target_mixer(
+                target_q_tot, _, _ = self.target_mixer(
                     target_chosen_qvals,
                     next_states,
                     actions_onehot=next_actions_onehot,
                     max_q_i=target_max_qvals,
-                    actions=next_actions,
-                    is_v=False,
                 )
-                target_q_tot = (target_v_tot + target_adv_tot).squeeze(-1)
+                target_q_tot = target_q_tot.squeeze(-1)
             else:
                 target_next_q = _q_values(self.target_agent, next_obs, self.n_agents, self.n_actions)
                 target_max_qvals = target_next_q.max(dim=-1).values
-                target_q_tot, _, _ = self.target_mixer(target_max_qvals, next_states, is_v=True)
+                target_q_tot, _, _ = self.target_mixer(target_max_qvals, next_states)
                 target_q_tot = target_q_tot.squeeze(-1)
 
             r_tot = rewards.sum(dim=1)
