@@ -46,9 +46,15 @@ if str(PROJECT_ROOT) not in sys.path:
 from ncs_env.config import load_config
 from ncs_env.env import NCS_Env
 from tools.heuristic_policies import get_heuristic_policy
-from tools.visualize_policy import (
+from tools._common import (
+    MultiAgentHeuristicPolicy,
     load_es_policy,
     load_marl_torch_multi_agent_policy,
+    infer_policy_n_agents,
+    read_marl_torch_n_agents,
+    read_es_n_agents,
+    resolve_n_agents,
+    sanitize_filename as _sanitize_filename,
 )
 
 # Heuristic policies to compare against (edit as needed).
@@ -82,6 +88,164 @@ REWARD_COMPARISON_KEYS: Sequence[str] = (
     "comm_recent_window",
     "comm_throughput_window",
     "comm_throughput_floor",
+)
+
+# ---------------------------------------------------------------------------
+# CSV fieldname constants (used in multiple places)
+# ---------------------------------------------------------------------------
+_PER_SEED_FIELDS_CORE: Tuple[str, ...] = (
+    "policy_label",
+    "policy_type",
+    "seed",
+    "total_reward",
+    "mean_reward",
+    "mean_state_error",
+    "final_state_error",
+    "total_lqr_cost",
+    "mean_lqr_cost",
+    "send_rate",
+    "mean_true_goodput_kbps",
+    "steps",
+    "n_agents",
+    "episode_length",
+)
+
+_PER_SEED_FIELDS_NETWORK: Tuple[str, ...] = (
+    "tx_attempts",
+    "tx_acked",
+    "tx_dropped",
+    "tx_rewrites",
+    "tx_collisions",
+    "data_delivered",
+    "mac_ack_sent",
+    "mac_ack_collisions",
+    "ack_timeouts",
+    "tx_success_rate",
+    "data_delivery_rate",
+    "collision_rate",
+    "drop_rate",
+    "rewrite_rate",
+    "ack_collision_rate",
+    "ack_timeout_rate",
+)
+
+_PER_SEED_FIELDS: Tuple[str, ...] = _PER_SEED_FIELDS_CORE + _PER_SEED_FIELDS_NETWORK
+
+_SUMMARY_FIELDS_CORE: Tuple[str, ...] = (
+    "policy_label",
+    "policy_type",
+    "num_seeds",
+    "mean_total_reward",
+    "std_total_reward",
+    "mean_state_error",
+    "std_state_error",
+    "mean_final_error",
+    "std_final_error",
+    "mean_total_lqr_cost",
+    "std_total_lqr_cost",
+    "mean_lqr_cost",
+    "std_lqr_cost",
+    "mean_send_rate",
+    "std_send_rate",
+    "mean_true_goodput_kbps",
+    "std_true_goodput_kbps",
+    "mean_steps",
+    "std_steps",
+    "mean_reward_per_step",
+    "std_reward_per_step",
+    "completion_rate",
+)
+
+_SUMMARY_FIELDS_NETWORK: Tuple[str, ...] = (
+    "mean_tx_attempts",
+    "std_tx_attempts",
+    "mean_tx_acked",
+    "std_tx_acked",
+    "mean_tx_dropped",
+    "std_tx_dropped",
+    "mean_tx_rewrites",
+    "std_tx_rewrites",
+    "mean_tx_collisions",
+    "std_tx_collisions",
+    "mean_data_delivered",
+    "std_data_delivered",
+    "mean_mac_ack_sent",
+    "std_mac_ack_sent",
+    "mean_mac_ack_collisions",
+    "std_mac_ack_collisions",
+    "mean_ack_timeouts",
+    "std_ack_timeouts",
+    "mean_tx_success_rate",
+    "std_tx_success_rate",
+    "mean_data_delivery_rate",
+    "std_data_delivery_rate",
+    "mean_collision_rate",
+    "std_collision_rate",
+    "mean_drop_rate",
+    "std_drop_rate",
+    "mean_rewrite_rate",
+    "std_rewrite_rate",
+    "mean_ack_collision_rate",
+    "std_ack_collision_rate",
+    "mean_ack_timeout_rate",
+    "std_ack_timeout_rate",
+)
+
+_SUMMARY_FIELDS: Tuple[str, ...] = _SUMMARY_FIELDS_CORE + _SUMMARY_FIELDS_NETWORK
+
+_LEADERBOARD_FIELDS: Tuple[str, ...] = (
+    "rank",
+    "model_name",
+    "checkpoint",
+    "policy_label",
+    "policy_type",
+    "num_seeds",
+    "mean_total_reward",
+    "std_total_reward",
+    "mean_state_error",
+    "std_state_error",
+    "mean_final_error",
+    "std_final_error",
+    "mean_lqr_cost",
+    "std_lqr_cost",
+    "mean_send_rate",
+    "std_send_rate",
+    "mean_steps",
+    "std_steps",
+    "mean_reward_per_step",
+    "std_reward_per_step",
+    "completion_rate",
+)
+
+_NETWORK_LEADERBOARD_FIELDS: Tuple[str, ...] = (
+    "rank",
+    "model_name",
+    "checkpoint",
+    "policy_label",
+    "policy_type",
+    "num_seeds",
+) + _SUMMARY_FIELDS_NETWORK
+
+_REPLAYBOARD_FIELDS: Tuple[str, ...] = (
+    "model_name",
+    "checkpoint",
+    "policy_type",
+    "num_seeds",
+    "mean_total_reward",
+    "std_total_reward",
+    "mean_state_error",
+    "std_state_error",
+    "mean_final_error",
+    "std_final_error",
+    "mean_lqr_cost",
+    "std_lqr_cost",
+    "mean_send_rate",
+    "std_send_rate",
+    "mean_steps",
+    "std_steps",
+    "mean_reward_per_step",
+    "std_reward_per_step",
+    "completion_rate",
 )
 
 
@@ -129,30 +293,6 @@ class ModelRun:
     latest_model: Optional[Path]
 
 
-class MultiAgentHeuristicPolicy:
-    def __init__(self, policy_name: str, n_agents: int, seed: Optional[int], deterministic: bool) -> None:
-        self.policy_name = policy_name
-        self.n_agents = int(n_agents)
-        self.deterministic = bool(deterministic)
-        self._policies = []
-        for idx in range(self.n_agents):
-            agent_seed = None if seed is None else int(seed) + idx
-            self._policies.append(get_heuristic_policy(policy_name, n_agents=1, seed=agent_seed))
-
-    def reset(self) -> None:
-        for policy in self._policies:
-            if hasattr(policy, "reset"):
-                policy.reset()
-
-    def act(self, obs_dict: Dict[str, np.ndarray]) -> Dict[str, int]:
-        actions: Dict[str, int] = {}
-        for idx in range(self.n_agents):
-            obs = obs_dict[f"agent_{idx}"]
-            action, _ = self._policies[idx].predict(obs, deterministic=self.deterministic)
-            actions[f"agent_{idx}"] = int(action)
-        return actions
-
-
 class ReplayPolicy:
     """Policy that replays a pre-recorded action sequence."""
     def __init__(self, recorded_actions: List[Dict[str, int]], n_agents: int) -> None:
@@ -172,15 +312,48 @@ class ReplayPolicy:
         return actions
 
 
-def _sanitize_filename(value: str) -> str:
-    keep = []
-    for ch in value:
-        if ch.isalnum() or ch in {"-", "_", "."}:
-            keep.append(ch)
-        else:
-            keep.append("_")
-    out = "".join(keep).strip("_.")
-    return out if out else "policy"
+def _episode_result_to_seed_row(
+    result: EpisodeResult,
+    *,
+    include_network_stats: bool = False,
+) -> Dict[str, Any]:
+    """Build a per-seed CSV row from an EpisodeResult."""
+    row: Dict[str, Any] = {
+        "policy_label": result.policy_label,
+        "policy_type": result.policy_type,
+        "seed": result.seed,
+        "total_reward": result.total_reward,
+        "mean_reward": result.mean_reward,
+        "mean_state_error": result.mean_state_error,
+        "final_state_error": result.final_state_error,
+        "total_lqr_cost": result.total_lqr_cost,
+        "mean_lqr_cost": result.mean_lqr_cost,
+        "send_rate": result.send_rate,
+        "mean_true_goodput_kbps": result.mean_true_goodput_kbps,
+        "steps": result.steps,
+        "n_agents": result.n_agents,
+        "episode_length": result.episode_length,
+    }
+    if include_network_stats:
+        row.update({
+            "tx_attempts": result.tx_attempts,
+            "tx_acked": result.tx_acked,
+            "tx_dropped": result.tx_dropped,
+            "tx_rewrites": result.tx_rewrites,
+            "tx_collisions": result.tx_collisions,
+            "data_delivered": result.data_delivered,
+            "mac_ack_sent": result.mac_ack_sent,
+            "mac_ack_collisions": result.mac_ack_collisions,
+            "ack_timeouts": result.ack_timeouts,
+            "tx_success_rate": _safe_rate(result.tx_acked, result.tx_attempts),
+            "data_delivery_rate": _safe_rate(result.data_delivered, result.tx_attempts),
+            "collision_rate": _safe_rate(result.tx_collisions, result.tx_attempts),
+            "drop_rate": _safe_rate(result.tx_dropped, result.tx_attempts),
+            "rewrite_rate": _safe_rate(result.tx_rewrites, result.tx_attempts),
+            "ack_collision_rate": _safe_rate(result.mac_ack_collisions, result.mac_ack_sent),
+            "ack_timeout_rate": _safe_rate(result.ack_timeouts, result.tx_attempts),
+        })
+    return row
 
 
 def _iter_seeds(seed_start: int, num_seeds: int) -> List[int]:
@@ -384,68 +557,17 @@ def _write_perfect_control_config(
     return output_path
 
 
-def _read_marl_torch_n_agents(model_path: Path) -> Optional[int]:
-    try:
-        import torch
-    except ImportError as exc:
-        raise ImportError("torch is required to read marl_torch checkpoints") from exc
-
-    ckpt = torch.load(str(model_path), map_location="cpu")
-    if not isinstance(ckpt, dict):
-        raise ValueError("MARL torch checkpoint must be a dict")
-    if "n_agents" not in ckpt:
-        return None
-    return int(ckpt["n_agents"])
-
-
-def _read_es_n_agents(model_path: Path) -> Optional[int]:
-    try:
-        with np.load(str(model_path)) as data:
-            if "n_agents" not in data:
-                return None
-            return int(data["n_agents"])
-    except Exception as exc:
-        raise ValueError(f"Could not load numpy data from {model_path}: {exc}") from exc
-
-
-def _infer_policy_n_agents(spec: PolicySpec) -> Optional[int]:
-    policy_type = spec.policy_type.lower()
-    if policy_type == "marl_torch":
-        return _read_marl_torch_n_agents(Path(spec.policy_path))
-    if policy_type in {"es", "openai_es"}:
-        return _read_es_n_agents(Path(spec.policy_path))
-    return None
-
-
 def _resolve_n_agents(
     config: Dict[str, Any],
     specs: Sequence[PolicySpec],
     explicit_n_agents: Optional[int],
 ) -> int:
-    inferred_values: List[int] = []
-    for spec in specs:
-        inferred = _infer_policy_n_agents(spec)
-        if inferred is not None:
-            inferred_values.append(int(inferred))
-
-    unique_values = sorted(set(inferred_values))
-    if len(unique_values) > 1:
-        raise ValueError(f"Policies require different n_agents values: {unique_values}")
-
-    if explicit_n_agents is not None:
-        if unique_values and int(explicit_n_agents) != unique_values[0]:
-            raise ValueError(
-                f"--n-agents={explicit_n_agents} does not match checkpoint n_agents={unique_values[0]}"
-            )
-        return int(explicit_n_agents)
-
-    if unique_values:
-        return int(unique_values[0])
-
-    config_n_agents = config.get("system", {}).get("n_agents")
-    if config_n_agents is not None:
-        return int(config_n_agents)
-    raise ValueError("n_agents could not be resolved; set system.n_agents or pass --n-agents")
+    """Thin wrapper that adapts PolicySpec objects into (path, type) tuples."""
+    return resolve_n_agents(
+        config,
+        [(spec.policy_path, spec.policy_type) for spec in specs],
+        explicit_n_agents,
+    )
 
 
 def _build_env(
@@ -563,101 +685,54 @@ def _run_multi_agent_episode(
     )
 
 
+def _mean_std(arr: np.ndarray, has_data: bool) -> Tuple[float, float]:
+    if not has_data:
+        return 0.0, 0.0
+    return float(np.mean(arr)), float(np.std(arr))
+
+
 def _summarize_results(results: List[EpisodeResult]) -> Dict[str, float]:
-    totals = np.array([r.total_reward for r in results], dtype=float)
-    mean_state_errors = np.array([r.mean_state_error for r in results], dtype=float)
-    final_errors = np.array([r.final_state_error for r in results], dtype=float)
-    total_lqr_costs = np.array([r.total_lqr_cost for r in results], dtype=float)
-    mean_lqr_costs = np.array([r.mean_lqr_cost for r in results], dtype=float)
-    send_rates = np.array([r.send_rate for r in results], dtype=float)
+    has_data = bool(results)
     steps = np.array([r.steps for r in results], dtype=float)
-    mean_rewards = np.array([r.mean_reward for r in results], dtype=float)
-    true_goodputs = np.array([r.mean_true_goodput_kbps for r in results], dtype=float)
-    tx_attempts = np.array([r.tx_attempts for r in results], dtype=float)
-    tx_acked = np.array([r.tx_acked for r in results], dtype=float)
-    tx_dropped = np.array([r.tx_dropped for r in results], dtype=float)
-    tx_rewrites = np.array([r.tx_rewrites for r in results], dtype=float)
-    tx_collisions = np.array([r.tx_collisions for r in results], dtype=float)
-    data_delivered = np.array([r.data_delivered for r in results], dtype=float)
-    mac_ack_sent = np.array([r.mac_ack_sent for r in results], dtype=float)
-    mac_ack_collisions = np.array([r.mac_ack_collisions for r in results], dtype=float)
-    ack_timeouts = np.array([r.ack_timeouts for r in results], dtype=float)
-    success_rates = np.array(
-        [_safe_rate(r.tx_acked, r.tx_attempts) for r in results], dtype=float
-    )
-    delivery_rates = np.array(
-        [_safe_rate(r.data_delivered, r.tx_attempts) for r in results], dtype=float
-    )
-    collision_rates = np.array(
-        [_safe_rate(r.tx_collisions, r.tx_attempts) for r in results], dtype=float
-    )
-    drop_rates = np.array(
-        [_safe_rate(r.tx_dropped, r.tx_attempts) for r in results], dtype=float
-    )
-    rewrite_rates = np.array(
-        [_safe_rate(r.tx_rewrites, r.tx_attempts) for r in results], dtype=float
-    )
-    ack_collision_rates = np.array(
-        [_safe_rate(r.mac_ack_collisions, r.mac_ack_sent) for r in results], dtype=float
-    )
-    ack_timeout_rates = np.array(
-        [_safe_rate(r.ack_timeouts, r.tx_attempts) for r in results], dtype=float
-    )
     episode_length = results[0].episode_length if results else 0
     completion_rate = float(np.mean(steps == episode_length)) if results else 0.0
-    return {
-        "mean_total_reward": float(np.mean(totals)) if results else 0.0,
-        "std_total_reward": float(np.std(totals)) if results else 0.0,
-        "mean_state_error": float(np.mean(mean_state_errors)) if results else 0.0,
-        "std_state_error": float(np.std(mean_state_errors)) if results else 0.0,
-        "mean_final_error": float(np.mean(final_errors)) if results else 0.0,
-        "std_final_error": float(np.std(final_errors)) if results else 0.0,
-        "mean_total_lqr_cost": float(np.mean(total_lqr_costs)) if results else 0.0,
-        "std_total_lqr_cost": float(np.std(total_lqr_costs)) if results else 0.0,
-        "mean_lqr_cost": float(np.mean(mean_lqr_costs)) if results else 0.0,
-        "std_lqr_cost": float(np.std(mean_lqr_costs)) if results else 0.0,
-        "mean_send_rate": float(np.mean(send_rates)) if results else 0.0,
-        "std_send_rate": float(np.std(send_rates)) if results else 0.0,
-        "mean_true_goodput_kbps": float(np.mean(true_goodputs)) if results else 0.0,
-        "std_true_goodput_kbps": float(np.std(true_goodputs)) if results else 0.0,
-        "mean_steps": float(np.mean(steps)) if results else 0.0,
-        "std_steps": float(np.std(steps)) if results else 0.0,
-        "mean_reward_per_step": float(np.mean(mean_rewards)) if results else 0.0,
-        "std_reward_per_step": float(np.std(mean_rewards)) if results else 0.0,
-        "completion_rate": completion_rate,
-        "mean_tx_attempts": float(np.mean(tx_attempts)) if results else 0.0,
-        "std_tx_attempts": float(np.std(tx_attempts)) if results else 0.0,
-        "mean_tx_acked": float(np.mean(tx_acked)) if results else 0.0,
-        "std_tx_acked": float(np.std(tx_acked)) if results else 0.0,
-        "mean_tx_dropped": float(np.mean(tx_dropped)) if results else 0.0,
-        "std_tx_dropped": float(np.std(tx_dropped)) if results else 0.0,
-        "mean_tx_rewrites": float(np.mean(tx_rewrites)) if results else 0.0,
-        "std_tx_rewrites": float(np.std(tx_rewrites)) if results else 0.0,
-        "mean_tx_collisions": float(np.mean(tx_collisions)) if results else 0.0,
-        "std_tx_collisions": float(np.std(tx_collisions)) if results else 0.0,
-        "mean_data_delivered": float(np.mean(data_delivered)) if results else 0.0,
-        "std_data_delivered": float(np.std(data_delivered)) if results else 0.0,
-        "mean_mac_ack_sent": float(np.mean(mac_ack_sent)) if results else 0.0,
-        "std_mac_ack_sent": float(np.std(mac_ack_sent)) if results else 0.0,
-        "mean_mac_ack_collisions": float(np.mean(mac_ack_collisions)) if results else 0.0,
-        "std_mac_ack_collisions": float(np.std(mac_ack_collisions)) if results else 0.0,
-        "mean_ack_timeouts": float(np.mean(ack_timeouts)) if results else 0.0,
-        "std_ack_timeouts": float(np.std(ack_timeouts)) if results else 0.0,
-        "mean_tx_success_rate": float(np.mean(success_rates)) if results else 0.0,
-        "std_tx_success_rate": float(np.std(success_rates)) if results else 0.0,
-        "mean_data_delivery_rate": float(np.mean(delivery_rates)) if results else 0.0,
-        "std_data_delivery_rate": float(np.std(delivery_rates)) if results else 0.0,
-        "mean_collision_rate": float(np.mean(collision_rates)) if results else 0.0,
-        "std_collision_rate": float(np.std(collision_rates)) if results else 0.0,
-        "mean_drop_rate": float(np.mean(drop_rates)) if results else 0.0,
-        "std_drop_rate": float(np.std(drop_rates)) if results else 0.0,
-        "mean_rewrite_rate": float(np.mean(rewrite_rates)) if results else 0.0,
-        "std_rewrite_rate": float(np.std(rewrite_rates)) if results else 0.0,
-        "mean_ack_collision_rate": float(np.mean(ack_collision_rates)) if results else 0.0,
-        "std_ack_collision_rate": float(np.std(ack_collision_rates)) if results else 0.0,
-        "mean_ack_timeout_rate": float(np.mean(ack_timeout_rates)) if results else 0.0,
-        "std_ack_timeout_rate": float(np.std(ack_timeout_rates)) if results else 0.0,
-    }
+
+    # (dict_key_prefix, array) pairs for mean/std computation
+    direct_fields: Sequence[Tuple[str, np.ndarray]] = (
+        ("total_reward", np.array([r.total_reward for r in results], dtype=float)),
+        ("state_error", np.array([r.mean_state_error for r in results], dtype=float)),
+        ("final_error", np.array([r.final_state_error for r in results], dtype=float)),
+        ("total_lqr_cost", np.array([r.total_lqr_cost for r in results], dtype=float)),
+        ("lqr_cost", np.array([r.mean_lqr_cost for r in results], dtype=float)),
+        ("send_rate", np.array([r.send_rate for r in results], dtype=float)),
+        ("true_goodput_kbps", np.array([r.mean_true_goodput_kbps for r in results], dtype=float)),
+        ("steps", steps),
+        ("reward_per_step", np.array([r.mean_reward for r in results], dtype=float)),
+        ("tx_attempts", np.array([r.tx_attempts for r in results], dtype=float)),
+        ("tx_acked", np.array([r.tx_acked for r in results], dtype=float)),
+        ("tx_dropped", np.array([r.tx_dropped for r in results], dtype=float)),
+        ("tx_rewrites", np.array([r.tx_rewrites for r in results], dtype=float)),
+        ("tx_collisions", np.array([r.tx_collisions for r in results], dtype=float)),
+        ("data_delivered", np.array([r.data_delivered for r in results], dtype=float)),
+        ("mac_ack_sent", np.array([r.mac_ack_sent for r in results], dtype=float)),
+        ("mac_ack_collisions", np.array([r.mac_ack_collisions for r in results], dtype=float)),
+        ("ack_timeouts", np.array([r.ack_timeouts for r in results], dtype=float)),
+        ("tx_success_rate", np.array([_safe_rate(r.tx_acked, r.tx_attempts) for r in results], dtype=float)),
+        ("data_delivery_rate", np.array([_safe_rate(r.data_delivered, r.tx_attempts) for r in results], dtype=float)),
+        ("collision_rate", np.array([_safe_rate(r.tx_collisions, r.tx_attempts) for r in results], dtype=float)),
+        ("drop_rate", np.array([_safe_rate(r.tx_dropped, r.tx_attempts) for r in results], dtype=float)),
+        ("rewrite_rate", np.array([_safe_rate(r.tx_rewrites, r.tx_attempts) for r in results], dtype=float)),
+        ("ack_collision_rate", np.array([_safe_rate(r.mac_ack_collisions, r.mac_ack_sent) for r in results], dtype=float)),
+        ("ack_timeout_rate", np.array([_safe_rate(r.ack_timeouts, r.tx_attempts) for r in results], dtype=float)),
+    )
+
+    out: Dict[str, float] = {}
+    for key, arr in direct_fields:
+        m, s = _mean_std(arr, has_data)
+        out[f"mean_{key}"] = m
+        out[f"std_{key}"] = s
+    out["completion_rate"] = completion_rate
+    return out
 
 
 def _write_csv(path: Path, fieldnames: Sequence[str], rows: Iterable[Dict[str, Any]]) -> None:
@@ -810,18 +885,6 @@ def _evaluate_policy(
     if not seeds:
         return []
     worker_count = max(1, int(num_workers))
-    if worker_count == 1 or len(seeds) == 1:
-        results = _evaluate_policy_for_seeds(
-            spec,
-            config_path=config_path,
-            episode_length=episode_length,
-            n_agents=n_agents,
-            seeds=seeds,
-            termination_override=termination_override,
-            reward_override=reward_override,
-        )
-        results.sort(key=lambda r: r.seed)
-        return results
 
     chunks = _chunk_seeds(seeds, worker_count)
     if len(chunks) <= 1:
@@ -861,43 +924,7 @@ def _write_policy_results(
     spec: PolicySpec,
     results: List[EpisodeResult],
 ) -> Dict[str, Any]:
-    per_seed_rows: List[Dict[str, Any]] = []
-    for result in results:
-        per_seed_rows.append(
-            {
-                "policy_label": result.policy_label,
-                "policy_type": result.policy_type,
-                "seed": result.seed,
-                "total_reward": result.total_reward,
-                "mean_reward": result.mean_reward,
-                "mean_state_error": result.mean_state_error,
-                "final_state_error": result.final_state_error,
-                "total_lqr_cost": result.total_lqr_cost,
-                "mean_lqr_cost": result.mean_lqr_cost,
-                "send_rate": result.send_rate,
-                "mean_true_goodput_kbps": result.mean_true_goodput_kbps,
-                "steps": result.steps,
-                "n_agents": result.n_agents,
-                "episode_length": result.episode_length,
-                "tx_attempts": result.tx_attempts,
-                "tx_acked": result.tx_acked,
-                "tx_dropped": result.tx_dropped,
-                "tx_rewrites": result.tx_rewrites,
-                "tx_collisions": result.tx_collisions,
-                "data_delivered": result.data_delivered,
-                "mac_ack_sent": result.mac_ack_sent,
-                "mac_ack_collisions": result.mac_ack_collisions,
-                "ack_timeouts": result.ack_timeouts,
-                "tx_success_rate": _safe_rate(result.tx_acked, result.tx_attempts),
-                "data_delivery_rate": _safe_rate(result.data_delivered, result.tx_attempts),
-                "collision_rate": _safe_rate(result.tx_collisions, result.tx_attempts),
-                "drop_rate": _safe_rate(result.tx_dropped, result.tx_attempts),
-                "rewrite_rate": _safe_rate(result.tx_rewrites, result.tx_attempts),
-                "ack_collision_rate": _safe_rate(result.mac_ack_collisions, result.mac_ack_sent),
-                "ack_timeout_rate": _safe_rate(result.ack_timeouts, result.tx_attempts),
-            }
-        )
-
+    per_seed_rows = [_episode_result_to_seed_row(r, include_network_stats=True) for r in results]
     summary = _summarize_results(results)
     summary_row = {
         "policy_label": spec.label,
@@ -907,102 +934,8 @@ def _write_policy_results(
     }
 
     run_dir.mkdir(parents=True, exist_ok=True)
-    _write_csv(
-        run_dir / "per_seed_results.csv",
-        [
-            "policy_label",
-            "policy_type",
-            "seed",
-            "total_reward",
-            "mean_reward",
-            "mean_state_error",
-            "final_state_error",
-            "total_lqr_cost",
-            "mean_lqr_cost",
-            "send_rate",
-            "mean_true_goodput_kbps",
-            "steps",
-            "n_agents",
-            "episode_length",
-            "tx_attempts",
-            "tx_acked",
-            "tx_dropped",
-            "tx_rewrites",
-            "tx_collisions",
-            "data_delivered",
-            "mac_ack_sent",
-            "mac_ack_collisions",
-            "ack_timeouts",
-            "tx_success_rate",
-            "data_delivery_rate",
-            "collision_rate",
-            "drop_rate",
-            "rewrite_rate",
-            "ack_collision_rate",
-            "ack_timeout_rate",
-        ],
-        per_seed_rows,
-    )
-    _write_csv(
-        run_dir / "summary_results.csv",
-        [
-            "policy_label",
-            "policy_type",
-            "num_seeds",
-            "mean_total_reward",
-            "std_total_reward",
-            "mean_state_error",
-            "std_state_error",
-            "mean_final_error",
-            "std_final_error",
-            "mean_total_lqr_cost",
-            "std_total_lqr_cost",
-            "mean_lqr_cost",
-            "std_lqr_cost",
-            "mean_send_rate",
-            "std_send_rate",
-            "mean_true_goodput_kbps",
-            "std_true_goodput_kbps",
-            "mean_steps",
-            "std_steps",
-            "mean_reward_per_step",
-            "std_reward_per_step",
-            "completion_rate",
-            "mean_tx_attempts",
-            "std_tx_attempts",
-            "mean_tx_acked",
-            "std_tx_acked",
-            "mean_tx_dropped",
-            "std_tx_dropped",
-            "mean_tx_rewrites",
-            "std_tx_rewrites",
-            "mean_tx_collisions",
-            "std_tx_collisions",
-            "mean_data_delivered",
-            "std_data_delivered",
-            "mean_mac_ack_sent",
-            "std_mac_ack_sent",
-            "mean_mac_ack_collisions",
-            "std_mac_ack_collisions",
-            "mean_ack_timeouts",
-            "std_ack_timeouts",
-            "mean_tx_success_rate",
-            "std_tx_success_rate",
-            "mean_data_delivery_rate",
-            "std_data_delivery_rate",
-            "mean_collision_rate",
-            "std_collision_rate",
-            "mean_drop_rate",
-            "std_drop_rate",
-            "mean_rewrite_rate",
-            "std_rewrite_rate",
-            "mean_ack_collision_rate",
-            "std_ack_collision_rate",
-            "mean_ack_timeout_rate",
-            "std_ack_timeout_rate",
-        ],
-        [summary_row],
-    )
+    _write_csv(run_dir / "per_seed_results.csv", _PER_SEED_FIELDS, per_seed_rows)
+    _write_csv(run_dir / "summary_results.csv", _SUMMARY_FIELDS, [summary_row])
     return summary_row
 
 
@@ -1054,102 +987,7 @@ def _write_replay_comparison(
         json.dump(summary_with_meta, f, indent=2, sort_keys=True, ensure_ascii=True)
 
 
-def _write_leaderboard(path: Path, rows: List[Dict[str, Any]]) -> None:
-    fieldnames = [
-        "rank",
-        "model_name",
-        "checkpoint",
-        "policy_label",
-        "policy_type",
-        "num_seeds",
-        "mean_total_reward",
-        "std_total_reward",
-        "mean_state_error",
-        "std_state_error",
-        "mean_final_error",
-        "std_final_error",
-        "mean_lqr_cost",
-        "std_lqr_cost",
-        "mean_send_rate",
-        "std_send_rate",
-        "mean_steps",
-        "std_steps",
-        "mean_reward_per_step",
-        "std_reward_per_step",
-        "completion_rate",
-    ]
-    _write_csv(path, fieldnames, _filter_rows(rows, fieldnames))
-
-
-def _write_network_stats_leaderboard(path: Path, rows: List[Dict[str, Any]]) -> None:
-    fieldnames = [
-        "rank",
-        "model_name",
-        "checkpoint",
-        "policy_label",
-        "policy_type",
-        "num_seeds",
-        "mean_tx_attempts",
-        "std_tx_attempts",
-        "mean_tx_acked",
-        "std_tx_acked",
-        "mean_tx_dropped",
-        "std_tx_dropped",
-        "mean_tx_rewrites",
-        "std_tx_rewrites",
-        "mean_tx_collisions",
-        "std_tx_collisions",
-        "mean_data_delivered",
-        "std_data_delivered",
-        "mean_true_goodput_kbps",
-        "std_true_goodput_kbps",
-        "mean_mac_ack_sent",
-        "std_mac_ack_sent",
-        "mean_mac_ack_collisions",
-        "std_mac_ack_collisions",
-        "mean_ack_timeouts",
-        "std_ack_timeouts",
-        "mean_tx_success_rate",
-        "std_tx_success_rate",
-        "mean_data_delivery_rate",
-        "std_data_delivery_rate",
-        "mean_collision_rate",
-        "std_collision_rate",
-        "mean_drop_rate",
-        "std_drop_rate",
-        "mean_rewrite_rate",
-        "std_rewrite_rate",
-        "mean_ack_collision_rate",
-        "std_ack_collision_rate",
-        "mean_ack_timeout_rate",
-        "std_ack_timeout_rate",
-    ]
-    _write_csv(path, fieldnames, _filter_rows(rows, fieldnames))
-
-
-def _write_replayboard(path: Path, rows: List[Dict[str, Any]]) -> None:
-    """Write replayboard comparing original vs replay policies."""
-    fieldnames = [
-        "model_name",
-        "checkpoint",
-        "policy_type",
-        "num_seeds",
-        "mean_total_reward",
-        "std_total_reward",
-        "mean_state_error",
-        "std_state_error",
-        "mean_final_error",
-        "std_final_error",
-        "mean_lqr_cost",
-        "std_lqr_cost",
-        "mean_send_rate",
-        "std_send_rate",
-        "mean_steps",
-        "std_steps",
-        "mean_reward_per_step",
-        "std_reward_per_step",
-        "completion_rate",
-    ]
+def _write_ranked_csv(path: Path, fieldnames: Sequence[str], rows: List[Dict[str, Any]]) -> None:
     _write_csv(path, fieldnames, _filter_rows(rows, fieldnames))
 
 
@@ -1295,6 +1133,46 @@ def _reward_normalization_disabled(config_path: Path) -> bool:
     return not bool(normalize)
 
 
+def _load_reward_csv(
+    path: Path,
+    log_warnings: bool = True,
+) -> Optional[pd.DataFrame]:
+    """Load a reward CSV and return DataFrame, or None if missing/empty."""
+    if not path.exists():
+        if log_warnings:
+            print(f"Warning: Rewards not found at {path}")
+        return None
+    df = pd.read_csv(str(path))
+    if len(df) == 0:
+        if log_warnings:
+            print(f"Warning: Rewards file is empty at {path}")
+        return None
+    return df
+
+
+def _compute_y_limits(*smoothed_arrays: np.ndarray, padding: float = 0.15) -> Tuple[float, float]:
+    """Compute padded y-axis limits from one or more smoothed arrays."""
+    combined = np.concatenate(smoothed_arrays)
+    y_min, y_max = float(np.min(combined)), float(np.max(combined))
+    y_range = y_max - y_min
+    y_pad = y_range * padding
+    return y_min - y_pad, y_max + y_pad
+
+
+def _save_plot(
+    fig: plt.Figure,
+    path: Path,
+    log_warnings: bool = True,
+    description: str = "plot",
+) -> None:
+    """Save a matplotlib figure, create parent dirs, then close."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(str(path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    if log_warnings:
+        print(f"Saved {description} to {path}")
+
+
 def _plot_combined_rewards(
     model_dir: Path,
     output_path: Path,
@@ -1303,30 +1181,12 @@ def _plot_combined_rewards(
     log_warnings: bool = True,
 ) -> bool:
     """Plot training and evaluation rewards on a shared y-axis when scales match."""
-    training_csv = model_dir / "training_rewards.csv"
-    eval_csv = model_dir / "evaluation_rewards.csv"
-    if not training_csv.exists():
-        if log_warnings:
-            print(f"Warning: Training rewards not found at {training_csv}")
-        return False
-    if not eval_csv.exists():
-        if log_warnings:
-            print(f"Warning: Evaluation rewards not found at {eval_csv}")
+    train_df = _load_reward_csv(model_dir / "training_rewards.csv", log_warnings)
+    eval_df = _load_reward_csv(model_dir / "evaluation_rewards.csv", log_warnings)
+    if train_df is None or eval_df is None:
         return False
 
     try:
-        train_df = pd.read_csv(str(training_csv))
-        if len(train_df) == 0:
-            if log_warnings:
-                print(f"Warning: Training rewards file is empty at {training_csv}")
-            return False
-
-        eval_df = pd.read_csv(str(eval_csv))
-        if len(eval_df) == 0:
-            if log_warnings:
-                print(f"Warning: Evaluation rewards file is empty at {eval_csv}")
-            return False
-
         episode_col = _select_column(train_df, ["episode", "Episode", "generation", "Generation"])
         reward_col = _select_column(train_df, ["reward", "reward_sum", "total_reward", "episode_reward", "mean_reward"])
         if episode_col is None or reward_col is None:
@@ -1347,19 +1207,9 @@ def _plot_combined_rewards(
         std_rewards = eval_df[std_reward_col].values if std_reward_col is not None else None
         smoothed_eval = _smooth_rewards(mean_rewards, window_size=20)
 
-        # Compute y-axis limits based on smoothed mean values only (not std bands)
-        all_smoothed = np.concatenate([smoothed_train, smoothed_eval])
-        y_min, y_max = float(np.min(all_smoothed)), float(np.max(all_smoothed))
-        y_range = y_max - y_min
-        y_padding = y_range * 0.15  # 15% padding to accommodate some variance
-        y_lim_min = y_min - y_padding
-        y_lim_max = y_max + y_padding
+        y_lim_min, y_lim_max = _compute_y_limits(smoothed_train, smoothed_eval)
 
-        # Pre-compute smoothed std for plotting
-        if std_rewards is not None:
-            smoothed_std = _smooth_rewards(std_rewards, window_size=20)
-        else:
-            smoothed_std = None
+        smoothed_std = _smooth_rewards(std_rewards, window_size=20) if std_rewards is not None else None
 
         fig, ax_train = plt.subplots(figsize=(7, 5))
         ax_eval = ax_train.twiny()
@@ -1380,7 +1230,6 @@ def _plot_combined_rewards(
                 label="Eval +/- 1 std",
             )
 
-        # Set y-axis limits based on smoothed values
         ax_train.set_ylim(y_lim_min, y_lim_max)
 
         train_xlabel = "Generation" if "generation" in episode_col.lower() else "Episode"
@@ -1395,11 +1244,7 @@ def _plot_combined_rewards(
         ax_train.legend(train_handles + eval_handles, train_labels + eval_labels, loc="best")
 
         plt.tight_layout()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(str(output_path), dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        if log_warnings:
-            print(f"Saved combined rewards plot to {output_path}")
+        _save_plot(fig, output_path, log_warnings, "combined rewards plot")
         return True
     except Exception as exc:
         if log_warnings:
@@ -1415,19 +1260,11 @@ def _plot_training_rewards(
     log_warnings: bool = True,
 ) -> bool:
     """Plot training reward curves from a model directory."""
-    training_csv = model_dir / "training_rewards.csv"
-    if not training_csv.exists():
-        if log_warnings:
-            print(f"Warning: Training rewards not found at {training_csv}")
+    train_df = _load_reward_csv(model_dir / "training_rewards.csv", log_warnings)
+    if train_df is None:
         return False
 
     try:
-        train_df = pd.read_csv(str(training_csv))
-        if len(train_df) == 0:
-            if log_warnings:
-                print(f"Warning: Training rewards file is empty at {training_csv}")
-            return False
-
         episode_col = _select_column(train_df, ["episode", "Episode", "generation", "Generation"])
         reward_col = _select_column(train_df, ["reward", "reward_sum", "total_reward", "episode_reward", "mean_reward"])
         if episode_col is None or reward_col is None:
@@ -1437,20 +1274,12 @@ def _plot_training_rewards(
         rewards = train_df[reward_col].values
         smoothed = _smooth_rewards(rewards, window_size=200)
 
-        # Compute y-axis limits based on smoothed values with padding
-        y_min, y_max = float(np.min(smoothed)), float(np.max(smoothed))
-        y_range = y_max - y_min
-        y_padding = y_range * 0.15  # 15% padding to accommodate some variance
-        y_lim_min = y_min - y_padding
-        y_lim_max = y_max + y_padding
+        y_lim_min, y_lim_max = _compute_y_limits(smoothed)
 
         fig, ax = plt.subplots(figsize=(7, 5))
         ax.plot(episodes, rewards, alpha=0.3, linewidth=0.5, color="blue", label="Raw")
         ax.plot(episodes, smoothed, linewidth=2, color="blue", label="Smoothed (window=200)")
-
-        # Set y-axis limits based on smoothed values
         ax.set_ylim(y_lim_min, y_lim_max)
-
         ax.set_xlabel("Episode")
         ax.set_ylabel("Training Reward")
         ax.set_title(f"{model_name} - Training Rewards")
@@ -1458,11 +1287,7 @@ def _plot_training_rewards(
         ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(str(output_path), dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        if log_warnings:
-            print(f"Saved training rewards plot to {output_path}")
+        _save_plot(fig, output_path, log_warnings, "training rewards plot")
         return True
     except Exception as exc:
         if log_warnings:
@@ -1478,19 +1303,11 @@ def _plot_evaluation_rewards(
     log_warnings: bool = True,
 ) -> bool:
     """Plot evaluation reward curves from a model directory."""
-    eval_csv = model_dir / "evaluation_rewards.csv"
-    if not eval_csv.exists():
-        if log_warnings:
-            print(f"Warning: Evaluation rewards not found at {eval_csv}")
+    eval_df = _load_reward_csv(model_dir / "evaluation_rewards.csv", log_warnings)
+    if eval_df is None:
         return False
 
     try:
-        eval_df = pd.read_csv(str(eval_csv))
-        if len(eval_df) == 0:
-            if log_warnings:
-                print(f"Warning: Evaluation rewards file is empty at {eval_csv}")
-            return False
-
         step_col = _select_column(eval_df, ["step", "Step", "steps", "Steps"])
         mean_reward_col = _select_column(eval_df, ["mean_reward", "reward", "avg_reward"])
         std_reward_col = _select_column(eval_df, ["std_reward", "reward_std", "std"])
@@ -1502,18 +1319,8 @@ def _plot_evaluation_rewards(
         std_rewards = eval_df[std_reward_col].values if std_reward_col is not None else None
         smoothed = _smooth_rewards(mean_rewards, window_size=20)
 
-        # Compute y-axis limits based on smoothed mean values only (not std bands)
-        y_min, y_max = float(np.min(smoothed)), float(np.max(smoothed))
-        y_range = y_max - y_min
-        y_padding = y_range * 0.15  # 15% padding to accommodate some variance
-        y_lim_min = y_min - y_padding
-        y_lim_max = y_max + y_padding
-
-        # Pre-compute smoothed std for plotting
-        if std_rewards is not None:
-            smoothed_std = _smooth_rewards(std_rewards, window_size=20)
-        else:
-            smoothed_std = None
+        y_lim_min, y_lim_max = _compute_y_limits(smoothed)
+        smoothed_std = _smooth_rewards(std_rewards, window_size=20) if std_rewards is not None else None
 
         fig, ax = plt.subplots(figsize=(7, 5))
         ax.plot(steps, mean_rewards, alpha=0.3, linewidth=0.5, color="green", label="Raw")
@@ -1529,9 +1336,7 @@ def _plot_evaluation_rewards(
                 label="+/- 1 std",
             )
 
-        # Set y-axis limits based on smoothed values
         ax.set_ylim(y_lim_min, y_lim_max)
-
         ax.set_xlabel("Environment Steps")
         ax.set_ylabel("Evaluation Reward (mean)")
         ax.set_title(f"{model_name} - Evaluation Rewards")
@@ -1539,11 +1344,7 @@ def _plot_evaluation_rewards(
         ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(str(output_path), dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        if log_warnings:
-            print(f"Saved evaluation rewards plot to {output_path}")
+        _save_plot(fig, output_path, log_warnings, "evaluation rewards plot")
         return True
     except Exception as exc:
         if log_warnings:
@@ -1754,24 +1555,7 @@ def main() -> int:
                 num_workers=int(args.num_workers),
             )
             for result in results:
-                per_seed_rows.append(
-                    {
-                        "policy_label": result.policy_label,
-                        "policy_type": result.policy_type,
-                        "seed": result.seed,
-                        "total_reward": result.total_reward,
-                        "mean_reward": result.mean_reward,
-                        "mean_state_error": result.mean_state_error,
-                        "final_state_error": result.final_state_error,
-                        "total_lqr_cost": result.total_lqr_cost,
-                        "mean_lqr_cost": result.mean_lqr_cost,
-                        "send_rate": result.send_rate,
-                        "mean_true_goodput_kbps": result.mean_true_goodput_kbps,
-                        "steps": result.steps,
-                        "n_agents": result.n_agents,
-                        "episode_length": result.episode_length,
-                    }
-                )
+                per_seed_rows.append(_episode_result_to_seed_row(result))
 
             summary_rows.append(
                 {
@@ -1804,24 +1588,7 @@ def main() -> int:
                 num_workers=int(args.num_workers),
             )
             for result in perfect_comm_results:
-                per_seed_rows.append(
-                    {
-                        "policy_label": result.policy_label,
-                        "policy_type": result.policy_type,
-                        "seed": result.seed,
-                        "total_reward": result.total_reward,
-                        "mean_reward": result.mean_reward,
-                        "mean_state_error": result.mean_state_error,
-                        "final_state_error": result.final_state_error,
-                        "total_lqr_cost": result.total_lqr_cost,
-                        "mean_lqr_cost": result.mean_lqr_cost,
-                        "send_rate": result.send_rate,
-                        "mean_true_goodput_kbps": result.mean_true_goodput_kbps,
-                        "steps": result.steps,
-                        "n_agents": result.n_agents,
-                        "episode_length": result.episode_length,
-                    }
-                )
+                per_seed_rows.append(_episode_result_to_seed_row(result))
             summary_rows.append(
                 {
                     "policy_label": "perfect_comm_always_send",
@@ -1850,24 +1617,7 @@ def main() -> int:
                 num_workers=int(args.num_workers),
             )
             for result in perfect_control_results:
-                per_seed_rows.append(
-                    {
-                        "policy_label": result.policy_label,
-                        "policy_type": result.policy_type,
-                        "seed": result.seed,
-                        "total_reward": result.total_reward,
-                        "mean_reward": result.mean_reward,
-                        "mean_state_error": result.mean_state_error,
-                        "final_state_error": result.final_state_error,
-                        "total_lqr_cost": result.total_lqr_cost,
-                        "mean_lqr_cost": result.mean_lqr_cost,
-                        "send_rate": result.send_rate,
-                        "mean_true_goodput_kbps": result.mean_true_goodput_kbps,
-                        "steps": result.steps,
-                        "n_agents": result.n_agents,
-                        "episode_length": result.episode_length,
-                    }
-                )
+                per_seed_rows.append(_episode_result_to_seed_row(result))
             summary_rows.append(
                 {
                     "policy_label": "perfect_control_always_send",
@@ -1992,86 +1742,8 @@ def main() -> int:
             _log(f"\nReplay test results saved to: {replay_dir}")
             _log("")
 
-        _write_csv(
-            run_dir / "per_seed_results.csv",
-            [
-                "policy_label",
-                "policy_type",
-                "seed",
-                "total_reward",
-                "mean_reward",
-                "mean_state_error",
-                "final_state_error",
-                "total_lqr_cost",
-                "mean_lqr_cost",
-                "send_rate",
-                "mean_true_goodput_kbps",
-                "steps",
-                "n_agents",
-                "episode_length",
-            ],
-            per_seed_rows,
-        )
-        _write_csv(
-            run_dir / "summary_results.csv",
-            [
-                "policy_label",
-                "policy_type",
-                "num_seeds",
-                "mean_total_reward",
-                "std_total_reward",
-                "mean_state_error",
-                "std_state_error",
-                "mean_final_error",
-                "std_final_error",
-                "mean_total_lqr_cost",
-                "std_total_lqr_cost",
-                "mean_lqr_cost",
-                "std_lqr_cost",
-                "mean_send_rate",
-                "std_send_rate",
-                "mean_true_goodput_kbps",
-                "std_true_goodput_kbps",
-                "mean_steps",
-                "std_steps",
-                "mean_reward_per_step",
-                "std_reward_per_step",
-                "completion_rate",
-                "mean_tx_attempts",
-                "std_tx_attempts",
-                "mean_tx_acked",
-                "std_tx_acked",
-                "mean_tx_dropped",
-                "std_tx_dropped",
-                "mean_tx_rewrites",
-                "std_tx_rewrites",
-                "mean_tx_collisions",
-                "std_tx_collisions",
-                "mean_data_delivered",
-                "std_data_delivered",
-                "mean_mac_ack_sent",
-                "std_mac_ack_sent",
-                "mean_mac_ack_collisions",
-                "std_mac_ack_collisions",
-                "mean_ack_timeouts",
-                "std_ack_timeouts",
-                "mean_tx_success_rate",
-                "std_tx_success_rate",
-                "mean_data_delivery_rate",
-                "std_data_delivery_rate",
-                "mean_collision_rate",
-                "std_collision_rate",
-                "mean_drop_rate",
-                "std_drop_rate",
-                "mean_rewrite_rate",
-                "std_rewrite_rate",
-                "mean_ack_collision_rate",
-                "std_ack_collision_rate",
-                "mean_ack_timeout_rate",
-                "std_ack_timeout_rate",
-            ],
-            summary_rows,
-        )
+        _write_csv(run_dir / "per_seed_results.csv", _PER_SEED_FIELDS_CORE, per_seed_rows)
+        _write_csv(run_dir / "summary_results.csv", _SUMMARY_FIELDS, summary_rows)
 
         _log("Outputs:")
         _log(str(run_dir / "per_seed_results.csv"), indent=2)
@@ -2401,16 +2073,16 @@ def main() -> int:
         ranked_rows.append(ranked)
 
     leaderboard_path = models_root / "leaderboard.csv"
-    _write_leaderboard(leaderboard_path, ranked_rows)
+    _write_ranked_csv(leaderboard_path, _LEADERBOARD_FIELDS, ranked_rows)
     _log(f"Leaderboard: {leaderboard_path}")
     network_stats_path = models_root / "leaderboard_network_stats.csv"
-    _write_network_stats_leaderboard(network_stats_path, ranked_rows)
+    _write_ranked_csv(network_stats_path, _NETWORK_LEADERBOARD_FIELDS, ranked_rows)
     _log(f"Network stats: {network_stats_path}")
 
     # Write replayboard if replay testing was enabled
     if args.test_replay and replayboard_rows:
         replayboard_path = models_root / "replayboard.csv"
-        _write_replayboard(replayboard_path, replayboard_rows)
+        _write_ranked_csv(replayboard_path, _REPLAYBOARD_FIELDS, replayboard_rows)
         _log(f"Replayboard (original vs replay): {replayboard_path}")
 
     return 0
