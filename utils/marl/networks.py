@@ -30,6 +30,9 @@ def _get_activation_class(name: str) -> type[nn.Module]:
     raise ValueError("activation must be one of: relu, tanh, elu")
 
 
+_AGENT_ID_CACHE: dict[tuple[int, torch.device, torch.dtype], torch.Tensor] = {}
+
+
 def append_agent_id(obs: torch.Tensor, n_agents: int) -> torch.Tensor:
     """
     Append a one-hot agent id to observations.
@@ -46,8 +49,12 @@ def append_agent_id(obs: torch.Tensor, n_agents: int) -> torch.Tensor:
     batch_size, agent_count, _ = obs.shape
     if agent_count != n_agents:
         raise ValueError("obs second dimension must equal n_agents")
-    eye = torch.eye(n_agents, device=obs.device, dtype=obs.dtype).unsqueeze(0).expand(batch_size, -1, -1)
-    return torch.cat([obs, eye], dim=-1)
+    key = (n_agents, obs.device, obs.dtype)
+    eye = _AGENT_ID_CACHE.get(key)
+    if eye is None:
+        eye = torch.eye(n_agents, device=obs.device, dtype=obs.dtype)
+        _AGENT_ID_CACHE[key] = eye
+    return torch.cat([obs, eye.unsqueeze(0).expand(batch_size, -1, -1)], dim=-1)
 
 
 class MLPAgent(nn.Module):
