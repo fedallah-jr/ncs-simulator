@@ -91,6 +91,7 @@ def run_episode_multi_agent(
     estimates = np.zeros((episode_length + 1, n_agents, state_dim), dtype=np.float32)
     estimate_covariances = np.zeros((episode_length + 1, n_agents, state_dim, state_dim), dtype=np.float32)
     actions = np.zeros((episode_length, n_agents), dtype=np.int64)
+    drop_delay_steps = np.full((episode_length, n_agents), np.nan, dtype=np.float32)
     rewards = np.zeros((episode_length, n_agents), dtype=np.float32)
     state_errors = np.zeros((episode_length + 1, n_agents), dtype=np.float32)
     throughputs = np.zeros(episode_length + 1, dtype=np.float32)
@@ -126,6 +127,16 @@ def run_episode_multi_agent(
         collided_packets[t + 1] = float(info.get("collided_packets", 0.0))
         if "network_stats" in info:
             network_stats = {k: [int(x) for x in v] for k, v in info["network_stats"].items()}
+        dropped_data_packets_step = info.get("dropped_data_packets_step", [])
+        if isinstance(dropped_data_packets_step, list):
+            for event in dropped_data_packets_step:
+                if not isinstance(event, dict):
+                    continue
+                sensor_id = int(event.get("sensor_id", -1))
+                measurement_timestamp = int(event.get("measurement_timestamp", -1))
+                age_steps = float(event.get("age_steps", 0.0))
+                if 0 <= sensor_id < n_agents and 0 <= measurement_timestamp < episode_length:
+                    drop_delay_steps[measurement_timestamp, sensor_id] = max(0.0, age_steps)
         if network_trace:
             tick_trace = info.get("network_tick_trace")
             if isinstance(tick_trace, dict):
@@ -138,6 +149,7 @@ def run_episode_multi_agent(
             estimates = estimates[: end + 1]
             estimate_covariances = estimate_covariances[: end + 1]
             actions = actions[:end]
+            drop_delay_steps = drop_delay_steps[:end]
             rewards = rewards[:end]
             state_errors = state_errors[: end + 1]
             throughputs = throughputs[: end + 1]
@@ -149,6 +161,7 @@ def run_episode_multi_agent(
         "estimates": estimates,
         "estimate_covariances": estimate_covariances,
         "actions": actions,
+        "drop_delay_steps": drop_delay_steps,
         "rewards": rewards,
         "state_errors": state_errors,
         "throughput_kbps": throughputs,
@@ -331,13 +344,12 @@ def plot_marl_action_raster(
     actions = np.asarray(traj["actions"], dtype=np.int64)
     n_steps, n_agents = actions.shape
 
-    # Get state errors and error covariances
-    state_errors = np.asarray(traj["state_errors"], dtype=np.float32)
+    # Get drop delay map and error covariances
+    drop_delay_steps = np.asarray(
+        traj.get("drop_delay_steps", np.full(actions.shape, np.nan, dtype=np.float32)),
+        dtype=np.float32,
+    )
     estimate_covariances = np.asarray(traj["estimate_covariances"], dtype=np.float32)
-
-    # Align state_errors with actions (state_errors has n_steps+1, actions has n_steps)
-    # Use state_errors[1:] to show state errors after each action
-    state_errors_aligned = state_errors[1:, :]  # Shape: (n_steps, n_agents)
 
     # Compute trace of P for each agent at each timestep (measure of total uncertainty)
     # estimate_covariances shape: (n_steps+1, n_agents, state_dim, state_dim)
@@ -359,19 +371,59 @@ def plot_marl_action_raster(
     cbar1.set_ticks([0, 1])
     ax1.grid(False)
 
-    # Plot 2: State Errors
+    # Plot 2: Drop outcomes (non-drops as category + drop delay heatmap)
     ax2 = axes[1]
-    state_errors_vis = state_errors_aligned.T
-    vmin_error = np.percentile(state_errors_vis, 1)
-    vmax_error = np.percentile(state_errors_vis, 99)
-    im2 = ax2.imshow(state_errors_vis, aspect="auto", interpolation="nearest",
-                     cmap="YlOrRd", vmin=vmin_error, vmax=vmax_error)
+    sent_mask = actions > 0
+    drop_mask = np.isfinite(drop_delay_steps)
+    sent_not_dropped_mask = sent_mask & ~drop_mask
+    base_outcomes = np.zeros((n_steps, n_agents), dtype=np.int64)
+    base_outcomes[sent_not_dropped_mask] = 1
+    base_outcomes_vis = base_outcomes.T
+    base_cmap = ListedColormap(["#f5f5f5", "#457b9d"])
+    ax2.imshow(base_outcomes_vis, aspect="auto", interpolation="nearest", cmap=base_cmap, vmin=0, vmax=1)
+
+    drop_delay_vis = drop_delay_steps.T
+    masked_drop_delay = np.ma.masked_invalid(drop_delay_vis)
+    if masked_drop_delay.count() > 0:
+        max_drop_delay = float(masked_drop_delay.max())
+        if max_drop_delay <= 0.0:
+            max_drop_delay = 1.0
+        im2 = ax2.imshow(
+            masked_drop_delay,
+            aspect="auto",
+            interpolation="nearest",
+            cmap="YlOrRd",
+            vmin=0.0,
+            vmax=max_drop_delay,
+        )
+        cbar2 = fig.colorbar(im2, ax=ax2, fraction=0.02, pad=0.02)
+        cbar2.set_label("Drop delay (timesteps)", fontsize=10)
+    else:
+        ax2.text(
+            0.5,
+            0.5,
+            "No dropped packets",
+            transform=ax2.transAxes,
+            ha="center",
+            va="center",
+            fontsize=11,
+            color="#444444",
+        )
+
     ax2.set_ylabel("Agent", fontsize=12)
     ax2.set_yticks(np.arange(n_agents))
     ax2.set_yticklabels([f"agent_{i}" for i in range(n_agents)])
-    ax2.set_title(f"State Error (||x||) - {label}", fontsize=14, fontweight="bold")
-    cbar2 = fig.colorbar(im2, ax=ax2, fraction=0.02, pad=0.02)
-    cbar2.set_label("State Error", fontsize=10)
+    ax2.set_title(f"Drops (color = delay) - {label}", fontsize=14, fontweight="bold")
+    ax2.legend(
+        handles=[
+            Patch(facecolor="#f5f5f5", edgecolor="#bdbdbd", label="No send"),
+            Patch(facecolor="#457b9d", edgecolor="#457b9d", label="Sent, not dropped"),
+            Patch(facecolor="#d7301f", edgecolor="#d7301f", label="Dropped (delay heatmap)"),
+        ],
+        loc="upper right",
+        fontsize=9,
+        frameon=True,
+    )
     ax2.grid(False)
 
     # Plot 3: Estimation Error Covariance (trace of P)
@@ -393,7 +445,7 @@ def plot_marl_action_raster(
     plt.tight_layout()
     plt.savefig(str(save_path), dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print(f"✓ Saved action raster with state errors and estimation uncertainty to {save_path}")
+    print(f"✓ Saved action raster with drops and estimation uncertainty to {save_path}")
 
 
 def plot_marl_state_space_2d(
@@ -944,6 +996,7 @@ def main():
             reward_override=reward_override,
             termination_override=termination_override,
             track_true_goodput=True,
+            track_eval_stats=True,
         )
 
     print(f"Creating environment...")

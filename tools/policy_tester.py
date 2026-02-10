@@ -69,7 +69,7 @@ HEURISTIC_POLICY_NAMES: Sequence[str] = (
 STOCHASTIC_HEURISTICS: Sequence[str] = ("random_50",)
 
 # Reward override for evaluation: absolute reward, no normalization by default.
-# Always disable reward clipping during evaluation.
+# Reward clipping is disabled by default but can be enabled via --use-reward-clipping.
 EVAL_REWARD_OVERRIDE: Dict[str, Any] = {
     "state_error_reward": "absolute",
     "normalize": False,
@@ -522,13 +522,21 @@ def _compare_replay_vs_original(
     return comparisons, summary
 
 
-def _build_reward_override(use_reward_normalization: bool) -> Dict[str, Any]:
+def _build_reward_override(
+    use_reward_normalization: bool,
+    use_reward_clipping: bool = False,
+) -> Dict[str, Any]:
     reward_override = dict(EVAL_REWARD_OVERRIDE)
     if use_reward_normalization:
         reward_override["normalize"] = True
-    # Always disable reward clipping during evaluation
-    reward_override["reward_clip_min"] = None
-    reward_override["reward_clip_max"] = None
+    # Disable reward clipping during evaluation unless explicitly enabled
+    if not use_reward_clipping:
+        reward_override["reward_clip_min"] = None
+        reward_override["reward_clip_max"] = None
+    else:
+        # When clipping is enabled, remove these keys so config values are used
+        reward_override.pop("reward_clip_min", None)
+        reward_override.pop("reward_clip_max", None)
     return reward_override
 
 
@@ -587,6 +595,7 @@ def _build_env(
         termination_override=termination_override,
         track_true_goodput=True,
         track_lqr_cost=True,
+        track_eval_stats=True,
     )
 
 
@@ -1417,6 +1426,11 @@ def main() -> int:
         help="Enable running reward normalization during evaluation (default: disabled)",
     )
     parser.add_argument(
+        "--use-reward-clipping",
+        action="store_true",
+        help="Enable reward clipping during evaluation using config values (default: disabled)",
+    )
+    parser.add_argument(
         "--no-override",
         action="store_true",
         help="Disable evaluation reward overrides and use the config reward as-is",
@@ -1449,16 +1463,25 @@ def main() -> int:
         raise ValueError("--num-seeds must be >= 1")
     if args.num_workers < 1:
         raise ValueError("--num-workers must be >= 1")
-    # Always disable reward clipping during evaluation, even with --no-override
+    # Build reward override based on flags
     if args.no_override:
-        reward_override = {
-            "reward_clip_min": None,
-            "reward_clip_max": None,
-        }
+        # With --no-override, only disable clipping if not explicitly enabled
+        if not args.use_reward_clipping:
+            reward_override = {
+                "reward_clip_min": None,
+                "reward_clip_max": None,
+            }
+        else:
+            reward_override = {}
     else:
-        reward_override = _build_reward_override(bool(args.use_reward_normalization))
+        reward_override = _build_reward_override(
+            bool(args.use_reward_normalization),
+            bool(args.use_reward_clipping),
+        )
     if args.no_override and args.use_reward_normalization:
         _log("Note: --use-reward-normalization ignored because --no-override is set.")
+    if args.no_override and args.use_reward_clipping:
+        _log("Note: Using reward clipping from config.")
 
     if args.test_replay and args.only_heuristics:
         raise ValueError("--test-replay cannot be used with --only-heuristics.")
@@ -1530,11 +1553,14 @@ def main() -> int:
         if args.test_replay and not args.only_heuristics:
             _log(f"Replay testing: enabled (recording seed {args.replay_recording_seed})")
         if args.no_override:
-            _log("Evaluation: reward from config (no override).")
+            clipping_status = "with clipping from config" if args.use_reward_clipping else "no clipping"
+            _log(f"Evaluation: reward from config (no override, {clipping_status}).")
         elif args.use_reward_normalization:
-            _log("Evaluation: absolute reward with running normalization; comm/termination from config.")
+            clipping_status = "with clipping" if args.use_reward_clipping else "no clipping"
+            _log(f"Evaluation: absolute reward with running normalization; {clipping_status}; comm/termination from config.")
         else:
-            _log("Evaluation: raw absolute reward; comm/termination from config.")
+            clipping_status = "with clipping" if args.use_reward_clipping else "no clipping"
+            _log(f"Evaluation: raw absolute reward; {clipping_status}; comm/termination from config.")
         _log("Policies:")
         for spec in policy_specs:
             _log(f"- {spec.label} ({spec.policy_type})", indent=2)
@@ -1848,11 +1874,14 @@ def main() -> int:
     if args.test_replay:
         _log(f"Replay testing: enabled (recording seed {args.replay_recording_seed})")
     if args.no_override:
-        _log("Evaluation: reward from config (no override).")
+        clipping_status = "with clipping from config" if args.use_reward_clipping else "no clipping"
+        _log(f"Evaluation: reward from config (no override, {clipping_status}).")
     elif args.use_reward_normalization:
-        _log("Evaluation: absolute reward with running normalization; comm/termination from config.")
+        clipping_status = "with clipping" if args.use_reward_clipping else "no clipping"
+        _log(f"Evaluation: absolute reward with running normalization; {clipping_status}; comm/termination from config.")
     else:
-        _log("Evaluation: raw absolute reward; comm/termination from config.")
+        clipping_status = "with clipping" if args.use_reward_clipping else "no clipping"
+        _log(f"Evaluation: raw absolute reward; {clipping_status}; comm/termination from config.")
 
     for model_idx, (model_name, specs) in enumerate(model_specs_by_run.items(), start=1):
         _log(f"[{model_idx}/{total_models}] {model_name}")

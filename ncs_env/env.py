@@ -95,6 +95,7 @@ class NCS_Env(gym.Env):
         track_true_goodput: bool = False,
         global_state_enabled: bool = False,
         track_lqr_cost: bool = False,
+        track_eval_stats: bool = False,
     ):
         super().__init__()
         self.n_agents = n_agents
@@ -105,6 +106,7 @@ class NCS_Env(gym.Env):
         self.track_true_goodput = bool(track_true_goodput)
         self.global_state_enabled = bool(global_state_enabled)
         self.track_lqr_cost = bool(track_lqr_cost)
+        self.track_eval_stats = bool(track_eval_stats)
         if self.global_state_enabled:
             self.track_true_goodput = True
 
@@ -405,6 +407,7 @@ class NCS_Env(gym.Env):
         self.last_termination_reasons: List[str] = []
         self.last_termination_agents: List[int] = []
         self.last_bad_termination = False
+        self.last_dropped_data_packets: List[Dict[str, Any]] = []
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None):
         """Reset environment to initial state."""
@@ -449,6 +452,8 @@ class NCS_Env(gym.Env):
         """Execute one timestep of the environment."""
         self.timestep += 1
         self.last_network_tick_trace = None
+        if self.track_eval_stats:
+            self.last_dropped_data_packets = []
         self.network.trace_enabled = bool(self.network_trace_enabled)
 
         # State index is the time index of the current plant state
@@ -518,6 +523,16 @@ class NCS_Env(gym.Env):
                         entry["send_timestamp"] = measurement_timestamp
                         # Still track as pending since we're waiting for ACK that won't come
                         self.pending_transmissions[i][measurement_timestamp] = entry
+                        if self.track_eval_stats:
+                            self.last_dropped_data_packets.append(
+                                {
+                                    "sensor_id": int(i),
+                                    "measurement_timestamp": int(measurement_timestamp),
+                                    "drop_timestep": int(self.timestep),
+                                    "age_steps": 0,
+                                    "reason": "queue_reject",
+                                }
+                            )
                         continue
                     entry = self._record_decision(i, status=2)
                     entry["send_timestamp"] = measurement_timestamp
@@ -555,6 +570,20 @@ class NCS_Env(gym.Env):
                         sensor_id = packet.source_id
                         if 0 <= int(sensor_id) < self.n_agents:
                             self.net_tx_drops[int(sensor_id)] += 1
+                        if self.track_eval_stats:
+                            measurement_timestamp = state_index
+                            if isinstance(packet.payload, dict):
+                                measurement_timestamp = int(packet.payload.get("timestamp", state_index))
+                            age_steps = max(0, int(state_index - measurement_timestamp))
+                            self.last_dropped_data_packets.append(
+                                {
+                                    "sensor_id": int(sensor_id),
+                                    "measurement_timestamp": int(measurement_timestamp),
+                                    "drop_timestep": int(self.timestep),
+                                    "age_steps": int(age_steps),
+                                    "reason": "network_drop",
+                                }
+                            )
                         # Note: pending_transmissions entry remains with status=2
 
             if pending_delivered_packets:
@@ -1532,6 +1561,8 @@ class NCS_Env(gym.Env):
             "termination_agents": list(self.last_termination_agents),
             "bad_termination": bool(self.last_bad_termination),
         }
+        if self.track_eval_stats:
+            info["dropped_data_packets_step"] = [dict(entry) for entry in self.last_dropped_data_packets]
         if self.track_lqr_cost:
             info["lqr_costs"] = [float(cost) for cost in self.last_lqr_costs]
             info["lqr_cost_total"] = float(sum(self.last_lqr_costs))
