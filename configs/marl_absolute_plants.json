@@ -26,7 +26,7 @@
       "comm_penalty_alpha": 0.0,
       "comm_throughput_floor": 0.0,
       "normalize": false,
-    "no_normalization_scale": 1.5,
+    "no_normalization_scale": 1,
     "reward_clip_max": 10,
     "reward_clip_min": -10,
     "evaluation": {
@@ -51,11 +51,11 @@
     "quantization_step": 0
   },
   "network": {
-    "data_rate_kbps": 125,
+    "data_rate_kbps": 100,
     "data_packet_size": 125,
     "perfect_communication": false,
     "app_ack_enabled": true,
     "app_ack_packet_size": 30,
-    "tx_buffer_bytes": 130
+    "tx_buffer_bytes": 100
   }
 }
