@@ -59,6 +59,10 @@ from tools._common import (
     load_multi_agent_policy,
     resolve_n_agents,
     sanitize_filename as _sanitize_filename,
+    parse_set_overrides,
+    deep_merge,
+    apply_config_overrides,
+    add_set_override_argument,
 )
 
 
@@ -896,6 +900,7 @@ def main():
         action='store_true',
         help='List available heuristic policies and exit'
     )
+    add_set_override_argument(parser)
 
     # Check for list-heuristics flag first (before full parsing)
     if '--list-heuristics' in sys.argv:
@@ -942,7 +947,11 @@ def main():
 
     # Load configuration
     print(f"Loading configuration from: {args.config}")
+    config_overrides = parse_set_overrides(args.set_overrides)
+    config_path_for_env = args.config
     config = load_config(args.config)
+    if config_overrides:
+        deep_merge(config, config_overrides)
     reward_override = config.get("reward", {}).get("evaluation")
     if not isinstance(reward_override, dict):
         reward_override = {}
@@ -955,6 +964,10 @@ def main():
     if not isinstance(termination_override, dict):
         termination_override = None
     print(f"✓ Configuration loaded")
+    if config_overrides:
+        print("Config overrides:")
+        for arg in args.set_overrides:
+            print(f"  --set {arg}")
     print("✓ Reward clipping disabled for evaluation")
     if reward_override or termination_override is not None:
         print("✓ Using evaluation reward/termination overrides")
@@ -979,6 +992,13 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if config_overrides:
+        config_path_for_env = str(
+            apply_config_overrides(
+                Path(args.config), config_overrides, output_dir / "overridden_config.json"
+            )
+        )
+
     # Generate output prefix if not provided
     if not args.output_prefix:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -991,7 +1011,7 @@ def main():
         return NCS_Env(
             n_agents=resolved_n_agents,
             episode_length=args.episode_length,
-            config_path=args.config,
+            config_path=config_path_for_env,
             seed=args.seed,
             reward_override=reward_override,
             termination_override=termination_override,

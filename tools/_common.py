@@ -6,6 +6,7 @@ This module centralizes code used by both ``policy_tester`` and
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -16,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from ncs_env.config import load_config
 from ncs_env.env import NCS_Env
 from tools.heuristic_policies import get_heuristic_policy
 from utils.marl.obs_normalization import RunningObsNormalizer
@@ -176,7 +178,13 @@ def load_es_policy(model_path: str, env: NCS_Env):
         data = np.load(str(model_path_p))
         flat_params = data['flat_params']
 
-        hidden_size = int(data['hidden_size']) if 'hidden_size' in data else 64
+        if 'hidden_dims' in data:
+            hidden_dims = tuple(int(x) for x in data['hidden_dims'])
+        elif 'hidden_size' in data:
+            hidden_dims = (int(data['hidden_size']), int(data['hidden_size']))
+        else:
+            hidden_dims = (64, 64)
+        activation = str(data['activation']) if 'activation' in data else "tanh"
         use_layer_norm = bool(data['use_layer_norm']) if 'use_layer_norm' in data else False
         normalize_obs = bool(data['normalize_obs']) if 'normalize_obs' in data else False
         obs_norm_clip = float(data['obs_norm_clip']) if 'obs_norm_clip' in data else 5.0
@@ -190,7 +198,8 @@ def load_es_policy(model_path: str, env: NCS_Env):
 
         print(
             "  Architecture: "
-            f"hidden_size={hidden_size}, use_layer_norm={use_layer_norm}, "
+            f"hidden_dims={hidden_dims}, activation={activation}, "
+            f"use_layer_norm={use_layer_norm}, "
             f"normalize_obs={normalize_obs}, use_agent_id={use_agent_id}"
         )
     except Exception as e:
@@ -218,7 +227,8 @@ def load_es_policy(model_path: str, env: NCS_Env):
 
     model = create_policy_net(
         action_dim=action_dim,
-        hidden_size=hidden_size,
+        hidden_dims=hidden_dims,
+        activation=activation,
         use_layer_norm=use_layer_norm,
     )
 
@@ -330,4 +340,69 @@ def load_multi_agent_policy(
         )
     raise ValueError(
         "Multi-agent visualization supports only 'marl_torch', 'es', and 'heuristic' policies."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Config override helpers (--set key=value)
+# ---------------------------------------------------------------------------
+
+def parse_set_overrides(set_args: Optional[List[str]]) -> Dict[str, Any]:
+    """Parse ``--set key=value`` arguments into a nested dict."""
+    if not set_args:
+        return {}
+    overrides: Dict[str, Any] = {}
+    for arg in set_args:
+        if "=" not in arg:
+            raise ValueError(f"Invalid --set argument (expected key=value): {arg}")
+        key, value_str = arg.split("=", 1)
+        parts = key.split(".")
+        if not all(parts):
+            raise ValueError(f"Invalid key in --set argument: {key}")
+        try:
+            parsed_value = json.loads(value_str)
+        except (json.JSONDecodeError, ValueError):
+            parsed_value = value_str
+        current = overrides
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+        current[parts[-1]] = parsed_value
+    return overrides
+
+
+def deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge *overrides* into *base* (mutates *base*)."""
+    for key, value in overrides.items():
+        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+            deep_merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def apply_config_overrides(
+    config_path: Path,
+    overrides: Dict[str, Any],
+    output_path: Path,
+) -> Path:
+    """Load *config_path*, deep-merge *overrides*, write to *output_path*."""
+    config = load_config(str(config_path))
+    deep_merge(config, overrides)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w") as handle:
+        json.dump(config, handle, indent=2, sort_keys=True, ensure_ascii=True)
+    return output_path
+
+
+def add_set_override_argument(parser) -> None:
+    """Add the ``--set KEY=VALUE`` argument to an argparse parser."""
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=None,
+        dest="set_overrides",
+        metavar="KEY=VALUE",
+        help="Override config values using dot notation (e.g., --set network.data_packet_size=80). Repeatable.",
     )

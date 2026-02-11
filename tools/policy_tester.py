@@ -55,6 +55,10 @@ from tools._common import (
     read_es_n_agents,
     resolve_n_agents,
     sanitize_filename as _sanitize_filename,
+    parse_set_overrides,
+    deep_merge,
+    apply_config_overrides,
+    add_set_override_argument,
 )
 
 # Heuristic policies to compare against (edit as needed).
@@ -1457,12 +1461,14 @@ def main() -> int:
         default=1e-6,
         help="Tolerance for considering rewards as matching (default: 1e-6)",
     )
+    add_set_override_argument(parser)
     args = parser.parse_args()
 
     if args.num_seeds < 1:
         raise ValueError("--num-seeds must be >= 1")
     if args.num_workers < 1:
         raise ValueError("--num-workers must be >= 1")
+    config_overrides = parse_set_overrides(args.set_overrides)
     # Build reward override based on flags
     if args.no_override:
         # With --no-override, only disable clipping if not explicitly enabled
@@ -1537,6 +1543,15 @@ def main() -> int:
         run_dir = output_root / f"policy_test_{_sanitize_filename(target_label)}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
+        if config_overrides:
+            config_path = apply_config_overrides(
+                config_path, config_overrides, run_dir / "overridden_config.json"
+            )
+            config = load_config(str(config_path))
+            termination_override = config.get("termination", {}).get("evaluation")
+            if not isinstance(termination_override, dict):
+                termination_override = None
+
         resolved_n_agents = _resolve_n_agents(config, policy_specs, args.n_agents)
         policy_type_names = [spec.policy_type.lower() for spec in policy_specs]
         allowed_policy_types = {"marl_torch", "heuristic", "es", "openai_es"}
@@ -1547,6 +1562,10 @@ def main() -> int:
 
         _log("Policy tester (heuristics only)" if args.only_heuristics else "Policy tester (single policy)")
         _log(f"Config: {config_path}")
+        if config_overrides:
+            _log("Config overrides:")
+            for arg in args.set_overrides:
+                _log(f"  --set {arg}")
         _log(f"Seeds: {_format_seed_range(seeds)} ({len(seeds)})")
         if args.num_workers > 1:
             _log(f"Workers: {args.num_workers}")
@@ -1822,6 +1841,17 @@ def main() -> int:
     termination_override = reference_config.get("termination", {}).get("evaluation")
     if not isinstance(termination_override, dict):
         termination_override = None
+    if config_overrides:
+        deep_merge(reference_config, config_overrides)
+        eval_config_path: Optional[Path] = models_root / "overridden_config.json"
+        eval_config_path.parent.mkdir(parents=True, exist_ok=True)
+        with eval_config_path.open("w") as handle:
+            json.dump(reference_config, handle, indent=2, sort_keys=True, ensure_ascii=True)
+        termination_override = reference_config.get("termination", {}).get("evaluation")
+        if not isinstance(termination_override, dict):
+            termination_override = None
+    else:
+        eval_config_path = None
     model_specs_by_run: Dict[str, List[Tuple[str, PolicySpec]]] = {}
     run_lookup = {run.name: run for run in runs}
     policy_types: List[str] = []
@@ -1869,6 +1899,10 @@ def main() -> int:
     _log(f"Models: {total_models}")
     _log(f"Checkpoints: {total_checkpoints}")
     _log(f"Seeds: {_format_seed_range(seeds)} ({len(seeds)})")
+    if config_overrides:
+        _log("Config overrides:")
+        for arg in args.set_overrides:
+            _log(f"  --set {arg}")
     if args.num_workers > 1:
         _log(f"Workers: {args.num_workers}")
     if args.test_replay:
@@ -1892,7 +1926,7 @@ def main() -> int:
             _log(f"  checkpoint: {checkpoint_name} ({spec.policy_type})")
             results = _evaluate_policy(
                 spec,
-                config_path=run.config_path,
+                config_path=eval_config_path or run.config_path,
                 episode_length=int(args.episode_length),
                 n_agents=resolved_n_agents,
                 seeds=seeds,
@@ -1914,7 +1948,7 @@ def main() -> int:
 
                 # Load policy for recording
                 env_for_loading = _build_env(
-                    run.config_path,
+                    eval_config_path or run.config_path,
                     int(args.episode_length),
                     resolved_n_agents,
                     args.replay_recording_seed,
@@ -1930,7 +1964,7 @@ def main() -> int:
                 # Record actions
                 recorded_actions = _record_policy_actions(
                     policy_for_recording,
-                    run.config_path,
+                    eval_config_path or run.config_path,
                     int(args.episode_length),
                     resolved_n_agents,
                     args.replay_recording_seed,
@@ -1943,7 +1977,7 @@ def main() -> int:
                 for seed in seeds:
                     replay_policy = ReplayPolicy(recorded_actions, resolved_n_agents)
                     env = _build_env(
-                        run.config_path,
+                        eval_config_path or run.config_path,
                         int(args.episode_length),
                         resolved_n_agents,
                         seed,
@@ -2011,7 +2045,7 @@ def main() -> int:
             for path in plotted_paths:
                 _log(path, indent=4)
 
-    heuristic_config_path = runs[0].config_path
+    heuristic_config_path = eval_config_path or runs[0].config_path
     _log("Heuristics:")
     for heuristic_name in HEURISTIC_POLICY_NAMES:
         _log(f"- {heuristic_name}", indent=2)

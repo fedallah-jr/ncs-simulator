@@ -85,45 +85,37 @@ def _set_obs_normalizer_state(state: Optional[Tuple[np.ndarray, np.ndarray, int]
 
 def create_policy_net(
     action_dim: int,
-    hidden_size: int = 64,
+    hidden_dims: Tuple[int, ...] = (64, 64),
+    activation: str = "tanh",
     use_layer_norm: bool = False,
 ):
-    """
-    Create a PolicyNet instance. Imports Flax lazily.
-    
-    Args:
-        action_dim: Number of output actions
-        hidden_size: Number of units in hidden layers
-        use_layer_norm: Whether to use Layer Normalization
-    """
+    """Create a PolicyNet instance. Imports Flax lazily."""
     import flax.linen as nn
     import jax.numpy as jnp
-    
+
+    _activations = {"tanh": nn.tanh, "relu": nn.relu, "elu": nn.elu}
+
     class PolicyNet(nn.Module):
         action_dim: int
-        hidden_size: int = 64
+        hidden_dims: tuple = (64, 64)
+        activation: str = "tanh"
         use_layer_norm: bool = False
 
         @nn.compact
         def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-            dense1 = nn.Dense(self.hidden_size)
-            x = dense1(x)
-            if self.use_layer_norm:
-                x = nn.LayerNorm()(x)
-            x = nn.tanh(x)
-
-            dense2 = nn.Dense(self.hidden_size)
-            x = dense2(x)
-            if self.use_layer_norm:
-                x = nn.LayerNorm()(x)
-            x = nn.tanh(x)
-
+            act_fn = _activations[self.activation]
+            for dim in self.hidden_dims:
+                x = nn.Dense(dim)(x)
+                if self.use_layer_norm:
+                    x = nn.LayerNorm()(x)
+                x = act_fn(x)
             x = nn.Dense(self.action_dim)(x)
             return x
-    
+
     return PolicyNet(
         action_dim=action_dim,
-        hidden_size=hidden_size,
+        hidden_dims=hidden_dims,
+        activation=activation,
         use_layer_norm=use_layer_norm,
     )
 
@@ -136,7 +128,8 @@ def _init_worker(
     obs_dim: int,
     n_agents: int,
     use_agent_id: bool,
-    hidden_size: int = 64,
+    hidden_dims: Tuple[int, ...] = (64, 64),
+    activation: str = "tanh",
     use_layer_norm: bool = False,
     normalize_obs: bool = True,
     obs_norm_clip: float = 5.0,
@@ -184,7 +177,8 @@ def _init_worker(
     )
     _worker_model = create_policy_net(
         action_dim,
-        hidden_size=hidden_size,
+        hidden_dims=hidden_dims,
+        activation=activation,
         use_layer_norm=use_layer_norm,
     )
     
@@ -311,6 +305,85 @@ def get_fitness_shaping_fn(method: str = "centered_rank"):
     return shaping_fns[method]
 
 
+def _load_pt_checkpoint(
+    pt_path: Path,
+    obs_dim: int,
+    n_agents: int,
+    use_agent_id: bool,
+) -> Dict[str, Any]:
+    """Load a PyTorch MARL checkpoint and return architecture info + state dict."""
+    import torch
+
+    ckpt = torch.load(pt_path, map_location="cpu", weights_only=False)
+    algorithm = ckpt.get("algorithm", "unknown")
+    print(f"[PT] Loading {algorithm} checkpoint from {pt_path}")
+
+    if ckpt.get("dueling", False):
+        raise ValueError("Dueling architecture checkpoints cannot be converted to ES PolicyNet")
+    if "agent_state_dict" not in ckpt:
+        if "agent_state_dicts" in ckpt:
+            raise ValueError("Per-agent parameters not supported, only parameter sharing")
+        raise ValueError("Checkpoint missing 'agent_state_dict'")
+    if ckpt.get("n_agents", 1) != n_agents:
+        raise ValueError(f"Checkpoint n_agents={ckpt['n_agents']} != env n_agents={n_agents}")
+    if ckpt.get("obs_dim", 0) != obs_dim:
+        raise ValueError(f"Checkpoint obs_dim={ckpt['obs_dim']} != env obs_dim={obs_dim}")
+    if ckpt.get("use_agent_id", False) != use_agent_id:
+        raise ValueError(f"Checkpoint use_agent_id={ckpt['use_agent_id']} != {use_agent_id}")
+
+    return {
+        "hidden_dims": tuple(ckpt["agent_hidden_dims"]),
+        "activation": ckpt["agent_activation"],
+        "use_layer_norm": ckpt["agent_layer_norm"],
+        "state_dict": ckpt["agent_state_dict"],
+        "obs_norm_state": ckpt.get("obs_normalization", {}),
+    }
+
+
+def _pt_state_dict_to_flax(
+    state_dict: Dict[str, Any],
+    params_template: Any,
+    hidden_dims: Tuple[int, ...],
+    use_layer_norm: bool,
+) -> Any:
+    """Convert a PyTorch MLPAgent state_dict to Flax PolicyNet params."""
+    import jax
+    import jax.numpy as jnp
+
+    n_hidden = len(hidden_dims)
+    stride = 3 if use_layer_norm else 2
+    params_dict: Dict[str, Dict[str, Any]] = {}
+
+    for i in range(n_hidden):
+        pt_idx = i * stride
+        w = state_dict[f"net.{pt_idx}.weight"].numpy()
+        b = state_dict[f"net.{pt_idx}.bias"].numpy()
+        params_dict[f"Dense_{i}"] = {
+            "kernel": jnp.array(w.T, dtype=jnp.float32),
+            "bias": jnp.array(b, dtype=jnp.float32),
+        }
+        if use_layer_norm:
+            ln_idx = pt_idx + 1
+            params_dict[f"LayerNorm_{i}"] = {
+                "scale": jnp.array(state_dict[f"net.{ln_idx}.weight"].numpy(), dtype=jnp.float32),
+                "bias": jnp.array(state_dict[f"net.{ln_idx}.bias"].numpy(), dtype=jnp.float32),
+            }
+
+    pt_out_idx = n_hidden * stride
+    w = state_dict[f"net.{pt_out_idx}.weight"].numpy()
+    b = state_dict[f"net.{pt_out_idx}.bias"].numpy()
+    params_dict[f"Dense_{n_hidden}"] = {
+        "kernel": jnp.array(w.T, dtype=jnp.float32),
+        "bias": jnp.array(b, dtype=jnp.float32),
+    }
+
+    flax_params = {"params": params_dict}
+    for t, c in zip(jax.tree_util.tree_leaves(params_template), jax.tree_util.tree_leaves(flax_params)):
+        if t.shape != c.shape:
+            raise ValueError(f"Shape mismatch: template {t.shape} != converted {c.shape}")
+    return flax_params
+
+
 def train(args):
     """Main training loop."""
     reset_shared_running_normalizers()
@@ -351,9 +424,24 @@ def train(args):
     # obs_normalizer is initialized later - either from BC dataset or fresh
     obs_normalizer: Optional[RunningObsNormalizer] = None
 
+    # Determine architecture (may be overridden by .pt checkpoint)
+    hidden_dims = tuple(args.hidden_dims)
+    activation = args.activation
+    use_layer_norm = args.use_layer_norm
+    _pt_state_dict = None
+    _pt_obs_norm_state: Optional[Dict[str, Any]] = None
+
+    if args.init_checkpoint is not None and args.init_checkpoint.suffix == ".pt":
+        pt_info = _load_pt_checkpoint(args.init_checkpoint, obs_dim, n_agents, use_agent_id)
+        hidden_dims = pt_info["hidden_dims"]
+        activation = pt_info["activation"]
+        use_layer_norm = pt_info["use_layer_norm"]
+        _pt_state_dict = pt_info["state_dict"]
+        _pt_obs_norm_state = pt_info["obs_norm_state"]
+
     print(f"Observation Dim: {obs_dim}, Input Dim: {input_dim}, Action Dim: {action_dim}")
     print(f"N Agents: {n_agents}, Use Agent Id: {use_agent_id}")
-    print(f"Hidden Size: {args.hidden_size}, Layer Norm: {args.use_layer_norm}")
+    print(f"Hidden Dims: {hidden_dims}, Activation: {activation}, Layer Norm: {use_layer_norm}")
     print(
         "Obs normalization: "
         f"{'enabled' if args.normalize_obs else 'disabled'} "
@@ -380,8 +468,9 @@ def train(args):
     master_rng = jax.random.PRNGKey(args.seed if args.seed is not None else 0)
     model = create_policy_net(
         action_dim,
-        hidden_size=args.hidden_size,
-        use_layer_norm=args.use_layer_norm,
+        hidden_dims=hidden_dims,
+        activation=activation,
+        use_layer_norm=use_layer_norm,
     )
     dummy_obs = jnp.zeros((1, input_dim))
     master_rng, template_rng = jax.random.split(master_rng)
@@ -394,6 +483,20 @@ def train(args):
     bc_lr: Optional[float] = None
     pretrained_params: Optional[Any] = None
     pretrained_flat: Optional[np.ndarray] = None
+
+    # Load .pt checkpoint weights (architecture was already overridden above)
+    if _pt_state_dict is not None:
+        pretrained_params = _pt_state_dict_to_flax(
+            _pt_state_dict, params_template, hidden_dims, use_layer_norm,
+        )
+        pretrained_flat = np.array(flatten_util.ravel_pytree(pretrained_params)[0])
+        if args.normalize_obs and _pt_obs_norm_state and _pt_obs_norm_state.get("enabled", False):
+            clip_value = None if args.obs_norm_clip <= 0 else float(args.obs_norm_clip)
+            obs_normalizer = RunningObsNormalizer.from_state_dict(_pt_obs_norm_state)
+            obs_normalizer.clip = clip_value
+            obs_normalizer.eps = float(args.obs_norm_eps)
+        print(f"[PT] Initialized {num_params} params from {args.init_checkpoint}")
+
     bc_dataset = None
     if args.bc_dataset is not None:
         bc_dataset = load_bc_dataset(args.bc_dataset)
@@ -453,8 +556,8 @@ def train(args):
         pretrained_flat = np.array(flatten_util.ravel_pytree(pretrained_params)[0])
         print(f"[BC] Pretrained actor with avg loss {bc_result.metrics.get('loss', 0.0):.6f}")
 
-    # Load from checkpoint if provided
-    if args.init_checkpoint is not None:
+    # Load from .npz checkpoint if provided
+    if args.init_checkpoint is not None and args.init_checkpoint.suffix == ".npz":
         ckpt = np.load(args.init_checkpoint, allow_pickle=False)
         pretrained_flat = np.asarray(ckpt["flat_params"])
         if pretrained_flat.shape[0] != num_params:
@@ -554,8 +657,9 @@ def train(args):
                 obs_dim,
                 n_agents,
                 use_agent_id,
-                args.hidden_size,
-                args.use_layer_norm,
+                hidden_dims,
+                activation,
+                use_layer_norm,
                 args.normalize_obs,
                 args.obs_norm_clip,
                 args.obs_norm_eps,
@@ -574,8 +678,9 @@ def train(args):
             obs_dim,
             n_agents,
             use_agent_id,
-            args.hidden_size,
-            args.use_layer_norm,
+            hidden_dims,
+            activation,
+            use_layer_norm,
             args.normalize_obs,
             args.obs_norm_clip,
             args.obs_norm_eps,
@@ -588,8 +693,10 @@ def train(args):
     def build_checkpoint_payload(flat_params: np.ndarray) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "flat_params": flat_params,
-            "hidden_size": args.hidden_size,
-            "use_layer_norm": args.use_layer_norm,
+            "hidden_dims": list(hidden_dims),
+            "activation": activation,
+            "hidden_size": int(hidden_dims[0]),
+            "use_layer_norm": use_layer_norm,
             "normalize_obs": args.normalize_obs,
             "obs_norm_clip": args.obs_norm_clip,
             "obs_norm_eps": args.obs_norm_eps,
@@ -752,8 +859,9 @@ def train(args):
         "eval_episodes": args.eval_episodes,
         "eval_best_fixed_seeds": fixed_eval_seeds,
         "fitness_shaping": args.fitness_shaping,
-        "hidden_size": args.hidden_size,
-        "use_layer_norm": args.use_layer_norm,
+        "hidden_dims": list(hidden_dims),
+        "activation": activation,
+        "use_layer_norm": use_layer_norm,
         "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip,
         "obs_norm_eps": args.obs_norm_eps,
@@ -791,7 +899,10 @@ def parse_args():
     parser.add_argument("--fitness-shaping", type=str, default="centered_rank",
                         choices=["centered_rank", "z_score", "normalize", "none"],
                         help="Fitness shaping (evosax built-in). Default: centered_rank")
-    parser.add_argument("--hidden-size", type=int, default=64, help="Hidden layer size.")
+    parser.add_argument("--hidden-dims", type=int, nargs="+", default=[64, 64],
+                        help="Hidden layer dimensions (e.g., --hidden-dims 128 128).")
+    parser.add_argument("--activation", type=str, default="tanh",
+                        choices=["tanh", "relu", "elu"], help="Activation function.")
     parser.add_argument("--use-layer-norm", action="store_true", help="Use LayerNorm.")
     obs_norm_group = parser.add_mutually_exclusive_group()
     obs_norm_group.add_argument(
