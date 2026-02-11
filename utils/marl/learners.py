@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Optional
 
 import copy
@@ -10,13 +9,6 @@ from torch.nn import functional as F
 
 from utils.marl.buffer import MARLBatch
 from utils.marl.networks import MLPAgent, DuelingMLPAgent, QMixer, QPLEXMixer, VDNMixer, append_agent_id
-
-
-@dataclass(frozen=True)
-class LearnerStats:
-    loss: float
-    q_mean: float
-    target_mean: float
 
 
 def _hard_update(target: nn.Module, source: nn.Module) -> None:
@@ -105,7 +97,7 @@ class IQLLearner:
         self.optimizer = _make_optimizer(self.agent.parameters(), lr=float(lr), optimizer_type=optimizer_type)
         self.train_steps = 0
 
-    def update(self, batch: MARLBatch) -> LearnerStats:
+    def update(self, batch: MARLBatch) -> None:
         self.train_steps += 1
         obs = _maybe_append_id(batch.obs, self.n_agents, self.use_agent_id)
         next_obs = _maybe_append_id(batch.next_obs, self.n_agents, self.use_agent_id)
@@ -139,12 +131,6 @@ class IQLLearner:
 
         if self.train_steps % self.target_update_interval == 0:
             _hard_update(self.target_agent, self.agent)
-
-        return LearnerStats(
-            loss=float(loss.item()),
-            q_mean=float(q_taken.mean().item()),
-            target_mean=float(targets.mean().item()),
-        )
 
 
 class VDNLearner:
@@ -185,7 +171,7 @@ class VDNLearner:
         self.optimizer = _make_optimizer(self.agent.parameters(), lr=float(lr), optimizer_type=optimizer_type)
         self.train_steps = 0
 
-    def update(self, batch: MARLBatch) -> LearnerStats:
+    def update(self, batch: MARLBatch) -> None:
         self.train_steps += 1
         obs = _maybe_append_id(batch.obs, self.n_agents, self.use_agent_id)
         next_obs = _maybe_append_id(batch.next_obs, self.n_agents, self.use_agent_id)
@@ -222,12 +208,6 @@ class VDNLearner:
 
         if self.train_steps % self.target_update_interval == 0:
             _hard_update(self.target_agent, self.agent)
-
-        return LearnerStats(
-            loss=float(loss.item()),
-            q_mean=float(q_tot.mean().item()),
-            target_mean=float(targets.mean().item()),
-        )
 
 
 class QMIXLearner:
@@ -266,11 +246,11 @@ class QMIXLearner:
         self.mixer.to(self.device)
         self.target_mixer.to(self.device)
 
-        params = list(self.agent.parameters()) + list(self.mixer.parameters())
-        self.optimizer = _make_optimizer(params, lr=float(lr), optimizer_type=optimizer_type)
+        self._all_params = list(self.agent.parameters()) + list(self.mixer.parameters())
+        self.optimizer = _make_optimizer(self._all_params, lr=float(lr), optimizer_type=optimizer_type)
         self.train_steps = 0
 
-    def update(self, batch: MARLBatch) -> LearnerStats:
+    def update(self, batch: MARLBatch) -> None:
         self.train_steps += 1
         obs = _maybe_append_id(batch.obs, self.n_agents, self.use_agent_id)
         next_obs = _maybe_append_id(batch.next_obs, self.n_agents, self.use_agent_id)
@@ -304,18 +284,12 @@ class QMIXLearner:
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         if self.grad_clip_norm is not None:
-            nn.utils.clip_grad_norm_(list(self.agent.parameters()) + list(self.mixer.parameters()), float(self.grad_clip_norm))
+            nn.utils.clip_grad_norm_(self._all_params, float(self.grad_clip_norm))
         self.optimizer.step()
 
         if self.train_steps % self.target_update_interval == 0:
             _hard_update(self.target_agent, self.agent)
             _hard_update(self.target_mixer, self.mixer)
-
-        return LearnerStats(
-            loss=float(loss.item()),
-            q_mean=float(q_tot.mean().item()),
-            target_mean=float(targets.mean().item()),
-        )
 
 
 class QPLEXLearner:
@@ -354,11 +328,11 @@ class QPLEXLearner:
         self.mixer.to(self.device)
         self.target_mixer.to(self.device)
 
-        params = list(self.agent.parameters()) + list(self.mixer.parameters())
-        self.optimizer = _make_optimizer(params, lr=float(lr), optimizer_type=optimizer_type)
+        self._all_params = list(self.agent.parameters()) + list(self.mixer.parameters())
+        self.optimizer = _make_optimizer(self._all_params, lr=float(lr), optimizer_type=optimizer_type)
         self.train_steps = 0
 
-    def update(self, batch: MARLBatch) -> LearnerStats:
+    def update(self, batch: MARLBatch) -> None:
         self.train_steps += 1
         obs = _maybe_append_id(batch.obs, self.n_agents, self.use_agent_id)
         next_obs = _maybe_append_id(batch.next_obs, self.n_agents, self.use_agent_id)
@@ -408,18 +382,9 @@ class QPLEXLearner:
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         if self.grad_clip_norm is not None:
-            nn.utils.clip_grad_norm_(
-                list(self.agent.parameters()) + list(self.mixer.parameters()),
-                float(self.grad_clip_norm),
-            )
+            nn.utils.clip_grad_norm_(self._all_params, float(self.grad_clip_norm))
         self.optimizer.step()
 
         if self.train_steps % self.target_update_interval == 0:
             _hard_update(self.target_agent, self.agent)
             _hard_update(self.target_mixer, self.mixer)
-
-        return LearnerStats(
-            loss=float(loss.item()),
-            q_mean=float(q_tot.mean().item()),
-            target_mean=float(targets.mean().item()),
-        )

@@ -194,7 +194,7 @@ def main() -> None:
 
             buffer.add_batch(
                 obs=obs_raw,
-                actions=step.actions.astype(np.int64),
+                actions=step.actions,
                 rewards=rewards,
                 next_obs=next_obs_for_buffer,
                 dones=step.terminated,

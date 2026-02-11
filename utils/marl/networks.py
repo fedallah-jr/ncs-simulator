@@ -347,7 +347,7 @@ class QPLEXSIWeight(nn.Module):
         for key_extractor, agents_extractor, action_extractor in zip(
             self.key_extractors, self.agents_extractors, self.action_extractors
         ):
-            x_key = torch.abs(key_extractor(states)).repeat(1, self.n_agents) + 1e-10
+            x_key = torch.abs(key_extractor(states)).expand(-1, self.n_agents) + 1e-10
             x_agents = torch.sigmoid(agents_extractor(states))
             x_action = torch.sigmoid(action_extractor(data))
             head_weights.append(x_key * x_agents * x_action)
@@ -468,7 +468,7 @@ class QPLEXQattenWeight(nn.Module):
 
         if self.weighted_head:
             w_head = torch.abs(self.hyper_w_head(states))
-            w_head = w_head.view(-1, self.n_head, 1).repeat(1, 1, self.n_agents)
+            w_head = w_head.view(-1, self.n_head, 1).expand(-1, -1, self.n_agents)
             head_attend = head_attend * w_head
 
         head_attend = torch.sum(head_attend, dim=1)
@@ -583,7 +583,7 @@ class QPLEXMixer(nn.Module):
             states=states,
         )
         w_final = w_final.view(-1, self.n_agents) + 1e-10
-        v = v.view(-1, 1).repeat(1, self.n_agents) / float(self.n_agents)
+        v = v.view(-1, 1).expand(-1, self.n_agents) / float(self.n_agents)
 
         agent_qs = agent_qs.view(-1, self.n_agents)
         agent_qs = w_final * agent_qs + v
