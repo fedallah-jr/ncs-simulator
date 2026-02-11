@@ -29,8 +29,6 @@ from utils.reward_normalization import (
 class RewardDefinition:
     mode: str
     comm_penalty_alpha: float
-    simple_comm_penalty_alpha: float
-    simple_freshness_decay: float = 0.0
     normalize: bool = False  # Explicit flag; normalization is applied only when True.
     normalizer: Optional[RunningRewardNormalizer] = None
     no_normalization_scale: float = 1.0
@@ -39,24 +37,17 @@ class RewardDefinition:
 
     def __post_init__(self) -> None:
         if self.mode not in {
-            "difference",
             "absolute",
-            "absolute_sqrt",
-            "estimate_error",
-            "estimate_errorl2",
+            "estimation_error",
+            "lqr_cost",
             "kf_info",
             "kf_info_s",
             "kf_info_m",
-            "simple",
-            "simple_penalty",
         }:
             raise ValueError(
-                "state_error_reward must be 'difference', 'absolute', 'absolute_sqrt', "
-                "'estimate_error', 'estimate_errorl2', 'kf_info', 'kf_info_s', 'kf_info_m', "
-                "'simple', or 'simple_penalty'"
+                "state_error_reward must be 'absolute', 'estimation_error', "
+                "'lqr_cost', 'kf_info', 'kf_info_s', or 'kf_info_m'"
             )
-        if float(self.simple_freshness_decay) < 0.0:
-            raise ValueError("simple_freshness_decay must be >= 0")
         if float(self.no_normalization_scale) <= 0.0:
             raise ValueError("no_normalization_scale must be > 0")
         if self.reward_clip_min is not None and self.reward_clip_max is not None:
@@ -260,15 +251,9 @@ class NCS_Env(gym.Env):
             reward_cfg.get("comm_throughput_window", max(5 * self.history_window, 50))
         )
         base_comm_penalty_alpha = float(reward_cfg.get("comm_penalty_alpha", 0.0))
-        base_simple_comm_penalty_alpha = float(
-            reward_cfg.get("simple_comm_penalty_alpha", base_comm_penalty_alpha)
-        )
-        base_simple_freshness_decay = float(reward_cfg.get("simple_freshness_decay", 0.0))
         self.reward_definition = self._build_reward_definition(
             reward_cfg,
             base_comm_penalty_alpha,
-            base_simple_comm_penalty_alpha,
-            base_simple_freshness_decay,
         )
         self.comm_throughput_floor = float(reward_cfg.get("comm_throughput_floor", 1e-3))
         self._running_reward_returns: Optional[List[float]] = None
@@ -635,7 +620,7 @@ class NCS_Env(gym.Env):
 
         # Compute control and update plants
         lqr_costs = None
-        if self.track_lqr_cost:
+        if self.track_lqr_cost or self.reward_definition.mode == "lqr_cost":
             lqr_costs = [0.0 for _ in range(self.n_agents)]
         for i in range(self.n_agents):
             if self.use_true_state_control:
@@ -943,10 +928,8 @@ class NCS_Env(gym.Env):
         self,
         reward_cfg: Dict[str, Any],
         base_comm_penalty_alpha: float,
-        base_simple_comm_penalty_alpha: float,
-        base_simple_freshness_decay: float,
     ) -> RewardDefinition:
-        base_mode = reward_cfg.get("state_error_reward", "difference")
+        base_mode = reward_cfg.get("state_error_reward", "absolute")
         base_normalize = bool(reward_cfg.get("normalize", False))
         no_normalization_scale = reward_cfg.get("no_normalization_scale", 1.0)
         if no_normalization_scale is None:
@@ -961,8 +944,6 @@ class NCS_Env(gym.Env):
         return RewardDefinition(
             mode=str(base_mode),
             comm_penalty_alpha=base_comm_penalty_alpha,
-            simple_comm_penalty_alpha=base_simple_comm_penalty_alpha,
-            simple_freshness_decay=base_simple_freshness_decay,
             normalize=base_normalize,
             normalizer=None,
             no_normalization_scale=no_normalization_scale,
@@ -1208,18 +1189,12 @@ class NCS_Env(gym.Env):
         weighted = self.state_cost_matrix @ dx
         return float(np.sum(np.abs(weighted)))
 
-    def _compute_estimation_error_l2(self, agent_idx: int, state: np.ndarray) -> float:
-        """Weighted L2 estimation error (x - x_hat)^T Q (x - x_hat)."""
-        estimate = self.controllers[agent_idx].x_hat
-        dx = state - estimate
-        return float(dx.T @ self.state_cost_matrix @ dx)
-
     def _compute_reward_error(self, agent_idx: int, state: np.ndarray) -> float:
         """Return the error used by the selected reward mode."""
-        if self.reward_definition.mode == "estimate_error":
+        if self.reward_definition.mode == "estimation_error":
             return self._compute_estimation_error(agent_idx, state)
-        if self.reward_definition.mode == "estimate_errorl2":
-            return self._compute_estimation_error_l2(agent_idx, state)
+        if self.reward_definition.mode == "lqr_cost":
+            return float(self.last_lqr_costs[agent_idx])
         if self.reward_definition.mode in {"kf_info", "kf_info_s", "kf_info_m"}:
             return 0.0
         return self._compute_state_error(state)
@@ -1241,8 +1216,6 @@ class NCS_Env(gym.Env):
             "mode": definition.mode,
             "normalization_gamma": float(self.reward_normalization_gamma),
             "comm_penalty_alpha": float(definition.comm_penalty_alpha),
-            "simple_comm_penalty_alpha": float(definition.simple_comm_penalty_alpha),
-            "simple_freshness_decay": float(definition.simple_freshness_decay),
             "state_cost_matrix": np.asarray(self.state_cost_matrix).tolist(),
             "comm_recent_window": int(self.comm_recent_window),
             "comm_throughput_window": int(self.comm_throughput_window),
@@ -1316,40 +1289,22 @@ class NCS_Env(gym.Env):
         """Compute reward and components for the given reward definition."""
         comm_penalty = 0.0
         if not self.perfect_communication and action == 1:
-            penalty_alpha = (
-                definition.comm_penalty_alpha
-                if definition.mode not in {"simple", "simple_penalty"}
-                else definition.simple_comm_penalty_alpha
-            )
+            penalty_alpha = definition.comm_penalty_alpha
             if penalty_alpha > 0:
                 recent_tx = self._recent_transmission_count(agent_idx)
                 throughput_estimate = self._compute_agent_throughput(agent_idx)
                 comm_penalty = penalty_alpha * (recent_tx / throughput_estimate)
 
-        if definition.mode == "difference":
-            error_reward = prev_error - curr_error
-        elif definition.mode == "absolute":
+        if definition.mode == "absolute":
             error_reward = -curr_error
-        elif definition.mode == "absolute_sqrt":
-            error_reward = -float(np.sqrt(max(curr_error, 0.0)))
-        elif definition.mode == "estimate_error":
+        elif definition.mode == "estimation_error":
             error_reward = -curr_error
-        elif definition.mode == "estimate_errorl2":
+        elif definition.mode == "lqr_cost":
             error_reward = -curr_error
         elif definition.mode in {"kf_info", "kf_info_s", "kf_info_m"}:
             error_reward = float(info_gain)
-        elif definition.mode == "simple_penalty":
-            # Symmetric version of "simple": 0 if measurement delivered, -1 otherwise
-            if info_arrived:
-                error_reward = 0.0
-            else:
-                error_reward = -1.0
-        else:  # mode == "simple"
-            if not info_arrived:
-                error_reward = 0.0
-            else:
-                age_steps = max(0, int(message_age_steps or 0))
-                error_reward = float(np.exp(-float(definition.simple_freshness_decay) * float(age_steps)))
+        else:
+            raise ValueError(f"Unsupported reward mode: {definition.mode}")
 
         reward_value = float(error_reward - comm_penalty)
 
@@ -1362,13 +1317,8 @@ class NCS_Env(gym.Env):
             "kf_info_gain": float(info_gain),
             "reward": reward_value,
         }
-        if definition.mode in {"simple", "simple_penalty"}:
-            components["info_arrived"] = 1.0 if info_arrived else 0.0
-            components["message_age_steps"] = float(max(0, int(message_age_steps or 0))) if info_arrived else 0.0
-            if definition.mode == "simple":
-                components["freshness"] = float(error_reward) if info_arrived else 0.0
-            else:  # simple_penalty
-                components["penalty"] = float(error_reward)
+        if definition.mode == "lqr_cost":
+            components["lqr_cost"] = float(curr_error)
         return components
 
     def _get_observations(self) -> Dict[str, np.ndarray]:

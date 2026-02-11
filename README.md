@@ -20,23 +20,17 @@ The configuration file is divided into sections; each key controls a specific as
 - `Q`, `R`: Cost matrices used to solve the discrete algebraic Riccati equation. They define how much the optimal controller cares about state deviation versus control effort.
 
 ### `reward`
-- Tracking error always uses `lqr.Q` to compute `(x - x_ref)^T Q (x - x_ref)`. Rewards are the improvement in this error between consecutive steps (`r_t = e_{t-1} - e_t`), minus the communication penalty.
+- Tracking error uses `lqr.Q` to compute `(x - x_ref)^T Q (x - x_ref)`.
 - `state_error_reward`: Reward mode for tracking error. Options:
-  - `"difference"` (default): Reward is improvement in tracking error (`r_t = e_{t-1} - e_t`).
-  - `"absolute"`: Reward equals negative tracking error (`r_t = -e_t`).
-  - `"absolute_sqrt"`: Reward equals negative sqrt tracking error (`r_t = -sqrt(e_t)`).
-  - `"estimate_error"`: Reward equals negative weighted L1 estimation error between the real state and the controller estimate (`r_t = -||Q (x - x_hat)||_1`).
-  - `"estimate_errorl2"`: Reward equals negative weighted L2 estimation error between the real state and the controller estimate (`r_t = -(x - x_hat)^T Q (x - x_hat)`).
-- `"kf_info"`: Reward equals `r_t = -tr((M_t + S_t) P_t)` where `M_t = K_t^T (R + B^T S_{t+1} B) K_t` (certainty-equivalent LQG weighting).
-- `"kf_info_m"`: Reward equals `r_t = -tr(M_t P_t)` (control-weighted estimation uncertainty).
-- `"kf_info_s"`: Reward equals `r_t = -tr(S_t P_t)` (state-cost-weighted estimation uncertainty).
-  - `"simple"`: Reward +1 if measurement delivered this step, 0 otherwise. Range: [0, max_steps].
-  - `"simple_penalty"`: Reward 0 if measurement delivered, -1 otherwise. Range: [-max_steps, 0]. Symmetric version of "simple".
+  - `"absolute"` (default): Reward equals negative tracking error (`r_t = -e_t`).
+  - `"estimation_error"`: Reward equals negative weighted L1 estimation error between true state and controller estimate (`r_t = -||Q (x - x_hat)||_1`).
+  - `"lqr_cost"`: Reward equals negative LQR stage cost (`r_t = -(x_t^T Q x_t + u_t^T R u_t)`).
+  - `"kf_info"`: Reward equals `r_t = -tr((M_t + S_t) P_t)` where `M_t = K_t^T (R + B^T S_{t+1} B) K_t` (certainty-equivalent LQG weighting).
+  - `"kf_info_m"`: Reward equals `r_t = -tr(M_t P_t)` (control-weighted estimation uncertainty).
+  - `"kf_info_s"`: Reward equals `r_t = -tr(S_t P_t)` (state-cost-weighted estimation uncertainty).
 - `comm_recent_window`: Short window (steps) used to count how many recent transmission attempts (`p>0`) an agent has initiated.
 - `comm_throughput_window`: Long window (steps) used to estimate per-agent throughput from ACKed packets and their delays.
 - `comm_penalty_alpha`: Scalar multiplier (`α`) used in the communication penalty `R_{a,\text{comm}} = -α * N_\text{recent}/T`, applied only when `action=1` and the network is not set to `perfect_communication`.
-- `simple_comm_penalty_alpha`: Optional override for `"simple"` and `"simple_penalty"` reward modes. Set to `0` to keep no comm penalty in those modes; otherwise the same penalty formula applies.
-- `simple_freshness_decay`: Exponential freshness decay rate for `"simple"` reward mode (default `0.0`). When a measurement is delivered, the base reward becomes `exp(-simple_freshness_decay * age_steps)`, where `age_steps` is the measurement staleness in environment steps.
 - `normalize`: Explicit flag (default: `false`) for reward normalization in multi-agent runs. When `true`, running normalization scales the per-step reward.
 - `no_normalization_scale`: Scalar divisor applied to rewards when normalization is disabled (default `1.0`).
 - `reward_clip_min` / `reward_clip_max`: Optional bounds applied to rewards after scaling/normalization.
