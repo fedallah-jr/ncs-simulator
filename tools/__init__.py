@@ -11,6 +11,7 @@ from .heuristic_policies import (
     RandomSendPolicy,
     ThresholdPolicy,
     AdaptiveThresholdPolicy,
+    PerfectSyncPolicy,
     get_heuristic_policy,
     HEURISTIC_POLICIES,
 )
@@ -31,6 +32,7 @@ __all__ = [
     'RandomSendPolicy',
     'ThresholdPolicy',
     'AdaptiveThresholdPolicy',
+    'PerfectSyncPolicy',
     'get_heuristic_policy',
     'HEURISTIC_POLICIES',
     'MultiAgentHeuristicPolicy',

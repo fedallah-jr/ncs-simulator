@@ -43,10 +43,11 @@ class RewardDefinition:
             "kf_info",
             "kf_info_s",
             "kf_info_m",
+            "kf_info_m_noise",
         }:
             raise ValueError(
                 "state_error_reward must be 'absolute', 'estimation_error', "
-                "'lqr_cost', 'kf_info', 'kf_info_s', or 'kf_info_m'"
+                "'lqr_cost', 'kf_info', 'kf_info_s', 'kf_info_m', or 'kf_info_m_noise'"
             )
         if float(self.no_normalization_scale) <= 0.0:
             raise ValueError("no_normalization_scale must be > 0")
@@ -87,8 +88,10 @@ class NCS_Env(gym.Env):
         global_state_enabled: bool = False,
         track_lqr_cost: bool = False,
         track_eval_stats: bool = False,
+        minimal_info: bool = False,
     ):
         super().__init__()
+        self.minimal_info = bool(minimal_info)
         self.n_agents = n_agents
         self.episode_length = episode_length
         self.reward_override = reward_override
@@ -380,6 +383,7 @@ class NCS_Env(gym.Env):
             "kf_info_gain": 0.0,
             "kf_info_gain_m": 0.0,
             "kf_info_gain_s": 0.0,
+            "kf_info_gain_m_noise": 0.0,
         }
         self.last_reward_components: Dict[str, Dict[str, float]] = {
             f"agent_{i}": dict(base_components)
@@ -389,6 +393,7 @@ class NCS_Env(gym.Env):
         self.last_kf_info_gains: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_kf_info_gains_m: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_kf_info_gains_s: List[float] = [0.0 for _ in range(self.n_agents)]
+        self.last_kf_info_gains_m_noise: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_termination_reasons: List[str] = []
         self.last_termination_agents: List[int] = []
         self.last_bad_termination = False
@@ -451,6 +456,7 @@ class NCS_Env(gym.Env):
             self.last_kf_info_gains[i] = 0.0
             self.last_kf_info_gains_m[i] = 0.0
             self.last_kf_info_gains_s[i] = 0.0
+            self.last_kf_info_gains_m_noise[i] = 0.0
 
         # Store prior for each controller at current state index
         # This enables delayed measurement handling in network mode
@@ -617,6 +623,10 @@ class NCS_Env(gym.Env):
             self.last_kf_info_gains_m[i] = m_gain
             self.last_kf_info_gains_s[i] = s_gain
             self.last_kf_info_gains[i] = m_gain + s_gain
+            # tr(M ee^T) = e^T M e using actual estimation error
+            e = self.plants[i].get_state().reshape(-1) - self.controllers[i].x_hat
+            M = self._get_kf_info_matrix(i)
+            self.last_kf_info_gains_m_noise[i] = -float(e @ M @ e)
 
         # Compute control and update plants
         lqr_costs = None
@@ -685,6 +695,7 @@ class NCS_Env(gym.Env):
             )
             components["kf_info_gain_m"] = float(self.last_kf_info_gains_m[i])
             components["kf_info_gain_s"] = float(self.last_kf_info_gains_s[i])
+            components["kf_info_gain_m_noise"] = float(self.last_kf_info_gains_m_noise[i])
             reward_value = components.pop("reward")
             combined_reward = reward_value
             combined_comm_penalty = components.get("comm_penalty", 0.0)
@@ -1180,6 +1191,8 @@ class NCS_Env(gym.Env):
             return self.last_kf_info_gains_s[agent_idx]
         if mode == "kf_info":
             return self.last_kf_info_gains[agent_idx]
+        if mode == "kf_info_m_noise":
+            return self.last_kf_info_gains_m_noise[agent_idx]
         return 0.0
 
     def _compute_estimation_error(self, agent_idx: int, state: np.ndarray) -> float:
@@ -1195,7 +1208,7 @@ class NCS_Env(gym.Env):
             return self._compute_estimation_error(agent_idx, state)
         if self.reward_definition.mode == "lqr_cost":
             return float(self.last_lqr_costs[agent_idx])
-        if self.reward_definition.mode in {"kf_info", "kf_info_s", "kf_info_m"}:
+        if self.reward_definition.mode in {"kf_info", "kf_info_s", "kf_info_m", "kf_info_m_noise"}:
             return 0.0
         return self._compute_state_error(state)
 
@@ -1301,7 +1314,7 @@ class NCS_Env(gym.Env):
             error_reward = -curr_error
         elif definition.mode == "lqr_cost":
             error_reward = -curr_error
-        elif definition.mode in {"kf_info", "kf_info_s", "kf_info_m"}:
+        elif definition.mode in {"kf_info", "kf_info_s", "kf_info_m", "kf_info_m_noise"}:
             error_reward = float(info_gain)
         else:
             raise ValueError(f"Unsupported reward mode: {definition.mode}")
@@ -1437,7 +1450,19 @@ class NCS_Env(gym.Env):
         return np.concatenate(per_agent_features + [channel_state])
 
     def _get_info(self) -> Dict[str, Any]:
-        """Return auxiliary information."""
+        """Return auxiliary information.
+
+        When ``minimal_info`` is True (training mode), only the fields
+        consumed by the training loop are returned, skipping expensive
+        copies of plant states, controller estimates, covariance matrices,
+        network statistics, reward components, and throughput calculations.
+        """
+        if self.minimal_info:
+            info: Dict[str, Any] = {}
+            if self.global_state_enabled:
+                info["global_state"] = self._get_global_state()
+            return info
+
         collisions = (
             [0 for _ in range(self.n_agents)]
             if self.perfect_communication

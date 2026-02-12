@@ -64,6 +64,8 @@ from tools._common import (
 # Heuristic policies to compare against (edit as needed).
 HEURISTIC_POLICY_NAMES: Sequence[str] = (
     "zero_wait",
+    "perfect_sync",
+    "perfect_sync_n2",
     "always_send",
     "never_send",
     "random_50",
@@ -365,7 +367,7 @@ def _iter_seeds(seed_start: int, num_seeds: int) -> List[int]:
 
 
 def _is_stochastic_heuristic(policy_name: str) -> bool:
-    return policy_name in STOCHASTIC_HEURISTICS
+    return policy_name in STOCHASTIC_HEURISTICS or policy_name.startswith("random_")
 
 
 def _log(message: str, *, indent: int = 0) -> None:
@@ -1442,7 +1444,7 @@ def main() -> int:
     parser.add_argument(
         "--only-heuristics",
         action="store_true",
-        help="Evaluate only heuristic baselines (zero_wait, always_send, never_send, random_50)",
+        help="Evaluate only heuristic baselines (zero_wait, perfect_sync, perfect_sync_n2, always_send, never_send, random_50)",
     )
     parser.add_argument(
         "--test-replay",

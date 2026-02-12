@@ -28,6 +28,7 @@ def make_env(
     freeze_running_normalization: bool = False,
     global_state_enabled: bool = False,
     shared_reward_normalizer: Optional[SharedRewardNormalizerConfig] = None,
+    minimal_info: bool = False,
 ) -> "NCS_Env":
     from ncs_env.env import NCS_Env
 
@@ -51,6 +52,7 @@ def make_env(
         termination_override=termination_override,
         freeze_running_normalization=freeze_running_normalization,
         global_state_enabled=global_state_enabled,
+        minimal_info=minimal_info,
     )
 
 
@@ -64,6 +66,7 @@ def make_vector_env_fn(
     reward_override: Optional[Dict[str, Any]] = None,
     termination_override: Optional[Dict[str, Any]] = None,
     freeze_running_normalization: bool = False,
+    minimal_info: bool = False,
 ) -> Callable[[], "VectorEnvAdapter"]:
     def _thunk() -> "VectorEnvAdapter":
         env = make_env(
@@ -76,6 +79,7 @@ def make_vector_env_fn(
             freeze_running_normalization=freeze_running_normalization,
             global_state_enabled=global_state_enabled,
             shared_reward_normalizer=shared_reward_normalizer,
+            minimal_info=minimal_info,
         )
         return VectorEnvAdapter(env, n_agents)
 
@@ -122,6 +126,7 @@ def create_async_vector_env(
     seed: Optional[int],
     global_state_enabled: bool = False,
     shared_reward_normalizer: Optional[SharedRewardNormalizerConfig] = None,
+    minimal_info: bool = False,
 ) -> Tuple[AsyncVectorEnv, Optional[List[int]]]:
     if n_envs <= 0:
         raise ValueError("n_envs must be positive")
@@ -141,6 +146,7 @@ def create_async_vector_env(
                 seed=env_seed,
                 global_state_enabled=global_state_enabled,
                 shared_reward_normalizer=shared_reward_normalizer,
+                minimal_info=minimal_info,
             )
         )
 

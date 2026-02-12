@@ -57,7 +57,14 @@ class MultiAgentHeuristicPolicy:
         self._policies = []
         for idx in range(self.n_agents):
             agent_seed = None if seed is None else int(seed) + idx
-            self._policies.append(get_heuristic_policy(policy_name, n_agents=1, seed=agent_seed))
+            self._policies.append(
+                get_heuristic_policy(
+                    policy_name,
+                    n_agents=self.n_agents,
+                    seed=agent_seed,
+                    agent_index=idx,
+                )
+            )
 
     def reset(self) -> None:
         for policy in self._policies:

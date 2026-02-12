@@ -908,6 +908,9 @@ def main():
         print("-" * 50)
         for name in sorted(HEURISTIC_POLICIES.keys()):
             print(f"  - {name}")
+        print("\nPattern aliases:")
+        print("  - perfect_sync_n<K> (example: perfect_sync_n2)")
+        print("  - perfect_sync_<K>  (example: perfect_sync_2)")
         print()
         return
 

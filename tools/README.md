@@ -156,12 +156,14 @@ python -m tools.visualize_policy --list-heuristics
 - **`always_send`**: Always transmit measurements at every timestep
 - **`never_send`**: Never transmit measurements
 - **`zero_wait`**: Transmit only when the previous packet is ACKed or dropped (no overlapping sends)
+- **`perfect_sync`**: Strictly synchronized round-robin sending (one sender per timestep)
 
 #### Periodic Policies
 
 - **`send_every_2`**: Transmit every 2 timesteps
 - **`send_every_5`**: Transmit every 5 timesteps
 - **`send_every_10`**: Transmit every 10 timesteps
+- **`perfect_sync_nK`** or **`perfect_sync_K`**: Synchronized round-robin with spacing multiplier `K` (each agent sends every `K * n_agents` timesteps)
 
 #### Stochastic Policies
 

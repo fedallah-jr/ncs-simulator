@@ -8,7 +8,8 @@ used by the visualization tools for easy integration.
 
 from __future__ import annotations
 
-from typing import Dict, Tuple, Optional, Any, List
+import re
+from typing import Tuple, Optional, Any, List
 
 import numpy as np
 
@@ -225,50 +226,6 @@ class AdaptiveThresholdPolicy(BaseHeuristicPolicy):
         return (1 if state_magnitude > adaptive_threshold else 0), None
 
 
-# Dictionary for easy policy lookup
-HEURISTIC_POLICIES = {
-    'always_send': AlwaysSendPolicy,
-    'never_send': NeverSendPolicy,
-    'send_every_2': lambda n_agents=1: SendEveryNPolicy(n=2, n_agents=n_agents),
-    'send_every_5': lambda n_agents=1: SendEveryNPolicy(n=5, n_agents=n_agents),
-    'send_every_10': lambda n_agents=1: SendEveryNPolicy(n=10, n_agents=n_agents),
-    'random_50': lambda n_agents=1, seed=None: RandomSendPolicy(prob=0.5, n_agents=n_agents, seed=seed),
-    'random_25': lambda n_agents=1, seed=None: RandomSendPolicy(prob=0.25, n_agents=n_agents, seed=seed),
-    'random_75': lambda n_agents=1, seed=None: RandomSendPolicy(prob=0.75, n_agents=n_agents, seed=seed),
-    'threshold_1.0': lambda n_agents=1: ThresholdPolicy(threshold=1.0, n_agents=n_agents),
-    'threshold_2.0': lambda n_agents=1: ThresholdPolicy(threshold=2.0, n_agents=n_agents),
-    'threshold_0.5': lambda n_agents=1: ThresholdPolicy(threshold=0.5, n_agents=n_agents),
-    'adaptive': lambda n_agents=1: AdaptiveThresholdPolicy(base_threshold=1.0, throughput_weight=0.1, n_agents=n_agents),
-    'zero_wait': lambda n_agents=1: ZeroWaitPolicy(n_agents=n_agents),
-}
-
-
-def get_heuristic_policy(policy_name: str, n_agents: int = 1, seed: Optional[int] = None) -> BaseHeuristicPolicy:
-    """
-    Get a heuristic policy by name.
-
-    Args:
-        policy_name: Name of the policy (see HEURISTIC_POLICIES keys)
-        n_agents: Number of agents in the system
-        seed: Random seed for stochastic policies
-
-    Returns:
-        Policy instance
-
-    Raises:
-        ValueError: If policy_name is not recognized
-    """
-    if policy_name not in HEURISTIC_POLICIES:
-        available = ', '.join(HEURISTIC_POLICIES.keys())
-        raise ValueError(f"Unknown policy '{policy_name}'. Available policies: {available}")
-
-    policy_factory = HEURISTIC_POLICIES[policy_name]
-
-    # Handle different factory signatures
-    if policy_name.startswith('random'):
-        return policy_factory(n_agents=n_agents, seed=seed)
-    else:
-        return policy_factory(n_agents=n_agents)
 class ZeroWaitPolicy(BaseHeuristicPolicy):
     """Policy that waits for ACK before sending again (transport layer)."""
 
@@ -315,3 +272,140 @@ class ZeroWaitPolicy(BaseHeuristicPolicy):
             return self._cached_history_window
         self._cached_history_window = 10
         return self._cached_history_window
+
+
+class PerfectSyncPolicy(BaseHeuristicPolicy):
+    """
+    Deterministic time-slot policy with one sender at a time.
+
+    With slot multiplier ``n=1``, agents transmit in strict round-robin order:
+    agent_0, agent_1, ..., agent_{N-1}, repeat.
+
+    With ``n>1``, each sender slot is separated by ``n-1`` idle steps:
+    agent_0, idle..., agent_1, idle..., etc.
+    """
+
+    def __init__(
+        self,
+        n_agents: int = 1,
+        agent_index: int = 0,
+        slot_spacing_multiplier: int = 1,
+    ) -> None:
+        super().__init__(n_agents)
+        if self.n_agents <= 0:
+            raise ValueError("n_agents must be positive")
+        if slot_spacing_multiplier <= 0:
+            raise ValueError("slot_spacing_multiplier must be positive")
+        if agent_index < 0 or agent_index >= self.n_agents:
+            raise ValueError("agent_index must be in [0, n_agents)")
+        self.agent_index = int(agent_index)
+        self.slot_spacing_multiplier = int(slot_spacing_multiplier)
+        self.timestep = 0
+
+    def reset(self) -> None:
+        """Reset timestep counter."""
+        self.timestep = 0
+
+    def predict(self, observation: np.ndarray, deterministic: bool = True) -> Tuple[int, None]:
+        """
+        Send only in this agent's assigned synchronized slot.
+
+        Args:
+            observation: Current observation (unused)
+            deterministic: Whether to use deterministic policy (unused)
+
+        Returns:
+            action: 1 in this agent's slot, else 0
+            state: None
+        """
+        cycle_len = self.n_agents * self.slot_spacing_multiplier
+        agent_slot = self.agent_index * self.slot_spacing_multiplier
+        action = 1 if (self.timestep % cycle_len) == agent_slot else 0
+        self.timestep += 1
+        return action, None
+
+
+def _parse_perfect_sync_multiplier(policy_name: str) -> Optional[int]:
+    """
+    Parse perfect-sync policy names.
+
+    Supported names:
+    - perfect_sync      -> n = 1
+    - perfect_sync_n2   -> n = 2
+    - perfect_sync_2    -> n = 2
+    """
+    if policy_name == "perfect_sync":
+        return 1
+    match = re.fullmatch(r"perfect_sync(?:_n|_)(\d+)", policy_name)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+# Dictionary for easy policy lookup
+HEURISTIC_POLICIES = {
+    'always_send': AlwaysSendPolicy,
+    'never_send': NeverSendPolicy,
+    'perfect_sync': lambda n_agents=1, agent_index=0: PerfectSyncPolicy(
+        n_agents=n_agents, agent_index=agent_index, slot_spacing_multiplier=1
+    ),
+    'send_every_2': lambda n_agents=1: SendEveryNPolicy(n=2, n_agents=n_agents),
+    'send_every_5': lambda n_agents=1: SendEveryNPolicy(n=5, n_agents=n_agents),
+    'send_every_10': lambda n_agents=1: SendEveryNPolicy(n=10, n_agents=n_agents),
+    'random_50': lambda n_agents=1, seed=None: RandomSendPolicy(prob=0.5, n_agents=n_agents, seed=seed),
+    'random_25': lambda n_agents=1, seed=None: RandomSendPolicy(prob=0.25, n_agents=n_agents, seed=seed),
+    'random_75': lambda n_agents=1, seed=None: RandomSendPolicy(prob=0.75, n_agents=n_agents, seed=seed),
+    'threshold_1.0': lambda n_agents=1: ThresholdPolicy(threshold=1.0, n_agents=n_agents),
+    'threshold_2.0': lambda n_agents=1: ThresholdPolicy(threshold=2.0, n_agents=n_agents),
+    'threshold_0.5': lambda n_agents=1: ThresholdPolicy(threshold=0.5, n_agents=n_agents),
+    'adaptive': lambda n_agents=1: AdaptiveThresholdPolicy(
+        base_threshold=1.0, throughput_weight=0.1, n_agents=n_agents
+    ),
+    'zero_wait': lambda n_agents=1: ZeroWaitPolicy(n_agents=n_agents),
+}
+
+
+def get_heuristic_policy(
+    policy_name: str,
+    n_agents: int = 1,
+    seed: Optional[int] = None,
+    agent_index: int = 0,
+) -> BaseHeuristicPolicy:
+    """
+    Get a heuristic policy by name.
+
+    Args:
+        policy_name: Name of the policy (see HEURISTIC_POLICIES keys)
+        n_agents: Number of agents in the system
+        seed: Random seed for stochastic policies
+        agent_index: Agent index for coordinated multi-agent heuristics
+
+    Returns:
+        Policy instance
+
+    Raises:
+        ValueError: If policy_name is not recognized
+    """
+    sync_multiplier = _parse_perfect_sync_multiplier(policy_name)
+    if sync_multiplier is not None:
+        if sync_multiplier <= 0:
+            raise ValueError("perfect_sync multiplier must be a positive integer")
+        return PerfectSyncPolicy(
+            n_agents=n_agents,
+            agent_index=agent_index,
+            slot_spacing_multiplier=sync_multiplier,
+        )
+
+    if policy_name not in HEURISTIC_POLICIES:
+        available = ', '.join(sorted(HEURISTIC_POLICIES.keys()))
+        raise ValueError(
+            f"Unknown policy '{policy_name}'. Available policies: {available}. "
+            "Pattern aliases: perfect_sync_n<k>, perfect_sync_<k>."
+        )
+
+    policy_factory = HEURISTIC_POLICIES[policy_name]
+
+    # Handle different factory signatures
+    if policy_name.startswith('random'):
+        return policy_factory(n_agents=n_agents, seed=seed)
+    return policy_factory(n_agents=n_agents)

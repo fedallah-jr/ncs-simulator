@@ -74,6 +74,7 @@ def main() -> None:
         config_path_str=config_path_str,
         seed=args.seed,
         shared_reward_normalizer=shared_reward_normalizer,
+        minimal_info=True,
     )
     eval_env = create_eval_async_vector_env(
         n_eval_envs=args.n_eval_envs,

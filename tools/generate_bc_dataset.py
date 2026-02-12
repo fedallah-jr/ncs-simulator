@@ -65,7 +65,14 @@ def main() -> None:
     policies = []
     for idx in range(n_agents):
         agent_seed = None if args.seed is None else int(args.seed) + idx
-        policies.append(get_heuristic_policy(args.policy, n_agents=1, seed=agent_seed))
+        policies.append(
+            get_heuristic_policy(
+                args.policy,
+                n_agents=n_agents,
+                seed=agent_seed,
+                agent_index=idx,
+            )
+        )
 
     obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
     n_actions = int(env.action_space.spaces["agent_0"].n)
