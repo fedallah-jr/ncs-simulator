@@ -191,8 +191,6 @@ class NetworkModel:
         sensor_id: int,
         state_measurement: np.ndarray,
         measurement_timestamp: int,
-        *,
-        measurement_noise_cov: Optional[np.ndarray] = None,
     ) -> Tuple[bool, Optional[Packet]]:
         """Queue a data packet from a sensor."""
         entity_idx = sensor_id
@@ -202,8 +200,6 @@ class NetworkModel:
             "state": state_measurement,
             "timestamp": measurement_timestamp,
         }
-        if measurement_noise_cov is not None:
-            payload["measurement_noise_cov"] = measurement_noise_cov.copy()
         packet = Packet(
             source_id=sensor_id,
             dest_id=sensor_id,

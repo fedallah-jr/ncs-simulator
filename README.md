@@ -9,8 +9,6 @@ The configuration file is divided into sections; each key controls a specific as
 ### `system`
 - `A`, `B`: Discrete-time state and input matrices used by every plant and controller.
 - `process_noise_cov`: Covariance of Gaussian process noise injected into each plant.
-- `measurement_noise_cov`: Covariance of sensor noise added before packets are queued; the Kalman filter uses the same value.
-- `measurement_noise_scale_range`: Optional `[min, max]` range for a per-step scalar applied to `measurement_noise_cov` to produce `R_k`. When set and `measurement_noise_cov` is omitted, the base defaults to the identity matrix.
 - Initial states are sampled from `N(0, P_0)` where `P_0 = 4I` (hardcoded). The Kalman filter's initial covariance is set to the same `P_0`, ensuring `P = E[ee^T]` from the start.
 - `initial_state_fixed`: When `true`, sample one initial state per plant once and reuse it for every reset (training and evaluation).
 - `initial_state_fixed_seed`: Optional seed used to sample the fixed initial states. Set this to keep training/eval aligned even if they use different env seeds.
@@ -51,9 +49,9 @@ When `perfect_communication=true`, the whole communication logic is bypassed dir
 - `history_window`: Number of past steps included for statuses and throughput history.
 - `state_history_window`: Number of past states appended to the observation (defaults to `history_window` if omitted).
 - `throughput_window`: Sliding window (in steps) used to estimate recent channel throughput (kbps). Can be a single integer (e.g., `50`) or an array of window sizes (e.g., `[200, 100, 10, 5]`) to compute multiple throughput values at different time scales. When an array is provided, all calculated throughput values are included in the observation.
-- `quantization_step`: Step size for quantizing sensor measurements (state + measurement noise) before they appear in observations. Set to `0` or omit to disable quantization.
+- `quantization_step`: Step size for quantizing plant state before it appears in observations. Set to `0` or omit to disable quantization.
 
-Observations are laid out as `[current_measurement, current_throughput(s), current_measurement_noise, prev_states..., prev_statuses..., prev_throughputs...]`, where each "prev" block holds `history_window` (or `state_history_window` for states) entries. When `throughput_window` is an array, multiple current throughput values are included (one per window size). `current_measurement` is the quantized sensor measurement (`state + measurement noise`). `current_measurement_noise` is a scalar intensity summary of `R_k` (trace divided by state dimension).
+Observations are laid out as `[current_state, current_throughput(s), prev_states..., prev_statuses..., prev_throughputs...]`, where each "prev" block holds `history_window` (or `state_history_window` for states) entries. When `throughput_window` is an array, multiple current throughput values are included (one per window size). `current_state` is the quantized plant state.
 
 ### `network`
 - `data_rate_kbps`: Physical-layer rate used to convert packet sizes into transmission durations.

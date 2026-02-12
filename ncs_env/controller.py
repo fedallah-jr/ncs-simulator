@@ -212,7 +212,6 @@ class Controller:
         K: Union[np.ndarray, List[np.ndarray]],
         initial_estimate: np.ndarray,
         process_noise_cov: np.ndarray,
-        measurement_noise_cov: np.ndarray,
         initial_covariance: Optional[np.ndarray] = None,
         max_delay: int = 100,
     ):
@@ -266,8 +265,8 @@ class Controller:
         # Process noise covariance
         self.kf.Q = process_noise_cov.copy()
 
-        # Measurement noise covariance
-        self.kf.R = measurement_noise_cov.copy()
+        # Measurement noise covariance (perfect measurements)
+        self.kf.R = np.zeros((state_dim, state_dim))
 
         # Initial state estimate
         self.kf.x = initial_estimate.copy().reshape(-1, 1)
@@ -310,15 +309,12 @@ class Controller:
         # filterpy's predict can take control input
         self.kf.predict(u=self.last_u.reshape(-1, 1))
 
-    def update(self, measurement: np.ndarray, measurement_noise_cov: Optional[np.ndarray] = None) -> None:
+    def update(self, measurement: np.ndarray) -> None:
         """
         Kalman filter measurement update.
         This is the measurement update step: corrects prediction using measurement.
         """
-        if measurement_noise_cov is None:
-            self.kf.update(measurement.reshape(-1, 1))
-        else:
-            self.kf.update(measurement.reshape(-1, 1), R=measurement_noise_cov)
+        self.kf.update(measurement.reshape(-1, 1))
         self._record_seen_measurement(self.current_state_index)
 
     def _has_seen_measurement(self, measurement_state_index: int) -> bool:
@@ -337,7 +333,6 @@ class Controller:
         self,
         measurement: np.ndarray,
         measurement_state_index: int,
-        measurement_noise_cov: Optional[np.ndarray] = None,
     ) -> bool:
         """
         Handle a delayed measurement by retrodict-then-predict.
@@ -380,10 +375,7 @@ class Controller:
 
         self.kf.x = x_prior
         self.kf.P = P_prior
-        if measurement_noise_cov is None:
-            self.kf.update(z)
-        else:
-            self.kf.update(z, R=measurement_noise_cov)
+        self.kf.update(z)
         # Collect controls from measurement_state_index to current_state_index
         controls = []
         for entry in self.control_history:

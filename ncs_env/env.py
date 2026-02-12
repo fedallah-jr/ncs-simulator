@@ -16,7 +16,7 @@ from .controller import (
     compute_discrete_lqr_solution,
     compute_finite_horizon_lqr_solution,
 )
-from .config import DEFAULT_CONFIG_PATH, load_config, resolve_measurement_noise_scale_range
+from .config import DEFAULT_CONFIG_PATH, load_config
 from .network import NetworkModel
 from .plant import Plant
 from utils.reward_normalization import (
@@ -111,7 +111,6 @@ class NCS_Env(gym.Env):
         self.timestep = 0
         self._init_rng: Optional[np.random.Generator] = None
         self._process_rng: Optional[np.random.Generator] = None
-        self._measurement_rng: Optional[np.random.Generator] = None
         self._network_rng: Optional[np.random.Generator] = None
 
         self.A = np.array(self.system_cfg.get("A"))
@@ -143,7 +142,6 @@ class NCS_Env(gym.Env):
         obs_dim = (
             self.state_dim  # current state
             + self.n_throughput_windows  # current throughputs (one per window)
-            + 1  # current measurement noise intensity
             + self.state_history_window * self.state_dim  # previous states
             + self.history_window  # previous statuses
             + self.history_window  # previous throughputs
@@ -174,32 +172,6 @@ class NCS_Env(gym.Env):
         A, B = agent_matrices[0]
         W = np.array(self.system_cfg.get("process_noise_cov", np.eye(self.state_dim)))
         self.process_noise_cov = W
-        measurement_noise_scale_range = resolve_measurement_noise_scale_range(self.system_cfg)
-        measurement_noise_cov_cfg = self.system_cfg.get("measurement_noise_cov", None)
-        use_identity_default = (
-            measurement_noise_scale_range is not None
-            and "measurement_noise_cov" not in self.system_cfg
-        )
-        self.measurement_noise_cov = self._resolve_measurement_noise_covariance(
-            measurement_noise_cov_cfg,
-            self.state_dim,
-            use_identity_default=use_identity_default,
-        )
-        self.measurement_noise_scale_range = measurement_noise_scale_range
-        self._has_measurement_noise = (
-            not np.allclose(self.measurement_noise_cov, 0.0)
-            or (
-                self.measurement_noise_scale_range is not None
-                and self.measurement_noise_scale_range[1] > 0.0
-            )
-        )
-        self.current_measurement_noise_covs = [
-            self.measurement_noise_cov.copy() for _ in range(self.n_agents)
-        ]
-        base_intensity = self._compute_measurement_noise_intensity(self.measurement_noise_cov)
-        self.current_measurement_noise_intensities = [
-            base_intensity for _ in range(self.n_agents)
-        ]
         self.initial_estimate_cov = np.array(
             self.system_cfg.get("initial_state_cov", 4.0 * np.eye(self.state_dim))
         )
@@ -294,7 +266,6 @@ class NCS_Env(gym.Env):
                     self.K_list[i],
                     initial_estimate,
                     process_noise_cov=W,
-                    measurement_noise_cov=self.measurement_noise_cov,
                     initial_covariance=self.initial_estimate_cov,
                 )
             )
@@ -420,7 +391,6 @@ class NCS_Env(gym.Env):
         self.network.rng = self._network_rng if self._network_rng is not None else self.np_random
         self.network.reset()
         self._initialize_tracking_structures()
-        self._resample_measurement_noise()
         self._update_sensor_measurements()
         self._reset_running_returns()
         self.last_network_tick_trace = None
@@ -448,7 +418,6 @@ class NCS_Env(gym.Env):
         # After first step: timestep=1, state is still x[0] before plant update
         # We use state_index to clearly refer to which x[k] we're measuring
         state_index = self.timestep - 1
-        current_noise_covs = self.current_measurement_noise_covs
         for i in range(self.n_agents):
             self.last_kf_info_gains[i] = 0.0
             self.last_kf_info_gains_m[i] = 0.0
@@ -471,9 +440,8 @@ class NCS_Env(gym.Env):
                 if action == 1:
                     self.net_tx_attempts[i] += 1
                     self.net_tx_acks[i] += 1
-                    measurement_noise_cov = current_noise_covs[i]
                     measurement = self.last_sensor_measurements[i]
-                    self.controllers[i].update(measurement, measurement_noise_cov)
+                    self.controllers[i].update(measurement)
                     self.last_measurements[i] = measurement
                     self._record_decision(i, status=1)
                     # Use state_index for consistency (though _log_successful_comm
@@ -492,7 +460,6 @@ class NCS_Env(gym.Env):
                 action = actions[f"agent_{i}"]
                 if action == 1:
                     self.net_tx_attempts[i] += 1
-                    measurement_noise_cov = current_noise_covs[i]
                     measurement = self.last_sensor_measurements[i]
                     # Use state_index as the measurement timestamp
                     # This clearly indicates measurement is of x[state_index]
@@ -501,7 +468,6 @@ class NCS_Env(gym.Env):
                         i,
                         measurement,
                         measurement_timestamp,
-                        measurement_noise_cov=measurement_noise_cov,
                     )
                     if not accepted:
                         # Buffer full or MAC already busy: from transport layer perspective,
@@ -587,9 +553,8 @@ class NCS_Env(gym.Env):
                     for packet in packets:
                         measurement = packet.payload["state"]
                         measurement_timestamp = packet.payload["timestamp"]
-                        measurement_noise_cov = packet.payload.get("measurement_noise_cov")
                         applied = self.controllers[controller_id].delayed_update(
-                            measurement, measurement_timestamp, measurement_noise_cov
+                            measurement, measurement_timestamp
                         )
                         if not applied:
                             continue
@@ -751,7 +716,6 @@ class NCS_Env(gym.Env):
 
         # Get observations AFTER plant update (Gym step contract)
         # step() returns the resulting state s[k+1] after action a[k] is applied
-        self._resample_measurement_noise()
         self._update_sensor_measurements()
         observations = self._get_observations()
         infos = self._get_info()
@@ -846,40 +810,6 @@ class NCS_Env(gym.Env):
             matrices.append((A_i, B_i))
 
         return matrices
-
-    @staticmethod
-    def _resolve_measurement_noise_covariance(
-        measurement_noise_cov_cfg: Any,
-        state_dim: int,
-        *,
-        use_identity_default: bool,
-    ) -> np.ndarray:
-        """
-        Resolve measurement noise covariance from config.
-
-        If measurement_noise_cov is missing and use_identity_default is True, use I.
-        Otherwise default to 0.01 * I.
-        """
-        if measurement_noise_cov_cfg is None:
-            base_value = 1.0 if use_identity_default else 0.01
-            return np.eye(state_dim) * base_value
-        cov = np.asarray(measurement_noise_cov_cfg, dtype=float)
-        if cov.ndim == 0:
-            return np.eye(state_dim) * float(cov)
-        if cov.shape != (state_dim, state_dim):
-            raise ValueError(
-                "measurement_noise_cov must be scalar or match the state dimension"
-            )
-        return cov
-
-    @staticmethod
-    def _compute_measurement_noise_intensity(measurement_noise_cov: np.ndarray) -> float:
-        """Return a scalar intensity summary for a measurement noise covariance."""
-        if measurement_noise_cov.ndim == 0:
-            return float(measurement_noise_cov)
-        if measurement_noise_cov.shape[0] == 0:
-            return 0.0
-        return float(np.trace(measurement_noise_cov) / float(measurement_noise_cov.shape[0]))
 
     @staticmethod
     def _merge_config_override(
@@ -1021,57 +951,17 @@ class NCS_Env(gym.Env):
         """Compute total ACK-observed goodput (kbps) over the sliding window."""
         return float(sum(self._compute_observed_goodput_kbps(i) for i in range(self.n_agents)))
 
-    def _resample_measurement_noise(self) -> None:
-        """Sample the per-agent measurement noise covariance for the next step."""
-        rng = self._measurement_rng if self._measurement_rng is not None else self.np_random
-        if rng is None:
-            rng = np.random.default_rng()
-        if self.measurement_noise_scale_range is None:
-            base_cov = self.measurement_noise_cov
-            intensity = self._compute_measurement_noise_intensity(base_cov)
-            self.current_measurement_noise_covs = [
-                base_cov.copy() for _ in range(self.n_agents)
-            ]
-            self.current_measurement_noise_intensities = [
-                intensity for _ in range(self.n_agents)
-            ]
-            return
-
-        min_scale, max_scale = self.measurement_noise_scale_range
-        scales = rng.uniform(low=min_scale, high=max_scale, size=self.n_agents)
-        covs: List[np.ndarray] = []
-        intensities: List[float] = []
-        for scale in scales:
-            cov = self.measurement_noise_cov * float(scale)
-            covs.append(cov)
-            intensities.append(self._compute_measurement_noise_intensity(cov))
-        self.current_measurement_noise_covs = covs
-        self.current_measurement_noise_intensities = intensities
-
-    def _sample_measurement_noise(self, measurement_noise_cov: np.ndarray) -> np.ndarray:
-        """Return measurement noise vector (zero when disabled)."""
-        if not self._has_measurement_noise:
-            return np.zeros(self.state_dim)
-        rng = self._measurement_rng if self._measurement_rng is not None else self.np_random
-        if rng is None:
-            rng = np.random.default_rng()
-        return rng.multivariate_normal(
-            np.zeros(self.state_dim), measurement_noise_cov
-        )
-
     def _reset_rng_streams(self) -> None:
         """Seed per-episode RNG streams from the global environment RNG."""
         if self.np_random is None:
             self._init_rng = None
             self._process_rng = None
-            self._measurement_rng = None
             self._network_rng = None
             return
-        seeds = self.np_random.integers(0, 2**32 - 1, size=4, dtype=np.uint32)
+        seeds = self.np_random.integers(0, 2**32 - 1, size=3, dtype=np.uint32)
         self._init_rng = np.random.default_rng(int(seeds[0]))
         self._process_rng = np.random.default_rng(int(seeds[1]))
-        self._measurement_rng = np.random.default_rng(int(seeds[2]))
-        self._network_rng = np.random.default_rng(int(seeds[3]))
+        self._network_rng = np.random.default_rng(int(seeds[2]))
 
     def _log_successful_comm(self, agent_idx: int, send_timestamp: int, ack_timestamp: int) -> None:
         """Record ACKed packet for throughput-based penalties."""
@@ -1324,8 +1214,6 @@ class NCS_Env(gym.Env):
             cursor += self.state_dim
             obs_values[cursor : cursor + self.n_throughput_windows] = throughputs
             cursor += self.n_throughput_windows
-            obs_values[cursor] = float(self.current_measurement_noise_intensities[i])
-            cursor += 1
             obs_values[cursor : cursor + prev_states_flat.size] = prev_states_flat
             cursor += prev_states_flat.size
             obs_values[cursor : cursor + self.history_window] = status_values
@@ -1355,19 +1243,11 @@ class NCS_Env(gym.Env):
             self.state_history[i].append(quantized_state)
 
     def _update_sensor_measurements(self) -> None:
-        measurements: List[np.ndarray] = []
-        for i in range(self.n_agents):
-            state = self.plants[i].get_state()
-            measurement_noise_cov = self.current_measurement_noise_covs[i]
-            if self._has_measurement_noise:
-                measurement = state + self._sample_measurement_noise(measurement_noise_cov)
-            else:
-                measurement = state
-            measurements.append(measurement)
-        self.last_sensor_measurements = measurements
+        self.last_sensor_measurements = [
+            self.plants[i].get_state() for i in range(self.n_agents)
+        ]
 
     def _get_global_state(self) -> np.ndarray:
-        noise_intensity = np.asarray(self.current_measurement_noise_intensities, dtype=np.float32)
         perceived_goodput = np.asarray(
             [self._compute_observed_goodput_kbps(i) for i in range(self.n_agents)],
             dtype=np.float32,
@@ -1393,7 +1273,6 @@ class NCS_Env(gym.Env):
                         self.last_sensor_measurements[i].astype(np.float32),
                         np.asarray(
                             [
-                                noise_intensity[i],
                                 perceived_goodput[i],
                                 true_goodput[i],
                                 backoff_stage[i],
