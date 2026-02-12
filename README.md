@@ -90,6 +90,10 @@ Learning-based baselines live under `algorithms/`:
 - QPLEX (multi-agent, PyTorch, Q-attention mixer): `python -m algorithms.marl_qplex --config configs/marl_mixed_plants.json --total-timesteps 200000`
   - QPLEX weights agent Qs via Q-attention (state + per-agent Q-values); tune with `--n-head`, `--attend-reg-coef`, `--nonlinear`, `--no-state-bias`, `--no-weighted-head`.
 - MAPPO (multi-agent, PyTorch): `python -m algorithms.marl_mappo --config configs/marl_mixed_plants.json --total-timesteps 200000`
+- Joint-action DQN (single centralized policy, Stable-Baselines3): `python -m algorithms.joint_dqn_sb3 --config configs/marl_mixed_plants.json --total-timesteps 200000`
+  - Concatenates all agent observations into one vector and predicts one joint action index.
+  - Decodes the joint action to per-agent actions and advances the original multi-agent environment.
+  - Uses team reward as the raw sum of per-agent rewards.
 
 All MARL Q-learning algorithms (IQL, VDN, QMIX, QPLEX) support these architectural enhancements:
 - `--double-q`: Enable Double DQN (use online network to select actions, target network to evaluate).
@@ -125,6 +129,7 @@ CLI flags let you change environment parameters. Use `--output-root` (defaults t
 - **Model Checkpoints:**
   - For OpenAI-ES: `best_model.npz` (flattened params of best individual) and `latest_model.npz`.
   - For MARL (IQL/VDN/QMIX/MAPPO): `best_model.pt` and `latest_model.pt`.
+  - For joint-action SB3 DQN: `best_model.zip`, `best_train_model.zip`, and `latest_model.zip`.
 - `training_rewards.csv`: A simple CSV table tracking performance. For OpenAI-ES it logs `[generation, mean_reward, max_reward, time]`.
 - **`config.json`**, which combines the full environment configuration with a `training_run` section containing the algorithm name, timestamp, source config path, and all hyperparameters from the run. 
 
