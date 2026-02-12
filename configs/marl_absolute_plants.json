@@ -11,12 +11,12 @@
     "process_noise_cov": [[0.0103, 0.0], [0.0, 0.0103]],
     "measurement_noise_scale_range": 0.0,
     "measurement_noise_cov": [[0.000, 0.0], [0.0, 0.000]],
-    "initial_state_cov": [[4.0, 0.0], [0.0, 4.0]],
+    "initial_state_cov": [[1.0, 0.0], [0.0, 1.0]],
     "initial_state_fixed": false,
     "initial_state_fixed_seed": 0
   },
   "lqr": {
-    "Q": [[1.0, 0.0], [0.0, 1.0]],
+    "Q": [[1.5, 0.0], [0.0, 1.5]],
     "R": [[0.01]]
   },
     "reward": {
@@ -24,7 +24,7 @@
       "comm_penalty_alpha": 0.0,
       "comm_throughput_floor": 0.0,
       "normalize": false,
-    "no_normalization_scale": 1,
+    "no_normalization_scale": 1.5,
     "reward_clip_max": 10,
     "reward_clip_min": -10,
     "evaluation": {
@@ -49,7 +49,7 @@
     "quantization_step": 0
   },
   "network": {
-    "data_rate_kbps": 75,
+    "data_rate_kbps": 100,
     "data_packet_size": 125,
     "perfect_communication": false,
     "app_ack_enabled": true,
