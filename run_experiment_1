@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiment batch 1: IQL dueling + double Q
-# iql_dueling_doubleq
+# MARL experiment batch 1: IQL double Q
+# iql_doubleq
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -10,11 +10,11 @@ cd "${PROJECT_ROOT}"
 SEED="${SEED:-0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 
-TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-2000000}"
+TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-3000000}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-$((TOTAL_TIMESTEPS * 60 / 100))}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/exp_1_iql_dueling_doubleq_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/exp_1_iql_doubleq_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -89,8 +89,8 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
-run_one "algorithms.marl_iql" "iql" "iql_dueling_doubleq" \
-  --dueling --double-q --batch-size 512 --learning-rate 2.5e-5 \
+run_one "algorithms.marl_iql" "iql" "iql_doubleq" \
+  --double-q --batch-size 512 --learning-rate 2.5e-5 \
   --epsilon-decay-steps "${EPS_DECAY_STEPS}"
 
 zip_path="${run_root}.zip"
