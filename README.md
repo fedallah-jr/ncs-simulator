@@ -11,8 +11,7 @@ The configuration file is divided into sections; each key controls a specific as
 - `process_noise_cov`: Covariance of Gaussian process noise injected into each plant.
 - `measurement_noise_cov`: Covariance of sensor noise added before packets are queued; the Kalman filter uses the same value.
 - `measurement_noise_scale_range`: Optional `[min, max]` range for a per-step scalar applied to `measurement_noise_cov` to produce `R_k`. When set and `measurement_noise_cov` is omitted, the base defaults to the identity matrix.
-- `initial_estimate_cov`: Initial covariance for each controller’s state estimate.
-- `initial_state_scale_min` / `initial_state_scale_max`: Magnitude bounds for sampling each plant’s initial state. For each state dimension we draw a magnitude uniformly from `[min, max]` and apply a random sign (`x_i ~ s * U(min_i, max_i)`, `s ∈ {-1,1}`). Provide scalars to share bounds across dimensions or lists/matrices (flattened) matching the state dimension. When omitted, defaults to `[0.9, 1.0]`. Legacy `initial_state_scale` is still accepted as a symmetric bound (equivalent to `min=max=scale`).
+- Initial states are sampled from `N(0, P_0)` where `P_0 = 4I` (hardcoded). The Kalman filter's initial covariance is set to the same `P_0`, ensuring `P = E[ee^T]` from the start.
 - `initial_state_fixed`: When `true`, sample one initial state per plant once and reuse it for every reset (training and evaluation).
 - `initial_state_fixed_seed`: Optional seed used to sample the fixed initial states. Set this to keep training/eval aligned even if they use different env seeds.
 

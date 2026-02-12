@@ -118,9 +118,6 @@ class NCS_Env(gym.Env):
         self.B = np.array(self.system_cfg.get("B"))
         self.state_dim = self.A.shape[0]
         self.control_dim = self.B.shape[1]
-        self.initial_state_scale_min, self.initial_state_scale_max = self._resolve_initial_state_scale_range(
-            self.system_cfg, self.state_dim
-        )
         self.initial_state_fixed = bool(self.system_cfg.get("initial_state_fixed", False))
         self.initial_state_fixed_seed = self.system_cfg.get("initial_state_fixed_seed", None)
         if self.initial_state_fixed and self.initial_state_fixed_seed is None:
@@ -203,8 +200,8 @@ class NCS_Env(gym.Env):
         self.current_measurement_noise_intensities = [
             base_intensity for _ in range(self.n_agents)
         ]
-        initial_estimate_cov = np.array(
-            self.system_cfg.get("initial_estimate_cov", np.eye(self.state_dim))
+        self.initial_estimate_cov = np.array(
+            self.system_cfg.get("initial_state_cov", 4.0 * np.eye(self.state_dim))
         )
 
         lqr_cfg = self.config.get("lqr", {})
@@ -298,7 +295,7 @@ class NCS_Env(gym.Env):
                     initial_estimate,
                     process_noise_cov=W,
                     measurement_noise_cov=self.measurement_noise_cov,
-                    initial_covariance=initial_estimate_cov,
+                    initial_covariance=self.initial_estimate_cov,
                 )
             )
 
@@ -796,18 +793,17 @@ class NCS_Env(gym.Env):
 
     def _sample_initial_state(self, rng: Optional[np.random.Generator] = None) -> np.ndarray:
         """
-        Sample an initial plant state with magnitude constrained to [scale_min, scale_max]
-        per dimension. Sign is chosen uniformly.
+        Sample an initial plant state from N(0, P_0) where P_0 is the
+        initial estimate covariance. This ensures the Kalman filter's P_0
+        matches E[e_0 e_0^T] from the start.
         """
         if rng is None:
             rng = self._init_rng if self._init_rng is not None else self.np_random
         if rng is None:
             rng = np.random.default_rng()
-        scale_min = self.initial_state_scale_min
-        scale_max = self.initial_state_scale_max
-        magnitudes = rng.uniform(low=scale_min, high=scale_max)
-        signs = rng.choice([-1.0, 1.0], size=self.state_dim)
-        return signs * magnitudes
+        return rng.multivariate_normal(
+            mean=np.zeros(self.state_dim), cov=self.initial_estimate_cov
+        )
 
     def _resolve_agent_system_matrices(self) -> List[Tuple[np.ndarray, np.ndarray]]:
         """
@@ -850,45 +846,6 @@ class NCS_Env(gym.Env):
             matrices.append((A_i, B_i))
 
         return matrices
-
-    @staticmethod
-    def _resolve_initial_state_scale_range(system_cfg: Dict[str, Any], state_dim: int):
-        """
-        Resolve initial state scale range from config.
-
-        Supports legacy `initial_state_scale` (scalar/list) as a symmetric bound and
-        new `initial_state_scale_min`/`initial_state_scale_max` fields. Defaults to
-        magnitudes in [0.9, 1.0] per dimension when unspecified.
-        """
-
-        def _to_array(cfg_value: Any, default: float) -> np.ndarray:
-            arr = np.asarray(cfg_value if cfg_value is not None else default, dtype=float).flatten()
-            if arr.size == 0:
-                arr = np.asarray(default, dtype=float).flatten()
-            if arr.size == 1:
-                return np.full(state_dim, float(arr.item()))
-            if arr.size != state_dim:
-                raise ValueError(
-                    "initial_state_scale entries must be scalar or match the state dimension"
-                )
-            return arr
-
-        legacy_scale = system_cfg.get("initial_state_scale", None)
-        min_cfg = system_cfg.get("initial_state_scale_min", None)
-        max_cfg = system_cfg.get("initial_state_scale_max", None)
-
-        if legacy_scale is not None:
-            # Backward compatibility: symmetric range [-scale, scale]
-            legacy = np.abs(_to_array(legacy_scale, 1.0))
-            return legacy, legacy
-
-        default_min = 0.9
-        default_max = 1.0
-        scale_min = np.abs(_to_array(min_cfg, default_min))
-        scale_max = np.abs(_to_array(max_cfg, default_max))
-        if np.any(scale_max < scale_min):
-            raise ValueError("initial_state_scale_max must be >= initial_state_scale_min for all dimensions")
-        return scale_min, scale_max
 
     @staticmethod
     def _resolve_measurement_noise_covariance(

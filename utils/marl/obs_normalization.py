@@ -103,9 +103,13 @@ class RunningObsNormalizer:
         self.count = int(count)
 
     def normalize(self, obs: np.ndarray, *, update: bool = True) -> np.ndarray:
-        if update:
-            self.update(obs)
         flat, shape = self._flatten_obs(obs)
+        if update and flat.size > 0:
+            self.update_from_moments(
+                batch_mean=flat.mean(axis=0),
+                batch_var=flat.var(axis=0),
+                batch_count=int(flat.shape[0]),
+            )
         std = np.sqrt(self.var) + float(self.eps)
         normalized = (flat - self.mean) / std
         if self.clip is not None and self.clip > 0:

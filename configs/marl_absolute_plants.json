@@ -11,9 +11,7 @@
     "process_noise_cov": [[0.0103, 0.0], [0.0, 0.0103]],
     "measurement_noise_scale_range": 0.0,
     "measurement_noise_cov": [[0.000, 0.0], [0.0, 0.000]],
-    "initial_estimate_cov": [[1.0, 0.0], [0.0, 1.0]],
-    "initial_state_scale_min": 0.2,
-    "initial_state_scale_max": 4,
+    "initial_state_cov": [[4.0, 0.0], [0.0, 4.0]],
     "initial_state_fixed": false,
     "initial_state_fixed_seed": 0
   },
