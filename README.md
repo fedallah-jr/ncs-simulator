@@ -94,6 +94,8 @@ Learning-based baselines live under `algorithms/`:
   - Concatenates all agent observations into one vector and predicts one joint action index.
   - Decodes the joint action to per-agent actions and advances the original multi-agent environment.
   - Uses team reward as the raw sum of per-agent rewards.
+  - Uses SB3-native observation normalization by default (`--no-normalize-obs` to disable).
+  - Uses vectorized deterministic evaluation (`--n-eval-envs`, default `4`) with the same evaluation reward overrides as other trainers.
 
 All MARL Q-learning algorithms (IQL, VDN, QMIX, QPLEX) support these architectural enhancements:
 - `--double-q`: Enable Double DQN (use online network to select actions, target network to evaluate).
@@ -129,7 +131,7 @@ CLI flags let you change environment parameters. Use `--output-root` (defaults t
 - **Model Checkpoints:**
   - For OpenAI-ES: `best_model.npz` (flattened params of best individual) and `latest_model.npz`.
   - For MARL (IQL/VDN/QMIX/MAPPO): `best_model.pt` and `latest_model.pt`.
-  - For joint-action SB3 DQN: `best_model.zip`, `best_train_model.zip`, and `latest_model.zip`.
+  - For joint-action SB3 DQN: `best_model.zip`, `best_train_model.zip`, and `latest_model.zip` (plus matching `*.vecnormalize.pkl` files when observation normalization is enabled).
 - `training_rewards.csv`: A simple CSV table tracking performance. For OpenAI-ES it logs `[generation, mean_reward, max_reward, time]`.
 - **`config.json`**, which combines the full environment configuration with a `training_run` section containing the algorithm name, timestamp, source config path, and all hyperparameters from the run. 
 
