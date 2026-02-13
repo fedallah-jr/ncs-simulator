@@ -269,6 +269,12 @@ def main() -> None:
     run_dir = prepare_run_directory("joint_dqn_sb3", args.config, args.output_root)
     rewards_csv_path = run_dir / "training_rewards.csv"
     eval_csv_path = run_dir / "evaluation_rewards.csv"
+    # Joint SB3 trainers use VecNormalize for reward scaling; disable env-side reward normalization.
+    train_reward_override: Dict[str, Any] = {"normalize": False}
+    eval_reward_override_merged: Dict[str, Any] = (
+        dict(eval_reward_override) if isinstance(eval_reward_override, dict) else {}
+    )
+    eval_reward_override_merged["normalize"] = False
 
     train_base_env = DummyVecEnv(
         [
@@ -277,6 +283,7 @@ def main() -> None:
                 episode_length=args.episode_length,
                 config_path_str=config_path_str,
                 seed=args.seed,
+                reward_override=train_reward_override,
                 minimal_info=True,
             )
         ]
@@ -288,7 +295,7 @@ def main() -> None:
                 episode_length=args.episode_length,
                 config_path_str=config_path_str,
                 seed=None if args.seed is None else int(args.seed) + env_idx,
-                reward_override=eval_reward_override,
+                reward_override=eval_reward_override_merged,
                 termination_override=eval_termination_override,
                 freeze_running_normalization=True,
                 minimal_info=True,
@@ -297,28 +304,22 @@ def main() -> None:
         ]
     )
 
-    train_env: VecEnv
-    eval_env: VecEnv
-    if args.normalize_obs:
-        train_env = VecNormalize(
-            train_base_env,
-            training=True,
-            norm_obs=True,
-            norm_reward=False,
-            clip_obs=float(args.obs_norm_clip),
-            epsilon=float(args.obs_norm_eps),
-        )
-        eval_env = VecNormalize(
-            eval_base_env,
-            training=False,
-            norm_obs=True,
-            norm_reward=False,
-            clip_obs=float(args.obs_norm_clip),
-            epsilon=float(args.obs_norm_eps),
-        )
-    else:
-        train_env = train_base_env
-        eval_env = eval_base_env
+    train_env: VecEnv = VecNormalize(
+        train_base_env,
+        training=True,
+        norm_obs=bool(args.normalize_obs),
+        norm_reward=True,
+        clip_obs=float(args.obs_norm_clip),
+        epsilon=float(args.obs_norm_eps),
+    )
+    eval_env: VecEnv = VecNormalize(
+        eval_base_env,
+        training=False,
+        norm_obs=bool(args.normalize_obs),
+        norm_reward=False,
+        clip_obs=float(args.obs_norm_clip),
+        epsilon=float(args.obs_norm_eps),
+    )
 
     train_joint_env = train_base_env.envs[0]
 
@@ -398,6 +399,9 @@ def main() -> None:
         "net_arch": list(args.net_arch),
         "device": args.device,
         "normalize_obs": bool(args.normalize_obs),
+        "sb3_norm_reward_train": True,
+        "sb3_norm_reward_eval": False,
+        "env_reward_normalization": False,
         "obs_norm_clip": float(args.obs_norm_clip),
         "obs_norm_eps": float(args.obs_norm_eps),
         "eval_freq": int(args.eval_freq),

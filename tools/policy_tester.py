@@ -295,6 +295,7 @@ class ModelRun:
     path: Path
     config_path: Path
     best_model: Optional[Path]
+    best_fitness_model: Optional[Path]
     best_train_model: Optional[Path]
     latest_model: Optional[Path]
 
@@ -794,9 +795,15 @@ def _discover_model_runs(models_root: Path) -> List[ModelRun]:
             return None
 
         best_model = _select_checkpoint("best_model")
+        best_fitness_model = _select_checkpoint("best_fitness_model")
         best_train_model = _select_checkpoint("best_train_model")
         latest_model = _select_checkpoint("latest_model")
-        if best_model is None and latest_model is None and best_train_model is None:
+        if (
+            best_model is None
+            and best_fitness_model is None
+            and latest_model is None
+            and best_train_model is None
+        ):
             continue
         runs.append(
             ModelRun(
@@ -804,6 +811,7 @@ def _discover_model_runs(models_root: Path) -> List[ModelRun]:
                 path=entry,
                 config_path=config_path,
                 best_model=best_model,
+                best_fitness_model=best_fitness_model,
                 best_train_model=best_train_model,
                 latest_model=latest_model,
             )
@@ -1144,7 +1152,7 @@ def _reward_normalization_disabled(config_path: Path) -> bool:
     reward_cfg = config.get("reward", {})
     if not isinstance(reward_cfg, dict):
         return False
-    normalize = reward_cfg.get("normalize", False)
+    normalize = reward_cfg.get("normalize", True)
     return not bool(normalize)
 
 
@@ -1861,6 +1869,7 @@ def main() -> int:
         specs: List[Tuple[str, PolicySpec]] = []
         for checkpoint_name, model_path in (
             ("best", run.best_model),
+            ("best_fitness", run.best_fitness_model),
             ("best_train", run.best_train_model),
             ("latest", run.latest_model),
         ):

@@ -29,7 +29,7 @@ from utils.reward_normalization import (
 class RewardDefinition:
     mode: str
     comm_penalty_alpha: float
-    normalize: bool = False  # Explicit flag; normalization is applied only when True.
+    normalize: bool = True  # Reward normalization is enabled unless explicitly disabled.
     normalizer: Optional[RunningRewardNormalizer] = None
     no_normalization_scale: float = 1.0
     reward_clip_min: Optional[float] = None
@@ -60,7 +60,7 @@ def _should_normalize_reward(definition: RewardDefinition) -> bool:
     """
     Return whether reward normalization is enabled.
 
-    Normalization is applied only when reward.normalize is explicitly set to True.
+    Normalization is enabled unless reward.normalize is explicitly set to False.
     """
     return bool(definition.normalize)
 
@@ -828,7 +828,7 @@ class NCS_Env(gym.Env):
         base_comm_penalty_alpha: float,
     ) -> RewardDefinition:
         base_mode = reward_cfg.get("state_error_reward", "absolute")
-        base_normalize = bool(reward_cfg.get("normalize", False))
+        base_normalize = bool(reward_cfg.get("normalize", True))
         no_normalization_scale = reward_cfg.get("no_normalization_scale", 1.0)
         if no_normalization_scale is None:
             no_normalization_scale = 1.0

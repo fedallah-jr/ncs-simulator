@@ -208,7 +208,7 @@ def setup_shared_reward_normalizer(
     Returns:
         Tuple of (shared normalizer config, manager). Manager is kept alive by caller.
     """
-    if not bool(reward_cfg.get("normalize", False)):
+    if not bool(reward_cfg.get("normalize", True)):
         return None, None
 
     from utils.marl.vector_env import SharedRewardNormalizerConfig

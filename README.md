@@ -29,7 +29,7 @@ The configuration file is divided into sections; each key controls a specific as
 - `comm_recent_window`: Short window (steps) used to count how many recent transmission attempts (`p>0`) an agent has initiated.
 - `comm_throughput_window`: Long window (steps) used to estimate per-agent throughput from ACKed packets and their delays.
 - `comm_penalty_alpha`: Scalar multiplier (`α`) used in the communication penalty `R_{a,\text{comm}} = -α * N_\text{recent}/T`, applied only when `action=1` and the network is not set to `perfect_communication`.
-- `normalize`: Explicit flag (default: `false`) for reward normalization in multi-agent runs. When `true`, running normalization scales the per-step reward.
+- `normalize`: Explicit flag (default: `true`) for reward normalization in multi-agent runs. When `true`, running normalization scales the per-step reward.
 - `no_normalization_scale`: Scalar divisor applied to rewards when normalization is disabled (default `1.0`).
 - `reward_clip_min` / `reward_clip_max`: Optional bounds applied to rewards after scaling/normalization.
 - `normalization_gamma`: Discount factor for running normalization returns (default `0.99`).
@@ -95,10 +95,12 @@ Learning-based baselines live under `algorithms/`:
   - Decodes the joint action to per-agent actions and advances the original multi-agent environment.
   - Uses team reward as the raw sum of per-agent rewards.
   - Uses SB3-native observation normalization by default (`--no-normalize-obs` to disable).
+  - Uses SB3 `VecNormalize` reward normalization for training (`norm_reward=True`) while forcing env reward normalization off in this trainer path.
   - Uses vectorized deterministic evaluation (`--n-eval-envs`, default `4`) with the same evaluation reward overrides as other trainers.
 - Joint-action PPO (single centralized policy, Stable-Baselines3): `python -m algorithms.joint_ppo_sb3 --config configs/marl_mixed_plants.json --total-timesteps 200000`
   - Same centralized observation/action interface and summed team reward as joint-action DQN.
   - Uses SB3-native observation normalization by default (`--no-normalize-obs` to disable).
+  - Uses SB3 `VecNormalize` reward normalization for training (`norm_reward=True`) while forcing env reward normalization off in this trainer path.
   - Uses vectorized deterministic evaluation (`--n-eval-envs`, default `4`) with the same evaluation reward overrides as other trainers.
 
 All MARL Q-learning algorithms (IQL, VDN, QMIX, QPLEX) support these architectural enhancements:
