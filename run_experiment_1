@@ -32,7 +32,7 @@ else
   exit 1
 fi
 
-config_path="configs/marl_absolute_plants.json"
+config_path="${CONFIG_PATH:-configs/marl_absolute_plants_reward_norm.json}"
 if [[ ! -f "${config_path}" ]]; then
   echo "Config not found: ${config_path}" >&2
   exit 1
