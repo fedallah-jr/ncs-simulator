@@ -20,6 +20,8 @@ from utils.marl import (
     DuelingMLPAgent,
     build_base_qlearning_parser,
     save_qlearning_checkpoint,
+    save_qlearning_training_state,
+    load_qlearning_training_state,
     build_qlearning_hyperparams,
     qlearning_collect_transition,
     patch_autoreset_final_obs,
@@ -54,7 +56,13 @@ def main() -> None:
         load_config_with_overrides(args.config, args.n_agents, not args.no_agent_id)
     )
 
-    run_dir = prepare_run_directory("vdn", args.config, args.output_root)
+    resuming = args.resume is not None
+    if resuming:
+        run_dir = Path(args.resume)
+        if not run_dir.is_dir():
+            raise FileNotFoundError(f"Resume directory does not exist: {run_dir}")
+    else:
+        run_dir = prepare_run_directory("vdn", args.config, args.output_root)
     rewards_csv_path = run_dir / "training_rewards.csv"
     eval_csv_path = run_dir / "evaluation_rewards.csv"
 
@@ -134,6 +142,20 @@ def main() -> None:
     global_step = 0
     episode = 0
     last_eval_step = 0
+    vector_step = 0
+
+    if resuming:
+        training_state_path = run_dir / "training_state.pt"
+        if not training_state_path.exists():
+            raise FileNotFoundError(f"No training_state.pt found in {run_dir}")
+        counters = load_qlearning_training_state(
+            training_state_path, learner, buffer, obs_normalizer, best_model_tracker,
+        )
+        global_step = counters["global_step"]
+        episode = counters["episode"]
+        last_eval_step = counters["last_eval_step"]
+        vector_step = counters["vector_step"]
+        print(f"Resumed from {run_dir} at step {global_step}")
 
     # Helper function to save model checkpoint
     def save_checkpoint(path: Path) -> None:
@@ -154,19 +176,25 @@ def main() -> None:
             obs_normalizer=obs_normalizer,
         )
 
-    # Open both CSV files for writing
-    with rewards_csv_path.open("w", newline="", encoding="utf-8") as train_f, \
-         eval_csv_path.open("w", newline="", encoding="utf-8") as eval_f:
+    def save_training_state() -> None:
+        save_qlearning_training_state(
+            run_dir / "training_state.pt", learner, buffer, obs_normalizer,
+            best_model_tracker, global_step, episode, last_eval_step, vector_step,
+        )
+
+    csv_mode = "a" if resuming else "w"
+    with rewards_csv_path.open(csv_mode, newline="", encoding="utf-8") as train_f, \
+         eval_csv_path.open(csv_mode, newline="", encoding="utf-8") as eval_f:
         train_writer = csv.writer(train_f)
-        train_writer.writerow(["episode", "reward_sum", "epsilon", "steps"])
         eval_writer = csv.writer(eval_f)
-        eval_writer.writerow(["step", "mean_reward", "std_reward"])
+        if not resuming:
+            train_writer.writerow(["episode", "reward_sum", "epsilon", "steps"])
+            eval_writer.writerow(["step", "mean_reward", "std_reward"])
 
         obs_dict, _info = env.reset(seed=env_seeds)
         obs_raw = stack_vector_obs(obs_dict, n_agents)
 
         episode_reward_sums = np.zeros((args.n_envs,), dtype=np.float32)
-        vector_step = 0
 
         while global_step < args.total_timesteps:
             step = qlearning_collect_transition(
@@ -224,9 +252,11 @@ def main() -> None:
                     algo_name="VDN",
                 )
                 last_eval_step = global_step
+                save_training_state()
 
     latest_path = run_dir / "latest_model.pt"
     save_checkpoint(latest_path)
+    save_training_state()
 
     hyperparams = build_qlearning_hyperparams(
         algorithm="vdn",

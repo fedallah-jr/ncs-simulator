@@ -44,10 +44,13 @@ class RewardDefinition:
             "kf_info_s",
             "kf_info_m",
             "kf_info_m_noise",
+            "kf_q",
+            "kf_q_noise",
         }:
             raise ValueError(
                 "state_error_reward must be 'absolute', 'estimation_error', "
-                "'lqr_cost', 'kf_info', 'kf_info_s', 'kf_info_m', or 'kf_info_m_noise'"
+                "'lqr_cost', 'kf_info', 'kf_info_s', 'kf_info_m', 'kf_info_m_noise', "
+                "'kf_q', or 'kf_q_noise'"
             )
         if float(self.no_normalization_scale) <= 0.0:
             raise ValueError("no_normalization_scale must be > 0")
@@ -362,6 +365,8 @@ class NCS_Env(gym.Env):
         self.last_kf_info_gains_m: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_kf_info_gains_s: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_kf_info_gains_m_noise: List[float] = [0.0 for _ in range(self.n_agents)]
+        self.last_kf_q_gains: List[float] = [0.0 for _ in range(self.n_agents)]
+        self.last_kf_q_noise_gains: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_termination_reasons: List[str] = []
         self.last_termination_agents: List[int] = []
         self.last_bad_termination = False
@@ -589,6 +594,10 @@ class NCS_Env(gym.Env):
             e = self.plants[i].get_state().reshape(-1) - self.controllers[i].x_hat
             M = self._get_kf_info_matrix(i)
             self.last_kf_info_gains_m_noise[i] = -float(e @ M @ e)
+            # Q-weighted estimation uncertainty and error
+            Q = self.state_cost_matrix
+            self.last_kf_q_gains[i] = -float(np.trace(Q @ covariance))
+            self.last_kf_q_noise_gains[i] = -float(e @ Q @ e)
 
         # Compute control and update plants
         lqr_costs = None
@@ -1040,6 +1049,10 @@ class NCS_Env(gym.Env):
             return self.last_kf_info_gains[agent_idx]
         if mode == "kf_info_m_noise":
             return self.last_kf_info_gains_m_noise[agent_idx]
+        if mode == "kf_q":
+            return self.last_kf_q_gains[agent_idx]
+        if mode == "kf_q_noise":
+            return self.last_kf_q_noise_gains[agent_idx]
         return 0.0
 
     def _compute_estimation_error(self, agent_idx: int, state: np.ndarray) -> float:
@@ -1161,7 +1174,7 @@ class NCS_Env(gym.Env):
             error_reward = -curr_error
         elif definition.mode == "lqr_cost":
             error_reward = -curr_error
-        elif definition.mode in {"kf_info", "kf_info_s", "kf_info_m", "kf_info_m_noise"}:
+        elif definition.mode in {"kf_info", "kf_info_s", "kf_info_m", "kf_info_m_noise", "kf_q", "kf_q_noise"}:
             error_reward = float(info_gain)
         else:
             raise ValueError(f"Unsupported reward mode: {definition.mode}")

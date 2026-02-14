@@ -185,6 +185,32 @@ class MARLReplayBuffer:
         self._ptr = end % self.capacity
         self._size = min(self._size + batch_size, self.capacity)
 
+    def state_dict(self) -> dict:
+        n = self._size
+        return {
+            "obs": self._obs[:n].copy(),
+            "actions": self._actions[:n].copy(),
+            "rewards": self._rewards[:n].copy(),
+            "next_obs": self._next_obs[:n].copy(),
+            "dones": self._dones[:n].copy(),
+            "states": self._states[:n].copy(),
+            "next_states": self._next_states[:n].copy(),
+            "_ptr": self._ptr,
+            "_size": self._size,
+        }
+
+    def load_state_dict(self, d: dict) -> None:
+        n = int(d["_size"])
+        self._obs[:n] = d["obs"][:n]
+        self._actions[:n] = d["actions"][:n]
+        self._rewards[:n] = d["rewards"][:n]
+        self._next_obs[:n] = d["next_obs"][:n]
+        self._dones[:n] = d["dones"][:n]
+        self._states[:n] = d["states"][:n]
+        self._next_states[:n] = d["next_states"][:n]
+        self._ptr = int(d["_ptr"])
+        self._size = n
+
     def sample(self, batch_size: int, *, obs_normalizer: Optional[RunningObsNormalizer] = None) -> MARLBatch:
         if self._size == 0:
             raise RuntimeError("Cannot sample from an empty buffer")

@@ -26,6 +26,8 @@ The configuration file is divided into sections; each key controls a specific as
   - `"kf_info_m"`: Reward equals `r_t = -tr(M_t P_t)` (control-weighted estimation uncertainty).
   - `"kf_info_m_noise"`: Reward equals `r_t = -e_t^T M_t e_t` where `e_t = x_t - x_hat_t` (control-weighted actual estimation error; uses realized error instead of covariance).
   - `"kf_info_s"`: Reward equals `r_t = -tr(S_t P_t)` (state-cost-weighted estimation uncertainty).
+  - `"kf_q"`: Reward equals `r_t = -tr(Q P_t)` (Q-weighted estimation uncertainty; expectation of `e_t^T Q e_t`).
+  - `"kf_q_noise"`: Reward equals `r_t = -e_t^T Q e_t` where `e_t = x_t - x_hat_t` (Q-weighted actual estimation error; realized counterpart of `kf_q`).
 - `comm_recent_window`: Short window (steps) used to count how many recent transmission attempts (`p>0`) an agent has initiated.
 - `comm_throughput_window`: Long window (steps) used to estimate per-agent throughput from ACKed packets and their delays.
 - `comm_penalty_alpha`: Scalar multiplier (`α`) used in the communication penalty `R_{a,\text{comm}} = -α * N_\text{recent}/T`, applied only when `action=1` and the network is not set to `perfect_communication`.

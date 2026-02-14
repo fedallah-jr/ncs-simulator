@@ -55,6 +55,88 @@ def save_mappo_checkpoint(
     )
     torch.save(ckpt, path)
 
+def save_qlearning_training_state(
+    path: Path, learner: Any, buffer: Any, obs_normalizer: Any,
+    best_model_tracker: Any, global_step: int, episode: int,
+    last_eval_step: int, vector_step: int,
+) -> None:
+    state: Dict[str, Any] = {
+        "learner": learner.state_dict(),
+        "buffer": buffer.state_dict(),
+        "obs_normalizer": obs_normalizer.state_dict() if obs_normalizer is not None else None,
+        "best_model_tracker": dict(best_model_tracker._best),
+        "global_step": global_step,
+        "episode": episode,
+        "last_eval_step": last_eval_step,
+        "vector_step": vector_step,
+    }
+    torch.save(state, path)
+
+def load_qlearning_training_state(
+    path: Path, learner: Any, buffer: Any, obs_normalizer: Any,
+    best_model_tracker: Any,
+) -> Dict[str, Any]:
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    learner.load_state_dict(state["learner"])
+    buffer.load_state_dict(state["buffer"])
+    if state["obs_normalizer"] is not None and obs_normalizer is not None:
+        from utils.marl.obs_normalization import RunningObsNormalizer
+        restored = RunningObsNormalizer.from_state_dict(state["obs_normalizer"])
+        obs_normalizer.mean = restored.mean
+        obs_normalizer.m2 = restored.m2
+        obs_normalizer.count = restored.count
+    best_model_tracker._best = dict(state["best_model_tracker"])
+    return {
+        "global_step": int(state["global_step"]),
+        "episode": int(state["episode"]),
+        "last_eval_step": int(state["last_eval_step"]),
+        "vector_step": int(state["vector_step"]),
+    }
+
+def save_mappo_training_state(
+    path: Path, actor: torch.nn.Module, critic: torch.nn.Module,
+    actor_optimizer: torch.optim.Optimizer, critic_optimizer: torch.optim.Optimizer,
+    value_normalizer: Any, obs_normalizer: Any, best_model_tracker: Any,
+    global_step: int, episode: int, last_eval_step: int,
+) -> None:
+    state: Dict[str, Any] = {
+        "actor": actor.state_dict(),
+        "critic": critic.state_dict(),
+        "actor_optimizer": actor_optimizer.state_dict(),
+        "critic_optimizer": critic_optimizer.state_dict(),
+        "value_normalizer": value_normalizer.state_dict(),
+        "obs_normalizer": obs_normalizer.state_dict() if obs_normalizer is not None else None,
+        "best_model_tracker": dict(best_model_tracker._best),
+        "global_step": global_step,
+        "episode": episode,
+        "last_eval_step": last_eval_step,
+    }
+    torch.save(state, path)
+
+def load_mappo_training_state(
+    path: Path, actor: torch.nn.Module, critic: torch.nn.Module,
+    actor_optimizer: torch.optim.Optimizer, critic_optimizer: torch.optim.Optimizer,
+    value_normalizer: Any, obs_normalizer: Any, best_model_tracker: Any,
+) -> Dict[str, Any]:
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    actor.load_state_dict(state["actor"])
+    critic.load_state_dict(state["critic"])
+    actor_optimizer.load_state_dict(state["actor_optimizer"])
+    critic_optimizer.load_state_dict(state["critic_optimizer"])
+    value_normalizer.load_state_dict(state["value_normalizer"])
+    if state["obs_normalizer"] is not None and obs_normalizer is not None:
+        from utils.marl.obs_normalization import RunningObsNormalizer
+        restored = RunningObsNormalizer.from_state_dict(state["obs_normalizer"])
+        obs_normalizer.mean = restored.mean
+        obs_normalizer.m2 = restored.m2
+        obs_normalizer.count = restored.count
+    best_model_tracker._best = dict(state["best_model_tracker"])
+    return {
+        "global_step": int(state["global_step"]),
+        "episode": int(state["episode"]),
+        "last_eval_step": int(state["last_eval_step"]),
+    }
+
 def build_qlearning_hyperparams(
     algorithm: str, args: Any, n_agents: int, use_agent_id: bool,
     device: torch.device, mixer_params: Optional[Dict[str, Any]] = None,

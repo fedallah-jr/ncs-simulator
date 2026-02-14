@@ -132,6 +132,20 @@ class IQLLearner:
         if self.train_steps % self.target_update_interval == 0:
             _hard_update(self.target_agent, self.agent)
 
+    def state_dict(self) -> dict:
+        return {
+            "agent": self.agent.state_dict(),
+            "target_agent": self.target_agent.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "train_steps": self.train_steps,
+        }
+
+    def load_state_dict(self, d: dict) -> None:
+        self.agent.load_state_dict(d["agent"])
+        self.target_agent.load_state_dict(d["target_agent"])
+        self.optimizer.load_state_dict(d["optimizer"])
+        self.train_steps = int(d["train_steps"])
+
 
 class VDNLearner:
     def __init__(
@@ -208,6 +222,24 @@ class VDNLearner:
 
         if self.train_steps % self.target_update_interval == 0:
             _hard_update(self.target_agent, self.agent)
+
+    def state_dict(self) -> dict:
+        return {
+            "agent": self.agent.state_dict(),
+            "target_agent": self.target_agent.state_dict(),
+            "mixer": self.mixer.state_dict(),
+            "target_mixer": self.target_mixer.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "train_steps": self.train_steps,
+        }
+
+    def load_state_dict(self, d: dict) -> None:
+        self.agent.load_state_dict(d["agent"])
+        self.target_agent.load_state_dict(d["target_agent"])
+        self.mixer.load_state_dict(d["mixer"])
+        self.target_mixer.load_state_dict(d["target_mixer"])
+        self.optimizer.load_state_dict(d["optimizer"])
+        self.train_steps = int(d["train_steps"])
 
 
 class QMIXLearner:
@@ -290,6 +322,24 @@ class QMIXLearner:
         if self.train_steps % self.target_update_interval == 0:
             _hard_update(self.target_agent, self.agent)
             _hard_update(self.target_mixer, self.mixer)
+
+    def state_dict(self) -> dict:
+        return {
+            "agent": self.agent.state_dict(),
+            "target_agent": self.target_agent.state_dict(),
+            "mixer": self.mixer.state_dict(),
+            "target_mixer": self.target_mixer.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "train_steps": self.train_steps,
+        }
+
+    def load_state_dict(self, d: dict) -> None:
+        self.agent.load_state_dict(d["agent"])
+        self.target_agent.load_state_dict(d["target_agent"])
+        self.mixer.load_state_dict(d["mixer"])
+        self.target_mixer.load_state_dict(d["target_mixer"])
+        self.optimizer.load_state_dict(d["optimizer"])
+        self.train_steps = int(d["train_steps"])
 
 
 class QPLEXLearner:
@@ -388,3 +438,21 @@ class QPLEXLearner:
         if self.train_steps % self.target_update_interval == 0:
             _hard_update(self.target_agent, self.agent)
             _hard_update(self.target_mixer, self.mixer)
+
+    def state_dict(self) -> dict:
+        return {
+            "agent": self.agent.state_dict(),
+            "target_agent": self.target_agent.state_dict(),
+            "mixer": self.mixer.state_dict(),
+            "target_mixer": self.target_mixer.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "train_steps": self.train_steps,
+        }
+
+    def load_state_dict(self, d: dict) -> None:
+        self.agent.load_state_dict(d["agent"])
+        self.target_agent.load_state_dict(d["target_agent"])
+        self.mixer.load_state_dict(d["mixer"])
+        self.target_mixer.load_state_dict(d["target_mixer"])
+        self.optimizer.load_state_dict(d["optimizer"])
+        self.train_steps = int(d["train_steps"])
