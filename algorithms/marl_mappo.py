@@ -479,6 +479,10 @@ def main() -> None:
             if args.popart:
                 popart_layer.update_and_correct(returns_t)
                 normalized_returns_t = popart_layer.normalize_targets(returns_t)
+                # Re-normalize old values to current PopArt scale for correct PPO clipping
+                values_old = popart_layer.normalize_targets(
+                    torch.as_tensor(values_raw, device=device, dtype=torch.float32)
+                )
             else:
                 value_normalizer.update(returns_t)
                 normalized_returns_t = value_normalizer.normalize(returns_t)
