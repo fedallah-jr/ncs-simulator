@@ -31,6 +31,7 @@ from .networks import (
     append_agent_id,
 )
 from .obs_normalization import RunningObsNormalizer
+from .popart import PopArtLayer
 from .value_norm import ValueNorm
 from .args_builder import (
     build_base_qlearning_parser,
@@ -75,6 +76,7 @@ __all__ = [
     "QPLEXMixer",
     "RunningObsNormalizer",
     "patch_autoreset_final_obs",
+    "PopArtLayer",
     "qlearning_collect_transition",
     "run_evaluation",
     "run_evaluation_vectorized",

@@ -92,6 +92,7 @@ Learning-based baselines live under `algorithms/`:
 - QPLEX (multi-agent, PyTorch, Q-attention mixer): `python -m algorithms.marl_qplex --config configs/marl_mixed_plants.json --total-timesteps 200000`
   - QPLEX weights agent Qs via Q-attention (state + per-agent Q-values); tune with `--n-head`, `--attend-reg-coef`, `--nonlinear`, `--no-state-bias`, `--no-weighted-head`.
 - MAPPO (multi-agent, PyTorch): `python -m algorithms.marl_mappo --config configs/marl_mixed_plants.json --total-timesteps 200000`
+  - `--popart`: Use PopArt value normalization (output-preserving weight correction) instead of the default EMA-based ValueNorm.
 
 All MARL Q-learning algorithms (IQL, VDN, QMIX, QPLEX) support these architectural enhancements:
 - `--double-q`: Enable Double DQN (use online network to select actions, target network to evaluate).

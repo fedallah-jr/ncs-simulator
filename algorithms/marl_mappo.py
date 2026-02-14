@@ -248,11 +248,18 @@ def main() -> None:
         hidden_dims=tuple(args.hidden_dims),
         activation=args.activation,
         layer_norm=args.layer_norm,
+        use_popart=args.popart,
+        popart_beta=float(args.value_norm_beta),
     ).to(device)
 
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=float(args.learning_rate))
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=float(args.learning_rate))
-    value_normalizer = ValueNorm((value_dim,), device=device, beta=float(args.value_norm_beta))
+    if args.popart:
+        popart_layer = critic.popart_layer()
+        value_normalizer = None
+    else:
+        popart_layer = None
+        value_normalizer = ValueNorm((value_dim,), device=device, beta=float(args.value_norm_beta))
     base_lr = float(args.learning_rate)
 
     best_model_tracker = BestModelTracker()
@@ -290,6 +297,7 @@ def main() -> None:
             actor=actor,
             critic=critic,
             obs_normalizer=obs_normalizer,
+            popart=args.popart,
         )
 
     def save_training_state() -> None:
@@ -443,8 +451,12 @@ def main() -> None:
                 next_values_t = critic(
                     next_global_obs_t.reshape(-1, critic_input_dim)
                 ).reshape(rollout_len, args.n_envs, value_dim)
-            values_raw = value_normalizer.denormalize(values_t).cpu().numpy()
-            next_values_raw = value_normalizer.denormalize(next_values_t).cpu().numpy()
+            if args.popart:
+                values_raw = popart_layer.denormalize(values_t).cpu().numpy()
+                next_values_raw = popart_layer.denormalize(next_values_t).cpu().numpy()
+            else:
+                values_raw = value_normalizer.denormalize(values_t).cpu().numpy()
+                next_values_raw = value_normalizer.denormalize(next_values_t).cpu().numpy()
 
             advantages, returns = _compute_gae(
                 rewards=rewards_batch,
@@ -464,8 +476,12 @@ def main() -> None:
             returns_t = torch.as_tensor(returns, device=device, dtype=torch.float32)
             values_old = torch.as_tensor(values_batch, device=device, dtype=torch.float32)
 
-            value_normalizer.update(returns_t)
-            normalized_returns_t = value_normalizer.normalize(returns_t)
+            if args.popart:
+                popart_layer.update_and_correct(returns_t)
+                normalized_returns_t = popart_layer.normalize_targets(returns_t)
+            else:
+                value_normalizer.update(returns_t)
+                normalized_returns_t = value_normalizer.normalize(returns_t)
 
             if args.lr_decay:
                 progress = min(float(global_step) / float(args.total_timesteps), 1.0)

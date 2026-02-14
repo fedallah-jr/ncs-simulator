@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiment batch 4: MAPPO team reward
-# mappo_team_reward
+# MARL experiment batch 4: MAPPO team reward with PopArt
+# mappo_team_reward_popart
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -10,10 +10,10 @@ cd "${PROJECT_ROOT}"
 SEED="${SEED:-0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 
-TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-5000000}"
+TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-10000000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/exp_4_mappo_team_reward_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/exp_4_mappo_team_reward_popart_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -31,7 +31,7 @@ else
   exit 1
 fi
 
-config_path="${CONFIG_PATH:-configs/marl_absolute_plants_reward_norm.json}"
+config_path="${CONFIG_PATH:-configs/marl_absolute_plants.json}"
 if [[ ! -f "${config_path}" ]]; then
   echo "Config not found: ${config_path}" >&2
   exit 1
@@ -88,8 +88,8 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
-run_one "algorithms.marl_mappo" "mappo" "mappo_team_reward" \
-  --team-reward
+run_one "algorithms.marl_mappo" "mappo" "mappo_team_reward_popart" \
+  --team-reward --popart
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then

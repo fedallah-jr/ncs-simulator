@@ -39,6 +39,7 @@ def save_mappo_checkpoint(
     agent_layer_norm: bool, critic_hidden_dims: List[int], critic_activation: str,
     critic_layer_norm: bool, actor: torch.nn.Module, critic: torch.nn.Module,
     obs_normalizer: Optional["RunningObsNormalizer"],
+    popart: bool = False,
 ) -> None:
     ckpt: Dict[str, Any] = {
         "algorithm": "mappo", "n_agents": n_agents, "obs_dim": obs_dim,
@@ -48,7 +49,7 @@ def save_mappo_checkpoint(
         "agent_layer_norm": agent_layer_norm, "dueling": False, "stream_hidden_dim": None,
         "agent_state_dict": actor.state_dict(), "critic_state_dict": critic.state_dict(),
         "critic_hidden_dims": critic_hidden_dims, "critic_activation": critic_activation,
-        "critic_layer_norm": critic_layer_norm,
+        "critic_layer_norm": critic_layer_norm, "popart": popart,
     }
     ckpt["obs_normalization"] = (
         obs_normalizer.state_dict() if obs_normalizer is not None else {"enabled": False}
@@ -104,7 +105,7 @@ def save_mappo_training_state(
         "critic": critic.state_dict(),
         "actor_optimizer": actor_optimizer.state_dict(),
         "critic_optimizer": critic_optimizer.state_dict(),
-        "value_normalizer": value_normalizer.state_dict(),
+        "value_normalizer": value_normalizer.state_dict() if value_normalizer is not None else None,
         "obs_normalizer": obs_normalizer.state_dict() if obs_normalizer is not None else None,
         "best_model_tracker": dict(best_model_tracker._best),
         "global_step": global_step,
@@ -123,7 +124,8 @@ def load_mappo_training_state(
     critic.load_state_dict(state["critic"])
     actor_optimizer.load_state_dict(state["actor_optimizer"])
     critic_optimizer.load_state_dict(state["critic_optimizer"])
-    value_normalizer.load_state_dict(state["value_normalizer"])
+    if value_normalizer is not None and state["value_normalizer"] is not None:
+        value_normalizer.load_state_dict(state["value_normalizer"])
     if state["obs_normalizer"] is not None and obs_normalizer is not None:
         from utils.marl.obs_normalization import RunningObsNormalizer
         restored = RunningObsNormalizer.from_state_dict(state["obs_normalizer"])
@@ -176,7 +178,7 @@ def build_mappo_hyperparams(
         "lr_decay": args.lr_decay, "gamma": args.gamma,
         "gae_lambda": args.gae_lambda, "clip_range": args.clip_range,
         "ent_coef": args.ent_coef, "vf_coef": args.vf_coef, "huber_delta": args.huber_delta,
-        "value_norm": True, "value_norm_beta": args.value_norm_beta,
+        "value_norm": True, "value_norm_beta": args.value_norm_beta, "popart": args.popart,
         "team_reward": args.team_reward, "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip, "obs_norm_eps": args.obs_norm_eps,
         "max_grad_norm": args.max_grad_norm, "hidden_dims": list(args.hidden_dims),

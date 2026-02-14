@@ -88,6 +88,8 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--vf-coef", type=float, default=0.5)
     parser.add_argument("--huber-delta", type=float, default=10.0)
     parser.add_argument("--value-norm-beta", type=float, default=0.999)
+    parser.add_argument("--popart", action="store_true",
+                        help="Use PopArt value normalization (output-preserving weight correction)")
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[64, 64])
     parser.add_argument("--activation", type=str, default="tanh", choices=["relu", "tanh", "elu"])
