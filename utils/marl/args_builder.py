@@ -2,6 +2,19 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+
+def _add_set_override_argument(parser: argparse.ArgumentParser) -> None:
+    """Add the ``--set KEY=VALUE`` argument to an argparse parser."""
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=None,
+        dest="set_overrides",
+        metavar="KEY=VALUE",
+        help="Override config values using dot notation (e.g., --set reward.state_error_reward=kf_info_m_noise). Repeatable.",
+    )
+
+
 def build_base_qlearning_parser(description: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--config", type=Path, default=None)
@@ -42,6 +55,7 @@ def build_base_qlearning_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--eval-freq", type=int, default=5000)
     parser.add_argument("--n-eval-episodes", type=int, default=30)
     parser.add_argument("--n-eval-envs", type=int, default=4)
+    _add_set_override_argument(parser)
     parser.set_defaults(normalize_obs=True)
     return parser
 
@@ -106,5 +120,6 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--eval-freq", type=int, default=5000)
     parser.add_argument("--n-eval-episodes", type=int, default=30)
     parser.add_argument("--n-eval-envs", type=int, default=4)
+    _add_set_override_argument(parser)
     parser.set_defaults(normalize_obs=True, lr_decay=True)
     return parser

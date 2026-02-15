@@ -49,6 +49,7 @@ def load_config_with_overrides(
     config_path: Optional[Path],
     default_n_agents: int,
     use_agent_id_flag: bool,
+    set_overrides: Optional[list] = None,
 ) -> Tuple[Dict[str, Any], str, int, bool, Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
     Load config and extract evaluation overrides.
@@ -57,6 +58,7 @@ def load_config_with_overrides(
         config_path: Path to config JSON (or None for default)
         default_n_agents: Default number of agents if not in config
         use_agent_id_flag: Value of --no-agent-id flag (True if NOT set)
+        set_overrides: List of "key=value" strings from ``--set`` CLI args
 
     Returns:
         Tuple of:
@@ -71,6 +73,12 @@ def load_config_with_overrides(
 
     config_path_str = str(config_path) if config_path is not None else None
     cfg = load_config(config_path_str)
+
+    if set_overrides:
+        from tools._common import parse_set_overrides, deep_merge
+        overrides = parse_set_overrides(set_overrides)
+        if overrides:
+            deep_merge(cfg, overrides)
     system_cfg = cfg.get("system", {})
     n_agents = int(system_cfg.get("n_agents", default_n_agents))
     use_agent_id = use_agent_id_flag

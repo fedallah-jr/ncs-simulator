@@ -55,7 +55,7 @@ def main() -> None:
     device, rng = setup_device_and_rng(args.device, args.seed)
 
     cfg, config_path_str, n_agents, use_agent_id, eval_reward_override, eval_termination_override = (
-        load_config_with_overrides(args.config, args.n_agents, not args.no_agent_id)
+        load_config_with_overrides(args.config, args.n_agents, not args.no_agent_id, args.set_overrides)
     )
 
     resuming = args.resume is not None
