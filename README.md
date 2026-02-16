@@ -71,6 +71,7 @@ Observations are laid out as `[current_state, current_throughput(s), prev_states
 - `app_ack_packet_size`: Size of app ACK packets in bytes (default 30).
 - `app_ack_max_retries`: Maximum retransmission attempts for app ACKs (default 3).
 - `tx_buffer_bytes`: Optional per-sensor TX buffer capacity in bytes for queued data packets (beyond the in-flight packet). Set to `0` to disable buffering (current behavior). When set, packets are queued FIFO until the buffer is full.
+- `random_drop_rate`: Per-agent probability of randomly dropping a data packet before it enters the CSMA/CA network. Can be a single float (applied to all agents) or a list of floats (one per agent, e.g., `[0.1, 0.0, 0.2]`). Dropped packets never enter the network and the agent observes a pending status (sent but no ACK received). Only applies in network mode (`perfect_communication=false`). Default `0` (no random drops). Uses an independent RNG stream so existing seeds are unaffected when the drop rate is zero.
 
 Note: `tx_buffer_bytes` applies only to data packets; MAC/app ACKs are still sent immediately and are not buffered.
 

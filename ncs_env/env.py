@@ -115,6 +115,20 @@ class NCS_Env(gym.Env):
         self._init_rng: Optional[np.random.Generator] = None
         self._process_rng: Optional[np.random.Generator] = None
         self._network_rng: Optional[np.random.Generator] = None
+        self._drop_rng: Optional[np.random.Generator] = None
+
+        net_cfg = self.config.get("network", {})
+        drop_cfg = net_cfg.get("random_drop_rate", 0.0)
+        if isinstance(drop_cfg, (int, float)):
+            self.random_drop_rates: List[float] = [float(drop_cfg)] * n_agents
+        else:
+            self.random_drop_rates = [float(x) for x in drop_cfg]
+            if len(self.random_drop_rates) != n_agents:
+                raise ValueError(
+                    f"network.random_drop_rate list length ({len(self.random_drop_rates)}) "
+                    f"must match n_agents ({n_agents})"
+                )
+        self._any_random_drops: bool = any(r > 0.0 for r in self.random_drop_rates)
 
         self.A = np.array(self.system_cfg.get("A"))
         self.B = np.array(self.system_cfg.get("B"))
@@ -322,6 +336,7 @@ class NCS_Env(gym.Env):
         self.net_tx_attempts = np.zeros(self.n_agents, dtype=np.int64)
         self.net_tx_acks = np.zeros(self.n_agents, dtype=np.int64)
         self.net_tx_drops = np.zeros(self.n_agents, dtype=np.int64)
+        self.net_random_drops = np.zeros(self.n_agents, dtype=np.int64)
         self.net_tx_rewrites = np.zeros(self.n_agents, dtype=np.int64)
         self.observed_goodput_records: List[deque] = [deque() for _ in range(self.n_agents)]
         self.observed_goodput_seen: List[set] = [set() for _ in range(self.n_agents)]
@@ -469,6 +484,28 @@ class NCS_Env(gym.Env):
                     # Use state_index as the measurement timestamp
                     # This clearly indicates measurement is of x[state_index]
                     measurement_timestamp = state_index
+                    # Random drop: packet vanishes before entering the network
+                    if (
+                        self._any_random_drops
+                        and self.random_drop_rates[i] > 0.0
+                        and self._drop_rng.random() < self.random_drop_rates[i]
+                    ):
+                        self.net_tx_drops[i] += 1
+                        self.net_random_drops[i] += 1
+                        entry = self._record_decision(i, status=2)
+                        entry["send_timestamp"] = measurement_timestamp
+                        self.pending_transmissions[i][measurement_timestamp] = entry
+                        if self.track_eval_stats:
+                            self.last_dropped_data_packets.append(
+                                {
+                                    "sensor_id": int(i),
+                                    "measurement_timestamp": int(measurement_timestamp),
+                                    "drop_timestep": int(self.timestep),
+                                    "age_steps": 0,
+                                    "reason": "random_drop",
+                                }
+                            )
+                        continue
                     accepted, _ = self.network.queue_data_packet(
                         i,
                         measurement,
@@ -966,11 +1003,14 @@ class NCS_Env(gym.Env):
             self._init_rng = None
             self._process_rng = None
             self._network_rng = None
+            self._drop_rng = None
             return
         seeds = self.np_random.integers(0, 2**32 - 1, size=3, dtype=np.uint32)
         self._init_rng = np.random.default_rng(int(seeds[0]))
         self._process_rng = np.random.default_rng(int(seeds[1]))
         self._network_rng = np.random.default_rng(int(seeds[2]))
+        drop_seed = int(self.np_random.integers(0, 2**32 - 1))
+        self._drop_rng = np.random.default_rng(drop_seed)
 
     def _log_successful_comm(self, agent_idx: int, send_timestamp: int, ack_timestamp: int) -> None:
         """Record ACKed packet for throughput-based penalties."""
@@ -1369,6 +1409,7 @@ class NCS_Env(gym.Env):
                 "tx_attempts": [int(x) for x in self.net_tx_attempts],
                 "tx_acked": [int(x) for x in self.net_tx_acks],
                 "tx_dropped": [int(x) for x in self.net_tx_drops],
+                "tx_random_drops": [int(x) for x in self.net_random_drops],
                 "tx_rewrites": [int(x) for x in self.net_tx_rewrites],
                 "tx_collisions": collisions,
                 "data_delivered": data_delivered,
