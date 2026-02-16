@@ -21,7 +21,7 @@
       "state_error_reward": "kf_info_m",
       "comm_penalty_alpha": 0.0,
       "comm_throughput_floor": 0.0,
-      "normalize": false,
+      "normalize": true,
     "no_normalization_scale": 1.5,
     "reward_clip_max": 10,
     "reward_clip_min": -10,
@@ -52,6 +52,7 @@
     "perfect_communication": false,
     "app_ack_enabled": true,
     "app_ack_packet_size": 30,
-    "tx_buffer_bytes": 100
+    "tx_buffer_bytes": 100,
+    "random_drop_rate": [0.03, 0.07, 0.14]
   }
 }
