@@ -147,6 +147,7 @@ class NCS_Env(gym.Env):
         self.throughput_windows = [tp_window] if isinstance(tp_window, int) else list(tp_window)
         self.n_throughput_windows = len(self.throughput_windows)
         self.quantization_step = observation_cfg.get("quantization_step", 0.05)
+        self.include_uncertainty = bool(observation_cfg.get("include_uncertainty", False))
 
         # Create a local RNG instance for this environment
         self.np_random, _ = gym.utils.seeding.np_random(seed)
@@ -158,6 +159,7 @@ class NCS_Env(gym.Env):
 
         obs_dim = (
             self.state_dim  # current state
+            + (self.state_dim if self.include_uncertainty else 0)  # diag(P) uncertainty
             + self.n_throughput_windows  # current throughputs (one per window)
             + self.state_history_window * self.state_dim  # previous states
             + self.history_window  # previous statuses
@@ -287,6 +289,19 @@ class NCS_Env(gym.Env):
                 )
             )
 
+        if self.include_uncertainty:
+            self._agent_P_init_tables: List[List[np.ndarray]] = []
+            self._agent_P_open_tables: List[List[np.ndarray]] = []
+            for i in range(self.n_agents):
+                A_i = agent_matrices[i][0]
+                P_init = [self.initial_estimate_cov.copy()]
+                P_open = [np.zeros_like(W)]
+                for _ in range(self.episode_length + 1):
+                    P_init.append(A_i @ P_init[-1] @ A_i.T + W)
+                    P_open.append(A_i @ P_open[-1] @ A_i.T + W)
+                self._agent_P_init_tables.append(P_init)
+                self._agent_P_open_tables.append(P_open)
+
         network_cfg = self.config.get("network", {})
         self.perfect_communication = bool(network_cfg.get("perfect_communication", False))
         self.network = NetworkModel(
@@ -386,6 +401,8 @@ class NCS_Env(gym.Env):
         self.last_termination_agents: List[int] = []
         self.last_bad_termination = False
         self.last_dropped_data_packets: List[Dict[str, Any]] = []
+        if self.include_uncertainty:
+            self._agent_last_confirmed_step: List[int] = [-1] * self.n_agents
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None):
         """Reset environment to initial state."""
@@ -463,6 +480,8 @@ class NCS_Env(gym.Env):
                     measurement = self.last_sensor_measurements[i]
                     self.controllers[i].update(measurement)
                     self.last_measurements[i] = measurement
+                    if self.include_uncertainty:
+                        self._agent_last_confirmed_step[i] = state_index
                     self._record_decision(i, status=1)
                     # Use state_index for consistency (though _log_successful_comm
                     # returns early for perfect_communication anyway)
@@ -554,6 +573,9 @@ class NCS_Env(gym.Env):
                     if 0 <= sensor_id < self.n_agents:
                         self.net_tx_acks[sensor_id] += 1
                         self._record_observed_goodput(sensor_id, measurement_timestamp)
+                        if self.include_uncertainty:
+                            if measurement_timestamp > self._agent_last_confirmed_step[sensor_id]:
+                                self._agent_last_confirmed_step[sensor_id] = measurement_timestamp
                     entry = self.pending_transmissions[sensor_id].pop(measurement_timestamp, None)
                     if entry is not None:
                         entry["status"] = 1
@@ -1265,6 +1287,16 @@ class NCS_Env(gym.Env):
             cursor = 0
             obs_values[cursor : cursor + self.state_dim] = quantized_state
             cursor += self.state_dim
+            if self.include_uncertainty:
+                last_conf = self._agent_last_confirmed_step[i]
+                if last_conf < 0:
+                    k = self.timestep
+                    P_agent = self._agent_P_init_tables[i][min(k, self.episode_length)]
+                else:
+                    k = self.timestep - 1 - last_conf
+                    P_agent = self._agent_P_open_tables[i][min(k, self.episode_length)]
+                obs_values[cursor : cursor + self.state_dim] = np.diag(P_agent).astype(np.float32)
+                cursor += self.state_dim
             obs_values[cursor : cursor + self.n_throughput_windows] = throughputs
             cursor += self.n_throughput_windows
             obs_values[cursor : cursor + prev_states_flat.size] = prev_states_flat
@@ -1318,12 +1350,14 @@ class NCS_Env(gym.Env):
             backoff_remaining[i] = float(entity.backoff_counter)
         per_agent_features: List[np.ndarray] = []
         for i in range(self.n_agents):
+            e = self.plants[i].get_state().reshape(-1) - self.controllers[i].x_hat
             per_agent_features.append(
                 np.concatenate(
                     [
                         self.plants[i].get_state().astype(np.float32),
                         self.controllers[i].x_hat.astype(np.float32),
-                        self.last_sensor_measurements[i].astype(np.float32),
+                        np.diag(self.controllers[i].P).astype(np.float32),
+                        (e * e).astype(np.float32),
                         np.asarray(
                             [
                                 perceived_goodput[i],
