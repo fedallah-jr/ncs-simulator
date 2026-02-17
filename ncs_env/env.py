@@ -128,7 +128,6 @@ class NCS_Env(gym.Env):
                     f"network.random_drop_rate list length ({len(self.random_drop_rates)}) "
                     f"must match n_agents ({n_agents})"
                 )
-        self._any_random_drops: bool = any(r > 0.0 for r in self.random_drop_rates)
 
         self.A = np.array(self.system_cfg.get("A"))
         self.B = np.array(self.system_cfg.get("B"))
@@ -325,6 +324,8 @@ class NCS_Env(gym.Env):
             app_ack_packet_size=network_cfg.get("app_ack_packet_size", 30),
             app_ack_max_retries=network_cfg.get("app_ack_max_retries", 3),
             rng=self._network_rng if self._network_rng is not None else self.np_random,
+            random_drop_rates=self.random_drop_rates,
+            drop_rng=self._drop_rng if self._drop_rng is not None else self.np_random,
         )
 
     def _initialize_tracking_structures(self):
@@ -426,6 +427,7 @@ class NCS_Env(gym.Env):
             controller.reset(np.zeros(self.state_dim))
 
         self.network.rng = self._network_rng if self._network_rng is not None else self.np_random
+        self.network.drop_rng = self._drop_rng if self._drop_rng is not None else self.np_random
         self.network.reset()
         self._initialize_tracking_structures()
         self._update_sensor_measurements()
@@ -503,28 +505,6 @@ class NCS_Env(gym.Env):
                     # Use state_index as the measurement timestamp
                     # This clearly indicates measurement is of x[state_index]
                     measurement_timestamp = state_index
-                    # Random drop: packet vanishes before entering the network
-                    if (
-                        self._any_random_drops
-                        and self.random_drop_rates[i] > 0.0
-                        and self._drop_rng.random() < self.random_drop_rates[i]
-                    ):
-                        self.net_tx_drops[i] += 1
-                        self.net_random_drops[i] += 1
-                        entry = self._record_decision(i, status=2)
-                        entry["send_timestamp"] = measurement_timestamp
-                        self.pending_transmissions[i][measurement_timestamp] = entry
-                        if self.track_eval_stats:
-                            self.last_dropped_data_packets.append(
-                                {
-                                    "sensor_id": int(i),
-                                    "measurement_timestamp": int(measurement_timestamp),
-                                    "drop_timestep": int(self.timestep),
-                                    "age_steps": 0,
-                                    "reason": "random_drop",
-                                }
-                            )
-                        continue
                     accepted, _ = self.network.queue_data_packet(
                         i,
                         measurement,
@@ -603,6 +583,26 @@ class NCS_Env(gym.Env):
                                 }
                             )
                         # Note: pending_transmissions entry remains with status=2
+
+                for packet in network_result.get("random_drops", []):
+                    if packet.packet_type == "data":
+                        sensor_id = int(packet.source_id)
+                        if 0 <= sensor_id < self.n_agents:
+                            self.net_random_drops[sensor_id] += 1
+                        if self.track_eval_stats:
+                            measurement_timestamp_rd = state_index
+                            if isinstance(packet.payload, dict):
+                                measurement_timestamp_rd = int(packet.payload.get("timestamp", state_index))
+                            age_steps_rd = max(0, int(state_index - measurement_timestamp_rd))
+                            self.last_dropped_data_packets.append(
+                                {
+                                    "sensor_id": int(sensor_id),
+                                    "measurement_timestamp": int(measurement_timestamp_rd),
+                                    "drop_timestep": int(self.timestep),
+                                    "age_steps": int(age_steps_rd),
+                                    "reason": "random_drop",
+                                }
+                            )
 
             if pending_delivered_packets:
                 packets_by_controller: Dict[int, List[Any]] = {}

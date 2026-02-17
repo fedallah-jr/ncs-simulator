@@ -92,6 +92,8 @@ class NetworkModel:
         app_ack_packet_size: int = 30,
         app_ack_max_retries: int = 3,
         rng: np.random.Generator = None,
+        random_drop_rates: Optional[List[float]] = None,
+        drop_rng: Optional[np.random.Generator] = None,
     ):
         self.n_agents = n_agents
         self.data_rate_kbps = data_rate_kbps
@@ -117,6 +119,12 @@ class NetworkModel:
         )
 
         self.rng = rng if rng is not None else np.random.default_rng()
+
+        self.random_drop_rates: List[float] = list(random_drop_rates) if random_drop_rates else [0.0] * n_agents
+        self.drop_rng: np.random.Generator = drop_rng if drop_rng is not None else self.rng
+        self._any_random_drops: bool = any(r > 0.0 for r in self.random_drop_rates)
+        self.random_drops_per_agent: List[int] = [0] * n_agents
+        self.random_drops_total: int = 0
 
         self.tx_buffer_bytes = max(0, int(tx_buffer_bytes))
 
@@ -249,10 +257,11 @@ class NetworkModel:
         """Advance the network by one micro-slot."""
         delivered_data: List[Packet] = []
         dropped_packets: List[Packet] = []
+        random_drops: List[Packet] = []
         self.delivered_mac_acks = []
         self.delivered_app_acks = []
 
-        self._complete_transmissions(delivered_data, dropped_packets)
+        self._complete_transmissions(delivered_data, dropped_packets, random_drops)
         self._handle_ack_timeouts(dropped_packets)
 
         mac_ack_candidates = self._collect_mac_ack_transmissions()
@@ -269,6 +278,7 @@ class NetworkModel:
         return {
             "delivered_data": delivered_data,
             "dropped_packets": dropped_packets,
+            "random_drops": random_drops,
             "delivered_mac_acks": self.delivered_mac_acks,
             "delivered_app_acks": self.delivered_app_acks,
         }
@@ -300,6 +310,8 @@ class NetworkModel:
         self.app_ack_drops_per_agent = [0] * self.n_agents
         self.app_ack_delivered_total = 0
         self.app_ack_delivered_per_agent = [0] * self.n_agents
+        self.random_drops_per_agent = [0] * self.n_agents
+        self.random_drops_total = 0
 
         for entity in self.entities:
             entity.state = EntityState.IDLE
@@ -630,6 +642,7 @@ class NetworkModel:
         self,
         delivered_data: List[Packet],
         dropped_packets: List[Packet],
+        random_drops: Optional[List[Packet]] = None,
     ) -> None:
         remaining: List[ActiveTransmission] = []
         for tx in self.active_transmissions:
@@ -668,6 +681,26 @@ class NetworkModel:
                     else:
                         self._handle_failed_tx(tx.entity_idx, entity, dropped_packets)
             elif tx.is_mac_ack:
+                # Interference drop on MAC ACK arrival
+                agent_idx = tx.ack_target_idx
+                if (
+                    self._any_random_drops
+                    and agent_idx is not None
+                    and 0 <= agent_idx < self.n_agents
+                    and self.random_drop_rates[agent_idx] > 0.0
+                    and self.drop_rng.random() < self.random_drop_rates[agent_idx]
+                ):
+                    # MAC ACK corrupted — sender stays in WAITING_ACK, times out, retries
+                    if self._trace_active:
+                        self._trace_event(
+                            {
+                                "type": "random_drop",
+                                "entity_idx": int(tx.entity_idx),
+                                "packet_type": "mac_ack",
+                                "agent_idx": int(agent_idx),
+                            }
+                        )
+                    continue
                 if self._trace_active:
                     self._trace_event(
                         {
@@ -682,6 +715,36 @@ class NetworkModel:
             else:
                 packet = tx.packet
                 if packet.packet_type == "data":
+                    # Interference drop on data packet arrival
+                    agent_idx_data = int(packet.source_id)
+                    if (
+                        self._any_random_drops
+                        and 0 <= agent_idx_data < self.n_agents
+                        and self.random_drop_rates[agent_idx_data] > 0.0
+                        and self.drop_rng.random() < self.random_drop_rates[agent_idx_data]
+                    ):
+                        # Receiver can't decode. No MAC/app ACK sent.
+                        # Sender transitions to WAITING_ACK → timeout → retry or drop.
+                        self.random_drops_per_agent[agent_idx_data] += 1
+                        self.random_drops_total += 1
+                        if random_drops is not None:
+                            random_drops.append(packet)
+                        if self._trace_active:
+                            self._trace_event(
+                                {
+                                    "type": "random_drop",
+                                    "entity_idx": int(tx.entity_idx),
+                                    "packet_type": "data",
+                                    "agent_idx": agent_idx_data,
+                                }
+                            )
+                        if tx.expects_ack:
+                            entity.state = EntityState.WAITING_ACK
+                            entity.awaiting_ack_until = self.current_slot + self.mac_ack_wait_slots
+                        else:
+                            self._handle_failed_tx(tx.entity_idx, entity, dropped_packets)
+                        continue
+
                     delivered_data.append(packet)
                     dest_id = int(packet.dest_id)
                     if 0 <= dest_id < self.n_agents:
@@ -697,6 +760,31 @@ class NetworkModel:
                     if self.app_ack_enabled and measurement_timestamp is not None:
                         self._schedule_app_ack(receiver_idx, tx.entity_idx, measurement_timestamp)
                 elif packet.packet_type == "app_ack":
+                    # Interference drop on app ACK arrival
+                    agent_idx_app = int(packet.dest_id)
+                    if (
+                        self._any_random_drops
+                        and 0 <= agent_idx_app < self.n_agents
+                        and self.random_drop_rates[agent_idx_app] > 0.0
+                        and self.drop_rng.random() < self.random_drop_rates[agent_idx_app]
+                    ):
+                        # App ACK corrupted — sensor never receives confirmation
+                        if self._trace_active:
+                            self._trace_event(
+                                {
+                                    "type": "random_drop",
+                                    "entity_idx": int(tx.entity_idx),
+                                    "packet_type": "app_ack",
+                                    "agent_idx": agent_idx_app,
+                                }
+                            )
+                        if tx.expects_ack:
+                            entity.state = EntityState.WAITING_ACK
+                            entity.awaiting_ack_until = self.current_slot + self.mac_ack_wait_slots
+                        else:
+                            self._handle_failed_tx(tx.entity_idx, entity, dropped_packets)
+                        continue
+
                     # App ACK delivered successfully; sensor sends MAC ACK back.
                     sensor_id = int(packet.dest_id)
                     measurement_ts = tx.acked_measurement_timestamp
