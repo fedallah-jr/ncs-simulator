@@ -50,7 +50,6 @@
     "data_rate_kbps": 100,
     "data_packet_size": 125,
     "perfect_communication": false,
-    "app_ack_enabled": true,
     "app_ack_packet_size": 30,
     "tx_buffer_bytes": 100,
     "random_drop_rate": [0.03, 0.07, 0.14]

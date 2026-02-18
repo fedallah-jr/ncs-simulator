@@ -67,7 +67,7 @@ Observations are laid out as `[current_state, current_throughput(s), prev_states
 - `mac_ack_size_bytes`: Size of the MAC ACK frame (default 5 bytes).
 - `mac_ifs_sifs_us`, `mac_ifs_lifs_us`: Inter-frame spacing (µs) for short/long frames after successful transactions (defaults 192/640).
 - `mac_ifs_max_sifs_frame_size`: Max frame size (bytes) that still uses SIFS (default 18).
-- `app_ack_enabled`: When `true`, controllers send application-level ACKs via CSMA/CA in addition to MAC ACKs (default `false`).
+- Application-level ACKs are always enabled in network mode; controllers send app ACKs via CSMA/CA in addition to MAC ACKs.
 - `app_ack_packet_size`: Size of app ACK packets in bytes (default 30).
 - `app_ack_max_retries`: Maximum retransmission attempts for app ACKs (default 3).
 - `tx_buffer_bytes`: Optional per-sensor TX buffer capacity in bytes for queued data packets (beyond the in-flight packet). Set to `0` to disable buffering (current behavior). When set, packets are queued FIFO until the buffer is full.

@@ -320,7 +320,6 @@ class NCS_Env(gym.Env):
             mac_ifs_lifs_us=network_cfg.get("mac_ifs_lifs_us", 640.0),
             mac_ifs_max_sifs_frame_size=network_cfg.get("mac_ifs_max_sifs_frame_size", 18),
             tx_buffer_bytes=network_cfg.get("tx_buffer_bytes", 0),
-            app_ack_enabled=network_cfg.get("app_ack_enabled", True),
             app_ack_packet_size=network_cfg.get("app_ack_packet_size", 30),
             app_ack_max_retries=network_cfg.get("app_ack_max_retries", 3),
             rng=self._network_rng if self._network_rng is not None else self.np_random,

@@ -88,7 +88,6 @@ class NetworkModel:
         mac_ifs_lifs_us: float = 640.0,
         mac_ifs_max_sifs_frame_size: int = 18,
         tx_buffer_bytes: int = 0,
-        app_ack_enabled: bool = False,
         app_ack_packet_size: int = 30,
         app_ack_max_retries: int = 3,
         rng: np.random.Generator = None,
@@ -131,7 +130,6 @@ class NetworkModel:
         self.data_tx_slots = self._compute_tx_slots(self.data_packet_size)
         self.mac_ack_tx_slots = self._compute_tx_slots(self.mac_ack_size_bytes)
 
-        self.app_ack_enabled = app_ack_enabled
         self.app_ack_packet_size = app_ack_packet_size
         self.app_ack_max_retries = app_ack_max_retries
         self.app_ack_tx_slots = self._compute_tx_slots(self.app_ack_packet_size)
@@ -756,8 +754,8 @@ class NetworkModel:
                     # MAC ACK always sent
                     self._schedule_mac_ack(receiver_idx, tx.entity_idx)
 
-                    # App ACK also sent if enabled
-                    if self.app_ack_enabled and measurement_timestamp is not None:
+                    # App ACK is sent for each decodable data packet.
+                    if measurement_timestamp is not None:
                         self._schedule_app_ack(receiver_idx, tx.entity_idx, measurement_timestamp)
                 elif packet.packet_type == "app_ack":
                     # Interference drop on app ACK arrival
