@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiment batch 4: HAPPO (independent actors, team reward)
-# Phase 1 (7.5M steps): absolute reward
-# Phase 2 (+7.5M steps): resume, switch to kf_info_m_noise reward
+# MARL experiment batch 4: MAPPO team reward with reward normalization
+# Phase 1 (10M steps): absolute reward
+# Phase 2 (+10M steps): resume, switch to kf_info_m_noise reward
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -15,7 +15,7 @@ PHASE1_TIMESTEPS="${PHASE1_TIMESTEPS:-7500000}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-15000000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/exp_4_happo_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/exp_4_mappo_team_reward_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -90,25 +90,28 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
-# --- Phase 1 ---
-run_one "algorithms.marl_happo" "happo" "happo"
+# --- Phase 1: kf_info_m reward, no random dropout ---
+run_one "algorithms.marl_mappo" "mappo" "mappo_team_reward" \
+  --team-reward \
+  --set reward.state_error_reward=kf_info_m \
+  --set network.random_drop_rate=0
 
-# --- Phase 2: resume with kf_info_m_noise ---
-resume_dir="${run_root}/happo"
-echo "=== happo (continue: kf_info_m_noise) ==="
+# --- Phase 2: resume with kf_info_m_noise reward and random dropout ---
+resume_dir="${run_root}/mappo_team_reward"
+echo "=== mappo_team_reward (continue: kf_info_m_noise + dropout) ==="
 echo "Resuming from: ${resume_dir}"
 echo "Total timesteps: ${TOTAL_TIMESTEPS}"
 
-PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m algorithms.marl_happo \
+PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m algorithms.marl_mappo \
   --config "${config_path}" \
   --resume "${resume_dir}" \
   --seed "${SEED}" \
   --total-timesteps "${TOTAL_TIMESTEPS}" \
   --n-eval-episodes 30 \
   --episode-length 250 \
+  --team-reward \
   --set reward.state_error_reward=kf_info_m_noise \
-  --set reward.evaluation.state_error_reward=kf_info_m_noise \
-  2>&1 | tee "${run_root}/logs/happo_continue.log"
+  2>&1 | tee "${run_root}/logs/mappo_team_reward_continue.log"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then

@@ -50,7 +50,7 @@ def load_config_with_overrides(
     default_n_agents: int,
     use_agent_id_flag: bool,
     set_overrides: Optional[list] = None,
-) -> Tuple[Dict[str, Any], str, int, bool, Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+) -> Tuple[Dict[str, Any], str, int, bool, Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
     Load config and extract evaluation overrides.
 
@@ -68,6 +68,8 @@ def load_config_with_overrides(
             - Whether to use agent ID
             - Evaluation reward override dict (or None)
             - Evaluation termination override dict (or None)
+            - Network override dict for training envs (cfg["network"] with --set applied, or None)
+            - Reward override dict for training envs (cfg["reward"] minus "evaluation" key, or None)
     """
     from ncs_env.config import load_config
 
@@ -99,6 +101,16 @@ def load_config_with_overrides(
     if isinstance(eval_termination_cfg, dict):
         eval_termination_override = eval_termination_cfg
 
+    # Network override for training envs: in-memory cfg["network"] with --set overrides applied.
+    # Eval envs load the config from the file directly (no network_override), so they always
+    # use the original dropout rates and network settings from the config file.
+    network_override: Optional[Dict[str, Any]] = cfg.get("network") or None
+
+    # Reward override for training envs: in-memory cfg["reward"] (minus the "evaluation" sub-dict)
+    # with --set overrides applied. Eval envs use eval_reward_override instead.
+    training_reward_cfg = {k: v for k, v in cfg.get("reward", {}).items() if k != "evaluation"}
+    training_reward_override: Optional[Dict[str, Any]] = training_reward_cfg or None
+
     return (
         cfg,
         config_path_str,
@@ -106,6 +118,8 @@ def load_config_with_overrides(
         use_agent_id,
         eval_reward_override,
         eval_termination_override,
+        network_override,
+        training_reward_override,
     )
 
 
@@ -116,6 +130,8 @@ def create_environments(
     seed: Optional[int],
     eval_reward_override: Optional[Dict[str, Any]],
     eval_termination_override: Optional[Dict[str, Any]],
+    network_override: Optional[Dict[str, Any]] = None,
+    training_reward_override: Optional[Dict[str, Any]] = None,
 ) -> Tuple["NCS_Env", "NCS_Env"]:
     """
     Create training and evaluation environments.
@@ -127,6 +143,10 @@ def create_environments(
         seed: Random seed
         eval_reward_override: Evaluation reward config override
         eval_termination_override: Evaluation termination config override
+        network_override: Network config override for the training env (--set network.* values).
+            Eval env always loads network settings from the config file directly.
+        training_reward_override: Reward config override for the training env (--set reward.* values).
+            Eval env uses eval_reward_override instead.
 
     Returns:
         Tuple of (training environment, evaluation environment)
@@ -138,6 +158,8 @@ def create_environments(
         episode_length=episode_length,
         config_path=config_path_str,
         seed=seed,
+        reward_override=training_reward_override,
+        network_override=network_override,
     )
 
     eval_env = NCS_Env(

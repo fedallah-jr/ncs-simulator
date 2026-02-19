@@ -75,7 +75,7 @@ def main() -> None:
     args = parse_args()
     device, rng = setup_device_and_rng(args.device, args.seed)
 
-    cfg, config_path_str, n_agents, _use_agent_id_ignored, eval_reward_override, eval_termination_override = (
+    cfg, config_path_str, n_agents, _use_agent_id_ignored, eval_reward_override, eval_termination_override, network_override, training_reward_override = (
         load_config_with_overrides(args.config, args.n_agents, False, args.set_overrides)
     )
     use_agent_id = False  # HAPPO uses independent actors, no agent ID needed
@@ -114,6 +114,8 @@ def main() -> None:
         seed=args.seed,
         global_state_enabled=True,
         shared_reward_normalizer=shared_reward_normalizer,
+        network_override=network_override,
+        reward_override=training_reward_override,
         minimal_info=True,
     )
     eval_env = create_eval_async_vector_env(

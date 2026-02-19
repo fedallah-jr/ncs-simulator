@@ -86,6 +86,7 @@ class NCS_Env(gym.Env):
         seed: Optional[int] = None,
         reward_override: Optional[Dict[str, Any]] = None,
         termination_override: Optional[Dict[str, Any]] = None,
+        network_override: Optional[Dict[str, Any]] = None,
         freeze_running_normalization: bool = False,
         track_true_goodput: bool = False,
         global_state_enabled: bool = False,
@@ -117,8 +118,8 @@ class NCS_Env(gym.Env):
         self._network_rng: Optional[np.random.Generator] = None
         self._drop_rng: Optional[np.random.Generator] = None
 
-        net_cfg = self.config.get("network", {})
-        drop_cfg = net_cfg.get("random_drop_rate", 0.0)
+        self._net_cfg = self._merge_config_override(self.config.get("network", {}), network_override)
+        drop_cfg = self._net_cfg.get("random_drop_rate", 0.0)
         if isinstance(drop_cfg, (int, float)):
             self.random_drop_rates: List[float] = [float(drop_cfg)] * n_agents
         else:
@@ -301,7 +302,7 @@ class NCS_Env(gym.Env):
                 self._agent_P_init_tables.append(P_init)
                 self._agent_P_open_tables.append(P_open)
 
-        network_cfg = self.config.get("network", {})
+        network_cfg = self._net_cfg
         self.perfect_communication = bool(network_cfg.get("perfect_communication", False))
         self.network = NetworkModel(
             n_agents=self.n_agents,
