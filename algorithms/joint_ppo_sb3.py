@@ -266,9 +266,16 @@ def main() -> None:
     if args.n_eval_envs <= 0:
         raise ValueError("n_eval_envs must be positive")
 
-    cfg, config_path_str, n_agents, _use_agent_id, eval_reward_override, eval_termination_override = (
-        load_config_with_overrides(args.config, args.n_agents, False)
-    )
+    (
+        cfg,
+        config_path_str,
+        n_agents,
+        _use_agent_id,
+        eval_reward_override,
+        eval_termination_override,
+        _network_override,
+        _training_reward_override,
+    ) = load_config_with_overrides(args.config, args.n_agents, False)
 
     run_dir = prepare_run_directory("joint_ppo_sb3", args.config, args.output_root)
     rewards_csv_path = run_dir / "training_rewards.csv"
