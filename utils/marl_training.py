@@ -88,7 +88,9 @@ def load_config_with_overrides(
     reward_cfg = cfg.get("reward", {})
     eval_reward_cfg = reward_cfg.get("evaluation", None)
     if isinstance(eval_reward_cfg, dict):
-        eval_reward_override = eval_reward_cfg
+        eval_reward_override = dict(eval_reward_cfg)
+        eval_reward_override.setdefault("reward_clip_min", None)
+        eval_reward_override.setdefault("reward_clip_max", None)
 
     # Load evaluation termination config if present
     eval_termination_override: Optional[Dict[str, Any]] = None
