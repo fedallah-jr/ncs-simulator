@@ -19,11 +19,11 @@ from utils.run_utils import BestModelTracker, prepare_run_directory, save_config
 try:
     from stable_baselines3 import PPO
     from stable_baselines3.common.callbacks import BaseCallback
-    from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv, VecNormalize, sync_envs_normalization
+    from stable_baselines3.common.vec_env import SubprocVecEnv, VecEnv, VecNormalize, sync_envs_normalization
 except ImportError as exc:  # pragma: no cover - exercised only when dependency is missing
     PPO = None  # type: ignore[assignment]
     BaseCallback = object  # type: ignore[assignment]
-    DummyVecEnv = None  # type: ignore[assignment]
+    SubprocVecEnv = None  # type: ignore[assignment]
     VecEnv = object  # type: ignore[assignment]
     VecNormalize = object  # type: ignore[assignment]
     sync_envs_normalization = None  # type: ignore[assignment]
@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-agents", type=int, default=3)
     parser.add_argument("--episode-length", type=int, default=500)
     parser.add_argument("--total-timesteps", type=int, default=200_000)
-    parser.add_argument("--n-envs", type=int, default=1)
+    parser.add_argument("--n-envs", type=int, default=8)
 
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--n-steps", type=int, default=1024)
@@ -305,7 +305,7 @@ def main() -> None:
     )
     eval_reward_override_merged["normalize"] = False
 
-    train_base_env = DummyVecEnv(
+    train_base_env = SubprocVecEnv(
         [
             make_joint_env_factory(
                 n_agents=n_agents,
@@ -319,7 +319,7 @@ def main() -> None:
             for env_idx in range(int(args.n_envs))
         ]
     )
-    eval_base_env = DummyVecEnv(
+    eval_base_env = SubprocVecEnv(
         [
             make_joint_env_factory(
                 n_agents=n_agents,
@@ -352,7 +352,13 @@ def main() -> None:
         epsilon=float(args.obs_norm_eps),
     )
 
-    train_joint_env = train_base_env.envs[0]
+    # Create a temporary env to read action-space metadata (SubprocVecEnv doesn't expose .envs).
+    _tmp_env = CentralizedJointActionEnv(
+        n_agents=n_agents, episode_length=args.episode_length, config_path=config_path_str,
+    )
+    per_agent_n_actions = int(_tmp_env.per_agent_n_actions)
+    n_joint_actions = int(_tmp_env.n_joint_actions)
+    _tmp_env.close()
 
     policy_kwargs: Dict[str, Any] = {"net_arch": list(args.net_arch)}
     target_kl = None if float(args.target_kl) <= 0.0 else float(args.target_kl)
@@ -435,8 +441,8 @@ def main() -> None:
         "episode_length": int(args.episode_length),
         "n_agents": int(n_agents),
         "n_envs": int(args.n_envs),
-        "per_agent_n_actions": int(train_joint_env.per_agent_n_actions),
-        "joint_action_dim": int(train_joint_env.n_joint_actions),
+        "per_agent_n_actions": per_agent_n_actions,
+        "joint_action_dim": n_joint_actions,
         "learning_rate": float(args.learning_rate),
         "n_steps": int(args.n_steps),
         "batch_size": int(args.batch_size),
