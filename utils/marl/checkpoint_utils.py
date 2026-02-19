@@ -63,11 +63,12 @@ def save_happo_checkpoint(
     critic_layer_norm: bool, actors: List[torch.nn.Module], critic: torch.nn.Module,
     obs_normalizer: Optional["RunningObsNormalizer"],
     popart: bool = False,
+    team_reward: bool = True,
 ) -> None:
     ckpt: Dict[str, Any] = {
         "algorithm": "happo", "n_agents": n_agents, "obs_dim": obs_dim,
         "n_actions": n_actions, "use_agent_id": False,
-        "parameter_sharing": False, "team_reward": True,
+        "parameter_sharing": False, "team_reward": team_reward,
         "agent_hidden_dims": agent_hidden_dims, "agent_activation": agent_activation,
         "agent_layer_norm": agent_layer_norm, "dueling": False, "stream_hidden_dim": None,
         "agent_state_dicts": [actor.state_dict() for actor in actors],

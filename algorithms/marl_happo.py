@@ -56,6 +56,7 @@ def _get_arch_args(args: argparse.Namespace) -> Dict[str, Any]:
         "activation": args.activation,
         "layer_norm": args.layer_norm,
         "popart": args.popart,
+        "team_reward": args.team_reward,
     }
 
 
@@ -65,6 +66,8 @@ def _apply_arch_args(args: argparse.Namespace, arch: Dict[str, Any]) -> None:
     args.activation = arch["activation"]
     args.layer_norm = arch["layer_norm"]
     args.popart = arch["popart"]
+    if "team_reward" in arch:
+        args.team_reward = arch["team_reward"]
 
 
 def main() -> None:
@@ -134,7 +137,7 @@ def main() -> None:
     global_state_dim = int(global_state_raw.shape[-1])
     actor_input_dim = obs_dim  # No agent ID for independent actors
     critic_input_dim = global_state_dim
-    value_dim = 1  # Paper-faithful: shared team reward, scalar value
+    value_dim = 1 if args.team_reward else n_agents
     obs_normalizer = create_obs_normalizer(
         obs_dim, args.normalize_obs, args.obs_norm_clip, args.obs_norm_eps
     )
@@ -205,6 +208,7 @@ def main() -> None:
             critic=critic,
             obs_normalizer=obs_normalizer,
             popart=args.popart,
+            team_reward=args.team_reward,
         )
 
     def save_training_state() -> None:
@@ -287,8 +291,10 @@ def main() -> None:
                 )
 
                 raw_rewards = np.asarray(rewards_arr, dtype=np.float32)
-                # Paper-faithful: sum per-agent rewards into shared team reward
-                rewards = raw_rewards.sum(axis=1, keepdims=True)  # (n_envs, 1)
+                if args.team_reward:
+                    rewards = raw_rewards.sum(axis=1, keepdims=True)  # (n_envs, 1)
+                else:
+                    rewards = raw_rewards  # (n_envs, n_agents)
 
                 buffer.add(
                     obs=obs,
@@ -404,10 +410,6 @@ def main() -> None:
                     param_group["lr"] = lr
 
             # ---- Sequential actor update (HAPPO core) ----
-            # Shared scalar advantage broadcast to all agents
-            # advantages shape: (T, E, 1) -> squeeze to (T, E)
-            shared_advantages = advantages.squeeze(-1)  # (T, E)
-
             factor = np.ones((rollout_len, args.n_envs, 1), dtype=np.float32)
 
             if args.fixed_order:
@@ -435,7 +437,13 @@ def main() -> None:
                 obs_flat = obs_i_t.reshape(-1, obs_dim)
                 actions_flat = actions_i_t.reshape(-1)
                 old_lp_flat = torch.as_tensor(old_lp_i.reshape(-1), device=device, dtype=torch.float32)
-                adv_flat = torch.as_tensor(shared_advantages.reshape(-1), device=device, dtype=torch.float32)
+                if args.team_reward:
+                    # Shared scalar advantage: (T, E, 1) -> (T, E) -> flat
+                    adv_i = advantages.squeeze(-1)
+                else:
+                    # Per-agent advantage: (T, E, n_agents) -> agent slice
+                    adv_i = advantages[:, :, agent_id]
+                adv_flat = torch.as_tensor(adv_i.reshape(-1), device=device, dtype=torch.float32)
                 factor_flat = torch.as_tensor(factor.reshape(-1, 1), device=device, dtype=torch.float32)
 
                 # Normalize advantages
@@ -491,46 +499,88 @@ def main() -> None:
                     ratio_i = (post_update_lp - pre_update_lp).exp()
                     factor = factor * ratio_i.cpu().numpy().reshape(rollout_len, args.n_envs, 1)
 
-            # ---- Critic update (scalar shared value) ----
-            # normalized_returns_t shape: (T, E, 1), values_old shape: (T, E, 1)
-            value_targets = normalized_returns_t.squeeze(-1)  # (T, E)
-            values_old_targets = values_old.squeeze(-1)  # (T, E)
+            # ---- Critic update ----
             global_obs_flat = global_obs_t.reshape(-1, critic_input_dim)
-            value_targets_flat = value_targets.reshape(-1)
-            values_old_flat = values_old_targets.reshape(-1)
-            value_total_samples = int(value_targets_flat.shape[0])
-            value_batch_size = min(int(args.batch_size), value_total_samples)
-            if value_batch_size <= 0:
-                value_batch_size = value_total_samples
 
-            for _ in range(args.n_epochs):
-                value_indices = rng.permutation(value_total_samples)
-                for start in range(0, value_total_samples, value_batch_size):
-                    value_idx = value_indices[start:start + value_batch_size]
-                    value_idx_t = torch.as_tensor(value_idx, device=device, dtype=torch.long)
+            if args.team_reward:
+                # Scalar value: (T, E, 1) -> (T*E,)
+                value_targets_flat = normalized_returns_t.squeeze(-1).reshape(-1)
+                values_old_flat = values_old.squeeze(-1).reshape(-1)
+                value_total_samples = int(value_targets_flat.shape[0])
+                value_batch_size = min(int(args.batch_size), value_total_samples)
+                if value_batch_size <= 0:
+                    value_batch_size = value_total_samples
 
-                    global_obs_mb = global_obs_flat[value_idx_t]
-                    values_pred_mb = critic(global_obs_mb).squeeze(-1)
-                    returns_mb = value_targets_flat[value_idx_t]
-                    values_old_mb = values_old_flat[value_idx_t]
+                for _ in range(args.n_epochs):
+                    value_indices = rng.permutation(value_total_samples)
+                    for start in range(0, value_total_samples, value_batch_size):
+                        value_idx = value_indices[start:start + value_batch_size]
+                        value_idx_t = torch.as_tensor(value_idx, device=device, dtype=torch.long)
 
-                    value_pred_clipped = values_old_mb + (
-                        values_pred_mb - values_old_mb
-                    ).clamp(-float(args.clip_range), float(args.clip_range))
+                        global_obs_mb = global_obs_flat[value_idx_t]
+                        values_pred_mb = critic(global_obs_mb).squeeze(-1)
+                        returns_mb = value_targets_flat[value_idx_t]
+                        values_old_mb = values_old_flat[value_idx_t]
 
-                    error_original = returns_mb - values_pred_mb
-                    error_clipped = returns_mb - value_pred_clipped
+                        value_pred_clipped = values_old_mb + (
+                            values_pred_mb - values_old_mb
+                        ).clamp(-float(args.clip_range), float(args.clip_range))
 
-                    value_loss_original = _huber_loss(error_original, args.huber_delta)
-                    value_loss_clipped = _huber_loss(error_clipped, args.huber_delta)
-                    value_loss = torch.max(value_loss_original, value_loss_clipped).mean() * float(
-                        args.vf_coef
-                    )
+                        error_original = returns_mb - values_pred_mb
+                        error_clipped = returns_mb - value_pred_clipped
 
-                    critic_optimizer.zero_grad(set_to_none=True)
-                    value_loss.backward()
-                    nn.utils.clip_grad_norm_(critic.parameters(), float(args.max_grad_norm))
-                    critic_optimizer.step()
+                        value_loss_original = _huber_loss(error_original, args.huber_delta)
+                        value_loss_clipped = _huber_loss(error_clipped, args.huber_delta)
+                        value_loss = torch.max(value_loss_original, value_loss_clipped).mean() * float(
+                            args.vf_coef
+                        )
+
+                        critic_optimizer.zero_grad(set_to_none=True)
+                        value_loss.backward()
+                        nn.utils.clip_grad_norm_(critic.parameters(), float(args.max_grad_norm))
+                        critic_optimizer.step()
+            else:
+                # Per-agent values: (T, E, n_agents) -> (T*E*n_agents,)
+                returns_flat = normalized_returns_t.reshape(-1)
+                values_old_flat = values_old.reshape(-1)
+                value_total_samples = int(returns_flat.shape[0])
+                value_batch_size = min(int(args.batch_size), value_total_samples)
+                if value_batch_size <= 0:
+                    value_batch_size = value_total_samples
+
+                for _ in range(args.n_epochs):
+                    value_indices = rng.permutation(value_total_samples)
+                    for start in range(0, value_total_samples, value_batch_size):
+                        value_idx = value_indices[start:start + value_batch_size]
+                        value_idx_t = torch.as_tensor(value_idx, device=device, dtype=torch.long)
+
+                        time_env_ids = value_idx_t // n_agents
+                        agent_ids_mb = value_idx_t % n_agents
+
+                        global_obs_mb = global_obs_flat[time_env_ids]
+                        values_pred_all = critic(global_obs_mb)
+                        values_pred_mb = values_pred_all.gather(1, agent_ids_mb.unsqueeze(-1)).squeeze(-1)
+
+                        returns_mb = returns_flat[value_idx_t]
+                        values_old_mb = values_old_flat[value_idx_t]
+
+                        value_pred_clipped = values_old_mb + (
+                            values_pred_mb - values_old_mb
+                        ).clamp(-float(args.clip_range), float(args.clip_range))
+
+                        error_original = returns_mb - values_pred_mb
+                        error_clipped = returns_mb - value_pred_clipped
+
+                        value_loss_original = _huber_loss(error_original, args.huber_delta)
+                        value_loss_clipped = _huber_loss(error_clipped, args.huber_delta)
+                        value_loss = torch.max(value_loss_original, value_loss_clipped).mean() * float(
+                            args.vf_coef
+                        )
+
+                        critic_optimizer.zero_grad(set_to_none=True)
+                        value_loss.backward()
+                        nn.utils.clip_grad_norm_(critic.parameters(), float(args.max_grad_norm))
+                        critic_optimizer.step()
 
     latest_path = run_dir / "latest_model.pt"
     save_checkpoint(latest_path)

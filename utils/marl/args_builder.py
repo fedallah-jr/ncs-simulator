@@ -111,6 +111,11 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--layer-norm", action="store_true")
     parser.add_argument("--fixed-order", action="store_true",
                         help="Use fixed agent update order instead of random shuffle each iteration")
+    team_reward_group = parser.add_mutually_exclusive_group()
+    team_reward_group.add_argument("--team-reward", action="store_true", dest="team_reward",
+                                   help="Use shared team reward (paper-faithful, default)")
+    team_reward_group.add_argument("--no-team-reward", action="store_false", dest="team_reward",
+                                   help="Use per-agent rewards and per-agent advantages")
     obs_norm_group = parser.add_mutually_exclusive_group()
     obs_norm_group.add_argument("--normalize-obs", action="store_true")
     obs_norm_group.add_argument("--no-normalize-obs", action="store_false", dest="normalize_obs")
@@ -122,7 +127,7 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--n-eval-episodes", type=int, default=30)
     parser.add_argument("--n-eval-envs", type=int, default=4)
     _add_set_override_argument(parser)
-    parser.set_defaults(normalize_obs=True, lr_decay=True)
+    parser.set_defaults(normalize_obs=True, lr_decay=True, team_reward=True)
     return parser
 
 
@@ -138,7 +143,7 @@ def build_happo_hyperparams(
         "gae_lambda": args.gae_lambda, "clip_range": args.clip_range,
         "ent_coef": args.ent_coef, "vf_coef": args.vf_coef, "huber_delta": args.huber_delta,
         "value_norm": True, "value_norm_beta": args.value_norm_beta, "popart": args.popart,
-        "normalize_obs": args.normalize_obs,
+        "team_reward": args.team_reward, "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip, "obs_norm_eps": args.obs_norm_eps,
         "max_grad_norm": args.max_grad_norm, "hidden_dims": list(args.hidden_dims),
         "activation": args.activation, "layer_norm": args.layer_norm,
