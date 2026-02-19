@@ -74,6 +74,7 @@ class CentralizedJointActionEnv(gym.Env):
         seed: Optional[int] = None,
         reward_override: Optional[Dict[str, Any]] = None,
         termination_override: Optional[Dict[str, Any]] = None,
+        network_override: Optional[Dict[str, Any]] = None,
         freeze_running_normalization: bool = False,
         minimal_info: bool = False,
     ) -> None:
@@ -85,6 +86,7 @@ class CentralizedJointActionEnv(gym.Env):
             seed=seed,
             reward_override=reward_override,
             termination_override=termination_override,
+            network_override=network_override,
             freeze_running_normalization=freeze_running_normalization,
             minimal_info=minimal_info,
         )

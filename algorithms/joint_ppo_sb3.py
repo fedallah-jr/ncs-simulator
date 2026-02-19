@@ -68,9 +68,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--obs-norm-eps", type=float, default=1e-8)
 
     parser.add_argument("--log-interval", type=int, default=10)
-    parser.add_argument("--eval-freq", type=int, default=5_000)
+    parser.add_argument("--eval-freq", type=int, default=10_000)
     parser.add_argument("--n-eval-episodes", type=int, default=30)
     parser.add_argument("--n-eval-envs", type=int, default=4)
+    parser.add_argument("--resume", type=Path, default=None,
+                        help="Resume training from a previous run directory")
+    parser.add_argument(
+        "--set", action="append", default=None, dest="set_overrides",
+        metavar="KEY=VALUE",
+        help="Override config values using dot notation (e.g., --set reward.state_error_reward=kf_info_m_noise). Repeatable.",
+    )
     parser.set_defaults(normalize_obs=True)
     return parser.parse_args()
 
@@ -83,6 +90,7 @@ def make_joint_env_factory(
     seed: Optional[int],
     reward_override: Optional[Dict[str, Any]] = None,
     termination_override: Optional[Dict[str, Any]] = None,
+    network_override: Optional[Dict[str, Any]] = None,
     freeze_running_normalization: bool = False,
     minimal_info: bool = True,
 ) -> Callable[[], CentralizedJointActionEnv]:
@@ -94,6 +102,7 @@ def make_joint_env_factory(
             seed=seed,
             reward_override=reward_override,
             termination_override=termination_override,
+            network_override=network_override,
             freeze_running_normalization=freeze_running_normalization,
             minimal_info=minimal_info,
         )
@@ -273,15 +282,24 @@ def main() -> None:
         _use_agent_id,
         eval_reward_override,
         eval_termination_override,
-        _network_override,
-        _training_reward_override,
-    ) = load_config_with_overrides(args.config, args.n_agents, False)
+        network_override,
+        training_reward_override,
+    ) = load_config_with_overrides(args.config, args.n_agents, False, args.set_overrides)
 
-    run_dir = prepare_run_directory("joint_ppo_sb3", args.config, args.output_root)
+    resuming = args.resume is not None
+    if resuming:
+        run_dir = Path(args.resume)
+        if not run_dir.is_dir():
+            raise FileNotFoundError(f"Resume directory does not exist: {run_dir}")
+    else:
+        run_dir = prepare_run_directory("joint_ppo_sb3", args.config, args.output_root)
     rewards_csv_path = run_dir / "training_rewards.csv"
     eval_csv_path = run_dir / "evaluation_rewards.csv"
+
     # Joint SB3 trainers use VecNormalize for reward scaling; disable env-side reward normalization.
-    train_reward_override: Dict[str, Any] = {"normalize": False}
+    # Merge training_reward_override (from --set) with normalize=False.
+    train_reward_override: Dict[str, Any] = dict(training_reward_override) if training_reward_override else {}
+    train_reward_override["normalize"] = False
     eval_reward_override_merged: Dict[str, Any] = (
         dict(eval_reward_override) if isinstance(eval_reward_override, dict) else {}
     )
@@ -295,6 +313,7 @@ def main() -> None:
                 config_path_str=config_path_str,
                 seed=None if args.seed is None else int(args.seed) + env_idx,
                 reward_override=train_reward_override,
+                network_override=network_override,
                 minimal_info=True,
             )
             for env_idx in range(int(args.n_envs))
@@ -337,34 +356,50 @@ def main() -> None:
 
     policy_kwargs: Dict[str, Any] = {"net_arch": list(args.net_arch)}
     target_kl = None if float(args.target_kl) <= 0.0 else float(args.target_kl)
-    model = PPO(
-        policy="MlpPolicy",
-        env=train_env,
-        learning_rate=float(args.learning_rate),
-        n_steps=int(args.n_steps),
-        batch_size=int(args.batch_size),
-        n_epochs=int(args.n_epochs),
-        gamma=float(args.gamma),
-        gae_lambda=float(args.gae_lambda),
-        clip_range=float(args.clip_range),
-        ent_coef=float(args.ent_coef),
-        vf_coef=float(args.vf_coef),
-        max_grad_norm=float(args.max_grad_norm),
-        target_kl=target_kl,
-        policy_kwargs=policy_kwargs,
-        seed=args.seed,
-        device=args.device,
-        verbose=0,
-    )
+
+    if resuming:
+        latest_path = run_dir / "latest_model.zip"
+        vecnorm_path = latest_path.with_suffix(".vecnormalize.pkl")
+        if not latest_path.exists():
+            raise FileNotFoundError(f"No model checkpoint found at {latest_path}")
+        print(f"Resuming from {latest_path}")
+        model = PPO.load(str(latest_path), env=train_env, device=args.device)
+        if vecnorm_path.exists() and isinstance(train_env, VecNormalize):
+            saved_norm = VecNormalize.load(str(vecnorm_path), train_base_env)
+            train_env.obs_rms = saved_norm.obs_rms
+            train_env.ret_rms = saved_norm.ret_rms
+            print(f"  Loaded VecNormalize stats from {vecnorm_path}")
+    else:
+        model = PPO(
+            policy="MlpPolicy",
+            env=train_env,
+            learning_rate=float(args.learning_rate),
+            n_steps=int(args.n_steps),
+            batch_size=int(args.batch_size),
+            n_epochs=int(args.n_epochs),
+            gamma=float(args.gamma),
+            gae_lambda=float(args.gae_lambda),
+            clip_range=float(args.clip_range),
+            ent_coef=float(args.ent_coef),
+            vf_coef=float(args.vf_coef),
+            max_grad_norm=float(args.max_grad_norm),
+            target_kl=target_kl,
+            policy_kwargs=policy_kwargs,
+            seed=args.seed,
+            device=args.device,
+            verbose=0,
+        )
 
     best_model_tracker = BestModelTracker()
 
-    with rewards_csv_path.open("w", newline="", encoding="utf-8") as train_f, \
-         eval_csv_path.open("w", newline="", encoding="utf-8") as eval_f:
+    csv_mode = "a" if resuming else "w"
+    with rewards_csv_path.open(csv_mode, newline="", encoding="utf-8") as train_f, \
+         eval_csv_path.open(csv_mode, newline="", encoding="utf-8") as eval_f:
         train_writer = csv.writer(train_f)
         eval_writer = csv.writer(eval_f)
-        train_writer.writerow(["episode", "reward_sum", "episode_length", "steps"])
-        eval_writer.writerow(["step", "mean_reward", "std_reward"])
+        if not resuming:
+            train_writer.writerow(["episode", "reward_sum", "episode_length", "steps"])
+            eval_writer.writerow(["step", "mean_reward", "std_reward"])
 
         callback = JointTrainEvalCallback(
             eval_env=eval_env,
@@ -382,7 +417,12 @@ def main() -> None:
             log_interval=args.log_interval,
         )
 
-        model.learn(total_timesteps=int(args.total_timesteps), callback=callback, progress_bar=False)
+        model.learn(
+            total_timesteps=int(args.total_timesteps),
+            callback=callback,
+            progress_bar=False,
+            reset_num_timesteps=not resuming,
+        )
         callback.run_final_eval_if_needed()
 
     latest_path = run_dir / "latest_model.zip"

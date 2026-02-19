@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # MARL experiment batch 7: Joint-action SB3 PPO baseline
-# joint_ppo_sb3
+# Phase 1 (7.5M steps): kf_info_m reward, no random dropout
+# Phase 2 (+7.5M steps): resume, switch to kf_info_m_noise reward with dropout
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -10,7 +11,8 @@ cd "${PROJECT_ROOT}"
 SEED="${SEED:-0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 
-TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-5000000}"
+PHASE1_TIMESTEPS="${PHASE1_TIMESTEPS:-7500000}"
+TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-15000000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_root="${OUTPUT_ROOT}/exp_7_joint_ppo_sb3_${timestamp}_seed${SEED}"
@@ -31,7 +33,7 @@ else
   exit 1
 fi
 
-config_path="configs/marl_absolute_plants.json"
+config_path="${CONFIG_PATH:-configs/marl_absolute_plants.json}"
 if [[ ! -f "${config_path}" ]]; then
   echo "Config not found: ${config_path}" >&2
   exit 1
@@ -61,7 +63,7 @@ run_one() {
     --config "${config_path}"
     --output-root "${run_root}"
     --seed "${SEED}"
-    --total-timesteps "${TOTAL_TIMESTEPS}"
+    --total-timesteps "${PHASE1_TIMESTEPS}"
     --n-eval-episodes 30
     --n-eval-envs 4
     --episode-length 250
@@ -89,7 +91,27 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
-run_one "algorithms.joint_ppo_sb3" "joint_ppo_sb3" "joint_ppo_sb3"
+# --- Phase 1: kf_info_m reward, no random dropout ---
+run_one "algorithms.joint_ppo_sb3" "joint_ppo_sb3" "joint_ppo_sb3" \
+  --set reward.state_error_reward=kf_info_m \
+  --set network.random_drop_rate=0
+
+# --- Phase 2: resume with kf_info_m_noise reward and random dropout ---
+resume_dir="${run_root}/joint_ppo_sb3"
+echo "=== joint_ppo_sb3 (continue: kf_info_m_noise + dropout) ==="
+echo "Resuming from: ${resume_dir}"
+echo "Total timesteps: ${TOTAL_TIMESTEPS}"
+
+PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m algorithms.joint_ppo_sb3 \
+  --config "${config_path}" \
+  --resume "${resume_dir}" \
+  --seed "${SEED}" \
+  --total-timesteps "${TOTAL_TIMESTEPS}" \
+  --n-eval-episodes 30 \
+  --n-eval-envs 4 \
+  --episode-length 250 \
+  --set reward.state_error_reward=kf_info_m_noise \
+  2>&1 | tee "${run_root}/logs/joint_ppo_sb3_continue.log"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then
