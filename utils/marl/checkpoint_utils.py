@@ -39,6 +39,7 @@ def save_mappo_checkpoint(
     agent_layer_norm: bool, critic_hidden_dims: List[int], critic_activation: str,
     critic_layer_norm: bool, actor: torch.nn.Module, critic: torch.nn.Module,
     obs_normalizer: Optional["RunningObsNormalizer"],
+    popart: bool = False,
 ) -> None:
     ckpt: Dict[str, Any] = {
         "algorithm": "mappo", "n_agents": n_agents, "obs_dim": obs_dim,
@@ -48,12 +49,175 @@ def save_mappo_checkpoint(
         "agent_layer_norm": agent_layer_norm, "dueling": False, "stream_hidden_dim": None,
         "agent_state_dict": actor.state_dict(), "critic_state_dict": critic.state_dict(),
         "critic_hidden_dims": critic_hidden_dims, "critic_activation": critic_activation,
-        "critic_layer_norm": critic_layer_norm,
+        "critic_layer_norm": critic_layer_norm, "popart": popart,
     }
     ckpt["obs_normalization"] = (
         obs_normalizer.state_dict() if obs_normalizer is not None else {"enabled": False}
     )
     torch.save(ckpt, path)
+
+def save_happo_checkpoint(
+    path: Path, n_agents: int, obs_dim: int, n_actions: int,
+    agent_hidden_dims: List[int], agent_activation: str,
+    agent_layer_norm: bool, critic_hidden_dims: List[int], critic_activation: str,
+    critic_layer_norm: bool, actors: List[torch.nn.Module], critic: torch.nn.Module,
+    obs_normalizer: Optional["RunningObsNormalizer"],
+    popart: bool = False,
+    team_reward: bool = True,
+) -> None:
+    ckpt: Dict[str, Any] = {
+        "algorithm": "happo", "n_agents": n_agents, "obs_dim": obs_dim,
+        "n_actions": n_actions, "use_agent_id": False,
+        "parameter_sharing": False, "team_reward": team_reward,
+        "agent_hidden_dims": agent_hidden_dims, "agent_activation": agent_activation,
+        "agent_layer_norm": agent_layer_norm, "dueling": False, "stream_hidden_dim": None,
+        "agent_state_dicts": [actor.state_dict() for actor in actors],
+        "critic_state_dict": critic.state_dict(),
+        "critic_hidden_dims": critic_hidden_dims, "critic_activation": critic_activation,
+        "critic_layer_norm": critic_layer_norm, "popart": popart,
+    }
+    ckpt["obs_normalization"] = (
+        obs_normalizer.state_dict() if obs_normalizer is not None else {"enabled": False}
+    )
+    torch.save(ckpt, path)
+
+def save_happo_training_state(
+    path: Path, actors: List[torch.nn.Module], critic: torch.nn.Module,
+    actor_optimizers: List[torch.optim.Optimizer], critic_optimizer: torch.optim.Optimizer,
+    value_normalizer: Any, obs_normalizer: Any, best_model_tracker: Any,
+    global_step: int, episode: int, last_eval_step: int,
+    arch_args: Optional[Dict[str, Any]] = None,
+) -> None:
+    state: Dict[str, Any] = {
+        "actors": [actor.state_dict() for actor in actors],
+        "actor_optimizers": [opt.state_dict() for opt in actor_optimizers],
+        "critic": critic.state_dict(),
+        "critic_optimizer": critic_optimizer.state_dict(),
+        "value_normalizer": value_normalizer.state_dict() if value_normalizer is not None else None,
+        "obs_normalizer": obs_normalizer.state_dict() if obs_normalizer is not None else None,
+        "best_model_tracker": dict(best_model_tracker._best),
+        "global_step": global_step,
+        "episode": episode,
+        "last_eval_step": last_eval_step,
+    }
+    if arch_args is not None:
+        state["arch_args"] = arch_args
+    torch.save(state, path)
+
+def load_happo_training_state(
+    path: Path, actors: List[torch.nn.Module], critic: torch.nn.Module,
+    actor_optimizers: List[torch.optim.Optimizer], critic_optimizer: torch.optim.Optimizer,
+    value_normalizer: Any, obs_normalizer: Any, best_model_tracker: Any,
+) -> Dict[str, Any]:
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    for i, actor in enumerate(actors):
+        actor.load_state_dict(state["actors"][i])
+    for i, opt in enumerate(actor_optimizers):
+        opt.load_state_dict(state["actor_optimizers"][i])
+    critic.load_state_dict(state["critic"])
+    critic_optimizer.load_state_dict(state["critic_optimizer"])
+    if value_normalizer is not None and state["value_normalizer"] is not None:
+        value_normalizer.load_state_dict(state["value_normalizer"])
+    if state["obs_normalizer"] is not None and obs_normalizer is not None:
+        from utils.marl.obs_normalization import RunningObsNormalizer
+        restored = RunningObsNormalizer.from_state_dict(state["obs_normalizer"])
+        obs_normalizer.mean = restored.mean
+        obs_normalizer.m2 = restored.m2
+        obs_normalizer.count = restored.count
+    best_model_tracker._best = dict(state["best_model_tracker"])
+    return {
+        "global_step": int(state["global_step"]),
+        "episode": int(state["episode"]),
+        "last_eval_step": int(state["last_eval_step"]),
+    }
+
+def load_happo_arch_args(path: Path) -> Optional[Dict[str, Any]]:
+    """Load only the architecture args from a HAPPO training state file."""
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    return state.get("arch_args", None)
+
+def save_qlearning_training_state(
+    path: Path, learner: Any, buffer: Any, obs_normalizer: Any,
+    best_model_tracker: Any, global_step: int, episode: int,
+    last_eval_step: int, vector_step: int,
+) -> None:
+    state: Dict[str, Any] = {
+        "learner": learner.state_dict(),
+        "buffer": buffer.state_dict(),
+        "obs_normalizer": obs_normalizer.state_dict() if obs_normalizer is not None else None,
+        "best_model_tracker": dict(best_model_tracker._best),
+        "global_step": global_step,
+        "episode": episode,
+        "last_eval_step": last_eval_step,
+        "vector_step": vector_step,
+    }
+    torch.save(state, path)
+
+def load_qlearning_training_state(
+    path: Path, learner: Any, buffer: Any, obs_normalizer: Any,
+    best_model_tracker: Any,
+) -> Dict[str, Any]:
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    learner.load_state_dict(state["learner"])
+    buffer.load_state_dict(state["buffer"])
+    if state["obs_normalizer"] is not None and obs_normalizer is not None:
+        from utils.marl.obs_normalization import RunningObsNormalizer
+        restored = RunningObsNormalizer.from_state_dict(state["obs_normalizer"])
+        obs_normalizer.mean = restored.mean
+        obs_normalizer.m2 = restored.m2
+        obs_normalizer.count = restored.count
+    best_model_tracker._best = dict(state["best_model_tracker"])
+    return {
+        "global_step": int(state["global_step"]),
+        "episode": int(state["episode"]),
+        "last_eval_step": int(state["last_eval_step"]),
+        "vector_step": int(state["vector_step"]),
+    }
+
+def save_mappo_training_state(
+    path: Path, actor: torch.nn.Module, critic: torch.nn.Module,
+    actor_optimizer: torch.optim.Optimizer, critic_optimizer: torch.optim.Optimizer,
+    value_normalizer: Any, obs_normalizer: Any, best_model_tracker: Any,
+    global_step: int, episode: int, last_eval_step: int,
+) -> None:
+    state: Dict[str, Any] = {
+        "actor": actor.state_dict(),
+        "critic": critic.state_dict(),
+        "actor_optimizer": actor_optimizer.state_dict(),
+        "critic_optimizer": critic_optimizer.state_dict(),
+        "value_normalizer": value_normalizer.state_dict() if value_normalizer is not None else None,
+        "obs_normalizer": obs_normalizer.state_dict() if obs_normalizer is not None else None,
+        "best_model_tracker": dict(best_model_tracker._best),
+        "global_step": global_step,
+        "episode": episode,
+        "last_eval_step": last_eval_step,
+    }
+    torch.save(state, path)
+
+def load_mappo_training_state(
+    path: Path, actor: torch.nn.Module, critic: torch.nn.Module,
+    actor_optimizer: torch.optim.Optimizer, critic_optimizer: torch.optim.Optimizer,
+    value_normalizer: Any, obs_normalizer: Any, best_model_tracker: Any,
+) -> Dict[str, Any]:
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    actor.load_state_dict(state["actor"])
+    critic.load_state_dict(state["critic"])
+    actor_optimizer.load_state_dict(state["actor_optimizer"])
+    critic_optimizer.load_state_dict(state["critic_optimizer"])
+    if value_normalizer is not None and state["value_normalizer"] is not None:
+        value_normalizer.load_state_dict(state["value_normalizer"])
+    if state["obs_normalizer"] is not None and obs_normalizer is not None:
+        from utils.marl.obs_normalization import RunningObsNormalizer
+        restored = RunningObsNormalizer.from_state_dict(state["obs_normalizer"])
+        obs_normalizer.mean = restored.mean
+        obs_normalizer.m2 = restored.m2
+        obs_normalizer.count = restored.count
+    best_model_tracker._best = dict(state["best_model_tracker"])
+    return {
+        "global_step": int(state["global_step"]),
+        "episode": int(state["episode"]),
+        "last_eval_step": int(state["last_eval_step"]),
+    }
 
 def build_qlearning_hyperparams(
     algorithm: str, args: Any, n_agents: int, use_agent_id: bool,
@@ -94,7 +258,7 @@ def build_mappo_hyperparams(
         "lr_decay": args.lr_decay, "gamma": args.gamma,
         "gae_lambda": args.gae_lambda, "clip_range": args.clip_range,
         "ent_coef": args.ent_coef, "vf_coef": args.vf_coef, "huber_delta": args.huber_delta,
-        "value_norm": True, "value_norm_beta": args.value_norm_beta,
+        "value_norm": True, "value_norm_beta": args.value_norm_beta, "popart": args.popart,
         "team_reward": args.team_reward, "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip, "obs_norm_eps": args.obs_norm_eps,
         "max_grad_norm": args.max_grad_norm, "hidden_dims": list(args.hidden_dims),

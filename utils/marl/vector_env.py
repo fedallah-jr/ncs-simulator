@@ -25,6 +25,7 @@ def make_env(
     seed: Optional[int],
     reward_override: Optional[Dict[str, Any]] = None,
     termination_override: Optional[Dict[str, Any]] = None,
+    network_override: Optional[Dict[str, Any]] = None,
     freeze_running_normalization: bool = False,
     global_state_enabled: bool = False,
     shared_reward_normalizer: Optional[SharedRewardNormalizerConfig] = None,
@@ -50,6 +51,7 @@ def make_env(
         seed=seed,
         reward_override=reward_override,
         termination_override=termination_override,
+        network_override=network_override,
         freeze_running_normalization=freeze_running_normalization,
         global_state_enabled=global_state_enabled,
         minimal_info=minimal_info,
@@ -65,6 +67,7 @@ def make_vector_env_fn(
     shared_reward_normalizer: Optional[SharedRewardNormalizerConfig] = None,
     reward_override: Optional[Dict[str, Any]] = None,
     termination_override: Optional[Dict[str, Any]] = None,
+    network_override: Optional[Dict[str, Any]] = None,
     freeze_running_normalization: bool = False,
     minimal_info: bool = False,
 ) -> Callable[[], "VectorEnvAdapter"]:
@@ -76,6 +79,7 @@ def make_vector_env_fn(
             seed,
             reward_override=reward_override,
             termination_override=termination_override,
+            network_override=network_override,
             freeze_running_normalization=freeze_running_normalization,
             global_state_enabled=global_state_enabled,
             shared_reward_normalizer=shared_reward_normalizer,
@@ -126,6 +130,8 @@ def create_async_vector_env(
     seed: Optional[int],
     global_state_enabled: bool = False,
     shared_reward_normalizer: Optional[SharedRewardNormalizerConfig] = None,
+    network_override: Optional[Dict[str, Any]] = None,
+    reward_override: Optional[Dict[str, Any]] = None,
     minimal_info: bool = False,
 ) -> Tuple[AsyncVectorEnv, Optional[List[int]]]:
     if n_envs <= 0:
@@ -146,6 +152,8 @@ def create_async_vector_env(
                 seed=env_seed,
                 global_state_enabled=global_state_enabled,
                 shared_reward_normalizer=shared_reward_normalizer,
+                network_override=network_override,
+                reward_override=reward_override,
                 minimal_info=minimal_info,
             )
         )

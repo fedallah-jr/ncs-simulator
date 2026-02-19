@@ -26,6 +26,8 @@ The configuration file is divided into sections; each key controls a specific as
   - `"kf_info_m"`: Reward equals `r_t = -tr(M_t P_t)` (control-weighted estimation uncertainty).
   - `"kf_info_m_noise"`: Reward equals `r_t = -e_t^T M_t e_t` where `e_t = x_t - x_hat_t` (control-weighted actual estimation error; uses realized error instead of covariance).
   - `"kf_info_s"`: Reward equals `r_t = -tr(S_t P_t)` (state-cost-weighted estimation uncertainty).
+  - `"kf_q"`: Reward equals `r_t = -tr(Q P_t)` (Q-weighted estimation uncertainty; expectation of `e_t^T Q e_t`).
+  - `"kf_q_noise"`: Reward equals `r_t = -e_t^T Q e_t` where `e_t = x_t - x_hat_t` (Q-weighted actual estimation error; realized counterpart of `kf_q`).
 - `comm_recent_window`: Short window (steps) used to count how many recent transmission attempts (`p>0`) an agent has initiated.
 - `comm_throughput_window`: Long window (steps) used to estimate per-agent throughput from ACKed packets and their delays.
 - `comm_penalty_alpha`: Scalar multiplier (`α`) used in the communication penalty `R_{a,\text{comm}} = -α * N_\text{recent}/T`, applied only when `action=1` and the network is not set to `perfect_communication`.
@@ -65,10 +67,11 @@ Observations are laid out as `[current_state, current_throughput(s), prev_states
 - `mac_ack_size_bytes`: Size of the MAC ACK frame (default 5 bytes).
 - `mac_ifs_sifs_us`, `mac_ifs_lifs_us`: Inter-frame spacing (µs) for short/long frames after successful transactions (defaults 192/640).
 - `mac_ifs_max_sifs_frame_size`: Max frame size (bytes) that still uses SIFS (default 18).
-- `app_ack_enabled`: When `true`, controllers send application-level ACKs via CSMA/CA in addition to MAC ACKs (default `false`).
+- Application-level ACKs are always enabled in network mode; controllers send app ACKs via CSMA/CA in addition to MAC ACKs.
 - `app_ack_packet_size`: Size of app ACK packets in bytes (default 30).
 - `app_ack_max_retries`: Maximum retransmission attempts for app ACKs (default 3).
 - `tx_buffer_bytes`: Optional per-sensor TX buffer capacity in bytes for queued data packets (beyond the in-flight packet). Set to `0` to disable buffering (current behavior). When set, packets are queued FIFO until the buffer is full.
+- `random_drop_rate`: Per-agent probability of physical-layer interference corrupting packets on arrival. Can be a single float (applied to all agents) or a list of floats (one per agent, e.g., `[0.1, 0.0, 0.2]`). Affected packets go through the full CSMA/CA process (backoff, CCA, transmission) and occupy the channel, but the receiver cannot decode them due to interference. No MAC ACK or app ACK is sent back, so the sender times out and may retry (same path as an undetected collision). Interference can also corrupt MAC ACK and app ACK packets in transit, causing unnecessary retries even for successfully received data. Only applies in network mode (`perfect_communication=false`). Default `0` (no random drops). Uses an independent RNG stream so existing seeds are unaffected when the drop rate is zero.
 
 Note: `tx_buffer_bytes` applies only to data packets; MAC/app ACKs are still sent immediately and are not buffered.
 
@@ -90,6 +93,12 @@ Learning-based baselines live under `algorithms/`:
 - QPLEX (multi-agent, PyTorch, Q-attention mixer): `python -m algorithms.marl_qplex --config configs/marl_mixed_plants.json --total-timesteps 200000`
   - QPLEX weights agent Qs via Q-attention (state + per-agent Q-values); tune with `--n-head`, `--attend-reg-coef`, `--nonlinear`, `--no-state-bias`, `--no-weighted-head`.
 - MAPPO (multi-agent, PyTorch): `python -m algorithms.marl_mappo --config configs/marl_mixed_plants.json --total-timesteps 200000`
+  - `--popart`: Use PopArt value normalization (output-preserving weight correction) instead of the default EMA-based ValueNorm.
+- HAPPO (multi-agent, PyTorch): `python -m algorithms.marl_happo --config configs/marl_mixed_plants.json --total-timesteps 200000`
+  - Independent actor per agent with sequential policy update and importance-weighting factor (monotonic improvement guarantee).
+  - Uses shared team reward and a scalar centralized critic, matching the paper's fully cooperative formulation.
+  - `--fixed-order`: Use fixed agent update order instead of random shuffle each iteration.
+  - `--popart`: Use PopArt value normalization instead of the default EMA-based ValueNorm.
 - Joint-action DQN (single centralized policy, Stable-Baselines3): `python -m algorithms.joint_dqn_sb3 --config configs/marl_mixed_plants.json --total-timesteps 200000`
   - Concatenates all agent observations into one vector and predicts one joint action index.
   - Decodes the joint action to per-agent actions and advances the original multi-agent environment.
@@ -110,7 +119,7 @@ All MARL Q-learning algorithms (IQL, VDN, QMIX, QPLEX) support these architectur
 
 Example with all enhancements: `python -m algorithms.marl_qmix --config configs/marl_mixed_plants.json --dueling --double-q --total-timesteps 200000`
 
-All MARL algorithms (IQL, VDN, QMIX, QPLEX, MAPPO) support observation normalization (enabled by default):
+All MARL algorithms (IQL, VDN, QMIX, QPLEX, MAPPO, HAPPO) support observation normalization (enabled by default):
 - `--no-normalize-obs`: Disable running mean/std normalization on per-agent observations.
 - `--obs-norm-clip`: Clip normalized observations to +/- this value (<=0 disables).
 - `--obs-norm-eps`: Epsilon for observation normalization.

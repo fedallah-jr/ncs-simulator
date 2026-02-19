@@ -7,6 +7,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from utils.marl.popart import PopArtLayer
+
 
 def _get_activation(name: str) -> nn.Module:
     """Return an activation module instance by name."""
@@ -158,12 +160,16 @@ class CentralValueMLP(nn.Module):
         hidden_dims: Sequence[int] = (128, 128),
         activation: str = "relu",
         layer_norm: bool = False,
+        use_popart: bool = False,
+        popart_beta: float = 0.999,
     ) -> None:
         super().__init__()
         if input_dim <= 0 or n_outputs <= 0:
             raise ValueError("input_dim and n_outputs must be positive")
         if not hidden_dims:
             raise ValueError("hidden_dims must be non-empty")
+
+        self._use_popart = use_popart
 
         act = _get_activation(activation)
         layers: list[nn.Module] = []
@@ -174,8 +180,19 @@ class CentralValueMLP(nn.Module):
                 layers.append(nn.LayerNorm(int(hidden_dim)))
             layers.append(act)
             last_dim = int(hidden_dim)
-        layers.append(nn.Linear(last_dim, n_outputs))
+
+        if use_popart:
+            self._output_layer = PopArtLayer(last_dim, n_outputs, beta=popart_beta)
+        else:
+            self._output_layer = nn.Linear(last_dim, n_outputs)
+        layers.append(self._output_layer)
         self.net = nn.Sequential(*layers)
+
+    def popart_layer(self) -> PopArtLayer:
+        """Return the PopArt output layer (raises if not using PopArt)."""
+        if not self._use_popart:
+            raise RuntimeError("CentralValueMLP was not constructed with use_popart=True")
+        return self._output_layer  # type: ignore[return-value]
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         return self.net(obs)

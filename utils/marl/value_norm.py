@@ -66,3 +66,15 @@ class ValueNorm:
     def denormalize(self, values: torch.Tensor) -> torch.Tensor:
         mean, var = self._stats()
         return values * torch.sqrt(var + self.eps) + mean
+
+    def state_dict(self) -> dict:
+        return {
+            "mean": self.mean.detach().cpu().clone(),
+            "mean_sq": self.mean_sq.detach().cpu().clone(),
+            "step": self.step,
+        }
+
+    def load_state_dict(self, d: dict) -> None:
+        self.mean = d["mean"].to(device=self.device, dtype=torch.float32)
+        self.mean_sq = d["mean_sq"].to(device=self.device, dtype=torch.float32)
+        self.step = int(d["step"])

@@ -44,10 +44,13 @@ class RewardDefinition:
             "kf_info_s",
             "kf_info_m",
             "kf_info_m_noise",
+            "kf_q",
+            "kf_q_noise",
         }:
             raise ValueError(
                 "state_error_reward must be 'absolute', 'estimation_error', "
-                "'lqr_cost', 'kf_info', 'kf_info_s', 'kf_info_m', or 'kf_info_m_noise'"
+                "'lqr_cost', 'kf_info', 'kf_info_s', 'kf_info_m', 'kf_info_m_noise', "
+                "'kf_q', or 'kf_q_noise'"
             )
         if float(self.no_normalization_scale) <= 0.0:
             raise ValueError("no_normalization_scale must be > 0")
@@ -83,6 +86,7 @@ class NCS_Env(gym.Env):
         seed: Optional[int] = None,
         reward_override: Optional[Dict[str, Any]] = None,
         termination_override: Optional[Dict[str, Any]] = None,
+        network_override: Optional[Dict[str, Any]] = None,
         freeze_running_normalization: bool = False,
         track_true_goodput: bool = False,
         global_state_enabled: bool = False,
@@ -112,6 +116,19 @@ class NCS_Env(gym.Env):
         self._init_rng: Optional[np.random.Generator] = None
         self._process_rng: Optional[np.random.Generator] = None
         self._network_rng: Optional[np.random.Generator] = None
+        self._drop_rng: Optional[np.random.Generator] = None
+
+        self._net_cfg = self._merge_config_override(self.config.get("network", {}), network_override)
+        drop_cfg = self._net_cfg.get("random_drop_rate", 0.0)
+        if isinstance(drop_cfg, (int, float)):
+            self.random_drop_rates: List[float] = [float(drop_cfg)] * n_agents
+        else:
+            self.random_drop_rates = [float(x) for x in drop_cfg]
+            if len(self.random_drop_rates) != n_agents:
+                raise ValueError(
+                    f"network.random_drop_rate list length ({len(self.random_drop_rates)}) "
+                    f"must match n_agents ({n_agents})"
+                )
 
         self.A = np.array(self.system_cfg.get("A"))
         self.B = np.array(self.system_cfg.get("B"))
@@ -130,6 +147,7 @@ class NCS_Env(gym.Env):
         self.throughput_windows = [tp_window] if isinstance(tp_window, int) else list(tp_window)
         self.n_throughput_windows = len(self.throughput_windows)
         self.quantization_step = observation_cfg.get("quantization_step", 0.05)
+        self.include_uncertainty = bool(observation_cfg.get("include_uncertainty", False))
 
         # Create a local RNG instance for this environment
         self.np_random, _ = gym.utils.seeding.np_random(seed)
@@ -141,6 +159,7 @@ class NCS_Env(gym.Env):
 
         obs_dim = (
             self.state_dim  # current state
+            + (self.state_dim if self.include_uncertainty else 0)  # diag(P) uncertainty
             + self.n_throughput_windows  # current throughputs (one per window)
             + self.state_history_window * self.state_dim  # previous states
             + self.history_window  # previous statuses
@@ -270,7 +289,20 @@ class NCS_Env(gym.Env):
                 )
             )
 
-        network_cfg = self.config.get("network", {})
+        if self.include_uncertainty:
+            self._agent_P_init_tables: List[List[np.ndarray]] = []
+            self._agent_P_open_tables: List[List[np.ndarray]] = []
+            for i in range(self.n_agents):
+                A_i = agent_matrices[i][0]
+                P_init = [self.initial_estimate_cov.copy()]
+                P_open = [np.zeros_like(W)]
+                for _ in range(self.episode_length + 1):
+                    P_init.append(A_i @ P_init[-1] @ A_i.T + W)
+                    P_open.append(A_i @ P_open[-1] @ A_i.T + W)
+                self._agent_P_init_tables.append(P_init)
+                self._agent_P_open_tables.append(P_open)
+
+        network_cfg = self._net_cfg
         self.perfect_communication = bool(network_cfg.get("perfect_communication", False))
         self.network = NetworkModel(
             n_agents=self.n_agents,
@@ -289,10 +321,11 @@ class NCS_Env(gym.Env):
             mac_ifs_lifs_us=network_cfg.get("mac_ifs_lifs_us", 640.0),
             mac_ifs_max_sifs_frame_size=network_cfg.get("mac_ifs_max_sifs_frame_size", 18),
             tx_buffer_bytes=network_cfg.get("tx_buffer_bytes", 0),
-            app_ack_enabled=network_cfg.get("app_ack_enabled", True),
             app_ack_packet_size=network_cfg.get("app_ack_packet_size", 30),
             app_ack_max_retries=network_cfg.get("app_ack_max_retries", 3),
             rng=self._network_rng if self._network_rng is not None else self.np_random,
+            random_drop_rates=self.random_drop_rates,
+            drop_rng=self._drop_rng if self._drop_rng is not None else self.np_random,
         )
 
     def _initialize_tracking_structures(self):
@@ -319,6 +352,7 @@ class NCS_Env(gym.Env):
         self.net_tx_attempts = np.zeros(self.n_agents, dtype=np.int64)
         self.net_tx_acks = np.zeros(self.n_agents, dtype=np.int64)
         self.net_tx_drops = np.zeros(self.n_agents, dtype=np.int64)
+        self.net_random_drops = np.zeros(self.n_agents, dtype=np.int64)
         self.net_tx_rewrites = np.zeros(self.n_agents, dtype=np.int64)
         self.observed_goodput_records: List[deque] = [deque() for _ in range(self.n_agents)]
         self.observed_goodput_seen: List[set] = [set() for _ in range(self.n_agents)]
@@ -362,10 +396,14 @@ class NCS_Env(gym.Env):
         self.last_kf_info_gains_m: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_kf_info_gains_s: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_kf_info_gains_m_noise: List[float] = [0.0 for _ in range(self.n_agents)]
+        self.last_kf_q_gains: List[float] = [0.0 for _ in range(self.n_agents)]
+        self.last_kf_q_noise_gains: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_termination_reasons: List[str] = []
         self.last_termination_agents: List[int] = []
         self.last_bad_termination = False
         self.last_dropped_data_packets: List[Dict[str, Any]] = []
+        if self.include_uncertainty:
+            self._agent_last_confirmed_step: List[int] = [-1] * self.n_agents
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None):
         """Reset environment to initial state."""
@@ -389,6 +427,7 @@ class NCS_Env(gym.Env):
             controller.reset(np.zeros(self.state_dim))
 
         self.network.rng = self._network_rng if self._network_rng is not None else self.np_random
+        self.network.drop_rng = self._drop_rng if self._drop_rng is not None else self.np_random
         self.network.reset()
         self._initialize_tracking_structures()
         self._update_sensor_measurements()
@@ -443,6 +482,8 @@ class NCS_Env(gym.Env):
                     measurement = self.last_sensor_measurements[i]
                     self.controllers[i].update(measurement)
                     self.last_measurements[i] = measurement
+                    if self.include_uncertainty:
+                        self._agent_last_confirmed_step[i] = state_index
                     self._record_decision(i, status=1)
                     # Use state_index for consistency (though _log_successful_comm
                     # returns early for perfect_communication anyway)
@@ -512,6 +553,9 @@ class NCS_Env(gym.Env):
                     if 0 <= sensor_id < self.n_agents:
                         self.net_tx_acks[sensor_id] += 1
                         self._record_observed_goodput(sensor_id, measurement_timestamp)
+                        if self.include_uncertainty:
+                            if measurement_timestamp > self._agent_last_confirmed_step[sensor_id]:
+                                self._agent_last_confirmed_step[sensor_id] = measurement_timestamp
                     entry = self.pending_transmissions[sensor_id].pop(measurement_timestamp, None)
                     if entry is not None:
                         entry["status"] = 1
@@ -539,6 +583,26 @@ class NCS_Env(gym.Env):
                                 }
                             )
                         # Note: pending_transmissions entry remains with status=2
+
+                for packet in network_result.get("random_drops", []):
+                    if packet.packet_type == "data":
+                        sensor_id = int(packet.source_id)
+                        if 0 <= sensor_id < self.n_agents:
+                            self.net_random_drops[sensor_id] += 1
+                        if self.track_eval_stats:
+                            measurement_timestamp_rd = state_index
+                            if isinstance(packet.payload, dict):
+                                measurement_timestamp_rd = int(packet.payload.get("timestamp", state_index))
+                            age_steps_rd = max(0, int(state_index - measurement_timestamp_rd))
+                            self.last_dropped_data_packets.append(
+                                {
+                                    "sensor_id": int(sensor_id),
+                                    "measurement_timestamp": int(measurement_timestamp_rd),
+                                    "drop_timestep": int(self.timestep),
+                                    "age_steps": int(age_steps_rd),
+                                    "reason": "random_drop",
+                                }
+                            )
 
             if pending_delivered_packets:
                 packets_by_controller: Dict[int, List[Any]] = {}
@@ -589,6 +653,10 @@ class NCS_Env(gym.Env):
             e = self.plants[i].get_state().reshape(-1) - self.controllers[i].x_hat
             M = self._get_kf_info_matrix(i)
             self.last_kf_info_gains_m_noise[i] = -float(e @ M @ e)
+            # Q-weighted estimation uncertainty and error
+            Q = self.state_cost_matrix
+            self.last_kf_q_gains[i] = -float(np.trace(Q @ covariance))
+            self.last_kf_q_noise_gains[i] = -float(e @ Q @ e)
 
         # Compute control and update plants
         lqr_costs = None
@@ -957,11 +1025,14 @@ class NCS_Env(gym.Env):
             self._init_rng = None
             self._process_rng = None
             self._network_rng = None
+            self._drop_rng = None
             return
         seeds = self.np_random.integers(0, 2**32 - 1, size=3, dtype=np.uint32)
         self._init_rng = np.random.default_rng(int(seeds[0]))
         self._process_rng = np.random.default_rng(int(seeds[1]))
         self._network_rng = np.random.default_rng(int(seeds[2]))
+        drop_seed = int(self.np_random.integers(0, 2**32 - 1))
+        self._drop_rng = np.random.default_rng(drop_seed)
 
     def _log_successful_comm(self, agent_idx: int, send_timestamp: int, ack_timestamp: int) -> None:
         """Record ACKed packet for throughput-based penalties."""
@@ -1040,6 +1111,10 @@ class NCS_Env(gym.Env):
             return self.last_kf_info_gains[agent_idx]
         if mode == "kf_info_m_noise":
             return self.last_kf_info_gains_m_noise[agent_idx]
+        if mode == "kf_q":
+            return self.last_kf_q_gains[agent_idx]
+        if mode == "kf_q_noise":
+            return self.last_kf_q_noise_gains[agent_idx]
         return 0.0
 
     def _compute_estimation_error(self, agent_idx: int, state: np.ndarray) -> float:
@@ -1161,7 +1236,7 @@ class NCS_Env(gym.Env):
             error_reward = -curr_error
         elif definition.mode == "lqr_cost":
             error_reward = -curr_error
-        elif definition.mode in {"kf_info", "kf_info_s", "kf_info_m", "kf_info_m_noise"}:
+        elif definition.mode in {"kf_info", "kf_info_s", "kf_info_m", "kf_info_m_noise", "kf_q", "kf_q_noise"}:
             error_reward = float(info_gain)
         else:
             raise ValueError(f"Unsupported reward mode: {definition.mode}")
@@ -1212,6 +1287,16 @@ class NCS_Env(gym.Env):
             cursor = 0
             obs_values[cursor : cursor + self.state_dim] = quantized_state
             cursor += self.state_dim
+            if self.include_uncertainty:
+                last_conf = self._agent_last_confirmed_step[i]
+                if last_conf < 0:
+                    k = self.timestep
+                    P_agent = self._agent_P_init_tables[i][min(k, self.episode_length)]
+                else:
+                    k = self.timestep - 1 - last_conf
+                    P_agent = self._agent_P_open_tables[i][min(k, self.episode_length)]
+                obs_values[cursor : cursor + self.state_dim] = np.diag(P_agent).astype(np.float32)
+                cursor += self.state_dim
             obs_values[cursor : cursor + self.n_throughput_windows] = throughputs
             cursor += self.n_throughput_windows
             obs_values[cursor : cursor + prev_states_flat.size] = prev_states_flat
@@ -1265,12 +1350,14 @@ class NCS_Env(gym.Env):
             backoff_remaining[i] = float(entity.backoff_counter)
         per_agent_features: List[np.ndarray] = []
         for i in range(self.n_agents):
+            e = self.plants[i].get_state().reshape(-1) - self.controllers[i].x_hat
             per_agent_features.append(
                 np.concatenate(
                     [
                         self.plants[i].get_state().astype(np.float32),
                         self.controllers[i].x_hat.astype(np.float32),
-                        self.last_sensor_measurements[i].astype(np.float32),
+                        np.diag(self.controllers[i].P).astype(np.float32),
+                        (e * e).astype(np.float32),
                         np.asarray(
                             [
                                 perceived_goodput[i],
@@ -1356,6 +1443,7 @@ class NCS_Env(gym.Env):
                 "tx_attempts": [int(x) for x in self.net_tx_attempts],
                 "tx_acked": [int(x) for x in self.net_tx_acks],
                 "tx_dropped": [int(x) for x in self.net_tx_drops],
+                "tx_random_drops": [int(x) for x in self.net_random_drops],
                 "tx_rewrites": [int(x) for x in self.net_tx_rewrites],
                 "tx_collisions": collisions,
                 "data_delivered": data_delivered,

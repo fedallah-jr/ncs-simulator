@@ -75,6 +75,8 @@ def run_episode_multi_agent(
     network_trace: bool = False,
     trace_interval: int = 50,
     trace_start: int = 1,
+    epsilon: float = 0.0,
+    rng: Optional[np.random.Generator] = None,
 ) -> Dict[str, Any]:
     if hasattr(policy, "reset"):
         policy.reset()
@@ -119,6 +121,12 @@ def run_episode_multi_agent(
 
     for t in range(episode_length):
         action_dict = policy.act(obs_dict)
+        if epsilon > 0:
+            if rng is None:
+                rng = np.random.default_rng()
+            for key in action_dict:
+                if rng.random() < epsilon:
+                    action_dict[key] = rng.integers(0, 2)
         actions[t] = np.asarray([action_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.int64)
         obs_dict, rewards_dict, terminated, truncated, info = env.step(action_dict)
         rewards[t] = np.asarray([rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32)
@@ -844,6 +852,13 @@ def main():
         help='Force deterministic policy actions (default: False)'
     )
     parser.add_argument(
+        '--epsilon-greedy',
+        type=float,
+        default=0.0,
+        help='Probability of replacing each agent\'s action with a random action '
+             '(applied before env.step so agents observe the randomized action in their history)'
+    )
+    parser.add_argument(
         '--output-dir',
         type=str,
         default='vis',
@@ -1055,6 +1070,7 @@ def main():
             print(f"  ✗ Error loading policy: {e}\n")
             continue
         print("  Running multi-agent episode...")
+        eps_rng = np.random.default_rng(args.seed) if args.epsilon_greedy > 0 else None
         traj = run_episode_multi_agent(
             env,
             policy,
@@ -1063,6 +1079,8 @@ def main():
             network_trace=args.network_trace,
             trace_interval=args.trace_interval,
             trace_start=args.trace_start,
+            epsilon=args.epsilon_greedy,
+            rng=eps_rng,
         )
         env.close()
 
