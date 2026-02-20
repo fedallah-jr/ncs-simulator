@@ -112,6 +112,7 @@ def main() -> None:
         "n_actions": n_actions,
         "hidden_dims": tuple(args.hidden_dims),
         "activation": args.activation,
+        "feature_norm": args.feature_norm,
     }
     if args.dueling:
         agent_kwargs["stream_hidden_dim"] = args.stream_hidden_dim
@@ -176,6 +177,7 @@ def main() -> None:
             stream_hidden_dim=args.stream_hidden_dim if args.dueling else None,
             agent=learner.agent,
             obs_normalizer=obs_normalizer,
+            feature_norm=args.feature_norm,
         )
 
     def save_training_state() -> None:

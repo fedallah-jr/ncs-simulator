@@ -54,6 +54,7 @@ def _get_arch_args(args: argparse.Namespace) -> Dict[str, Any]:
     return {
         "hidden_dims": list(args.hidden_dims),
         "activation": args.activation,
+        "feature_norm": args.feature_norm,
         "popart": args.popart,
         "team_reward": args.team_reward,
     }
@@ -63,6 +64,7 @@ def _apply_arch_args(args: argparse.Namespace, arch: Dict[str, Any]) -> None:
     """Override current CLI args with saved architecture args for resume consistency."""
     args.hidden_dims = arch["hidden_dims"]
     args.activation = arch["activation"]
+    args.feature_norm = arch.get("feature_norm", False)
     args.popart = arch["popart"]
     if "team_reward" in arch:
         args.team_reward = arch["team_reward"]
@@ -151,6 +153,7 @@ def main() -> None:
             n_actions=n_actions,
             hidden_dims=tuple(args.hidden_dims),
             activation=args.activation,
+            feature_norm=args.feature_norm,
         ).to(device)
         actors.append(actor)
         actor_optimizers.append(torch.optim.Adam(actor.parameters(), lr=float(args.learning_rate)))
@@ -160,6 +163,7 @@ def main() -> None:
         n_outputs=value_dim,
         hidden_dims=tuple(args.hidden_dims),
         activation=args.activation,
+        feature_norm=args.feature_norm,
         use_popart=args.popart,
         popart_beta=float(args.value_norm_beta),
     ).to(device)
@@ -205,6 +209,7 @@ def main() -> None:
             obs_normalizer=obs_normalizer,
             popart=args.popart,
             team_reward=args.team_reward,
+            feature_norm=args.feature_norm,
         )
 
     def save_training_state() -> None:

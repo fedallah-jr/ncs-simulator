@@ -192,6 +192,7 @@ def load_es_policy(model_path: str, env: NCS_Env):
         else:
             hidden_dims = (64, 64)
         activation = str(data['activation']) if 'activation' in data else "tanh"
+        feature_norm = bool(data['feature_norm']) if 'feature_norm' in data else False
         normalize_obs = bool(data['normalize_obs']) if 'normalize_obs' in data else False
         obs_norm_clip = float(data['obs_norm_clip']) if 'obs_norm_clip' in data else 5.0
         obs_norm_eps = float(data['obs_norm_eps']) if 'obs_norm_eps' in data else 1e-8
@@ -205,6 +206,7 @@ def load_es_policy(model_path: str, env: NCS_Env):
         print(
             "  Architecture: "
             f"hidden_dims={hidden_dims}, activation={activation}, "
+            f"feature_norm={feature_norm}, "
             f"normalize_obs={normalize_obs}, use_agent_id={use_agent_id}"
         )
     except Exception as e:
@@ -234,6 +236,7 @@ def load_es_policy(model_path: str, env: NCS_Env):
         action_dim=action_dim,
         hidden_dims=hidden_dims,
         activation=activation,
+        feature_norm=feature_norm,
     )
 
     rng = jax.random.PRNGKey(0)

@@ -242,12 +242,14 @@ def main() -> None:
         n_actions=n_actions,
         hidden_dims=tuple(args.hidden_dims),
         activation=args.activation,
+        feature_norm=args.feature_norm,
     ).to(device)
     critic = CentralValueMLP(
         input_dim=critic_input_dim,
         n_outputs=value_dim,
         hidden_dims=tuple(args.hidden_dims),
         activation=args.activation,
+        feature_norm=args.feature_norm,
         use_popart=args.popart,
         popart_beta=float(args.value_norm_beta),
     ).to(device)
@@ -296,6 +298,7 @@ def main() -> None:
             critic=critic,
             obs_normalizer=obs_normalizer,
             popart=args.popart,
+            feature_norm=args.feature_norm,
         )
 
     def save_training_state() -> None:

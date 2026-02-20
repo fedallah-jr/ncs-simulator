@@ -66,12 +66,15 @@ class MLPAgent(nn.Module):
         n_actions: int,
         hidden_dims: Sequence[int] = (128, 128),
         activation: str = "relu",
+        feature_norm: bool = False,
     ) -> None:
         super().__init__()
         if input_dim <= 0 or n_actions <= 0:
             raise ValueError("input_dim and n_actions must be positive")
         if not hidden_dims:
             raise ValueError("hidden_dims must be non-empty")
+
+        self.feature_norm_layer = nn.LayerNorm(input_dim) if feature_norm else None
 
         act = _get_activation(activation)
         layers: list[nn.Module] = []
@@ -84,6 +87,8 @@ class MLPAgent(nn.Module):
         self.net = nn.Sequential(*layers)
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        if self.feature_norm_layer is not None:
+            obs = self.feature_norm_layer(obs)
         return self.net(obs)
 
 
@@ -105,12 +110,15 @@ class DuelingMLPAgent(nn.Module):
         hidden_dims: Sequence[int] = (128, 128),
         stream_hidden_dim: int = 64,
         activation: str = "relu",
+        feature_norm: bool = False,
     ) -> None:
         super().__init__()
         if input_dim <= 0 or n_actions <= 0:
             raise ValueError("input_dim and n_actions must be positive")
         if not hidden_dims:
             raise ValueError("hidden_dims must be non-empty")
+
+        self.feature_norm_layer = nn.LayerNorm(input_dim) if feature_norm else None
 
         act_fn = _get_activation_class(activation)
 
@@ -138,6 +146,8 @@ class DuelingMLPAgent(nn.Module):
         )
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        if self.feature_norm_layer is not None:
+            obs = self.feature_norm_layer(obs)
         features = self.features(obs)
         value = self.value_stream(features)  # [batch, 1]
         advantage = self.advantage_stream(features)  # [batch, n_actions]
@@ -153,6 +163,7 @@ class CentralValueMLP(nn.Module):
         n_outputs: int,
         hidden_dims: Sequence[int] = (128, 128),
         activation: str = "relu",
+        feature_norm: bool = False,
         use_popart: bool = False,
         popart_beta: float = 0.999,
     ) -> None:
@@ -163,6 +174,7 @@ class CentralValueMLP(nn.Module):
             raise ValueError("hidden_dims must be non-empty")
 
         self._use_popart = use_popart
+        self.feature_norm_layer = nn.LayerNorm(input_dim) if feature_norm else None
 
         act = _get_activation(activation)
         layers: list[nn.Module] = []
@@ -186,6 +198,8 @@ class CentralValueMLP(nn.Module):
         return self._output_layer  # type: ignore[return-value]
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        if self.feature_norm_layer is not None:
+            obs = self.feature_norm_layer(obs)
         return self.net(obs)
 
 
