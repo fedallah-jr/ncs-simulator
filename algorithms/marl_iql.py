@@ -275,7 +275,14 @@ def main() -> None:
         use_agent_id=use_agent_id,
         device=device,
     )
-    save_config_with_hyperparameters(run_dir, args.config, "iql", hyperparams)
+    save_config_with_hyperparameters(
+        run_dir,
+        args.config,
+        "iql",
+        hyperparams,
+        resolved_config=cfg,
+        set_overrides=args.set_overrides,
+    )
 
     print_run_summary(run_dir, latest_path, rewards_csv_path, eval_csv_path)
 

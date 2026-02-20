@@ -597,7 +597,14 @@ def main() -> None:
         n_agents=n_agents,
         device=device,
     )
-    save_config_with_hyperparameters(run_dir, args.config, "happo", hyperparams)
+    save_config_with_hyperparameters(
+        run_dir,
+        args.config,
+        "happo",
+        hyperparams,
+        resolved_config=cfg,
+        set_overrides=args.set_overrides,
+    )
 
     print_run_summary(run_dir, latest_path, rewards_csv_path, eval_csv_path)
 

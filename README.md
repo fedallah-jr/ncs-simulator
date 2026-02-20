@@ -8,7 +8,7 @@ The configuration file is divided into sections; each key controls a specific as
 
 ### `system`
 - `A`, `B`: Discrete-time state and input matrices used by every plant and controller.
-- `process_noise_cov`: Covariance of Gaussian process noise injected into each plant.
+- `process_noise_cov`: Covariance of Gaussian process noise injected into each plant. Acts as the default for all agents; individual agents can override it via a `process_noise_cov` key inside their `heterogeneous_plants` entry.
 - Initial states are sampled from `N(0, P_0)` where `P_0 = 4I` (hardcoded). The Kalman filter's initial covariance is set to the same `P_0`, ensuring `P = E[ee^T]` from the start.
 - `initial_state_fixed`: When `true`, sample one initial state per plant once and reuse it for every reset (training and evaluation).
 - `initial_state_fixed_seed`: Optional seed used to sample the fixed initial states. Set this to keep training/eval aligned even if they use different env seeds.
@@ -138,7 +138,7 @@ CLI flags let you change environment parameters. Use `--output-root` (defaults t
   - For OpenAI-ES: `best_model.npz` (flattened params of best individual) and `latest_model.npz`.
   - For MARL (IQL/VDN/QMIX/MAPPO): `best_model.pt` and `latest_model.pt`.
 - `training_rewards.csv`: A simple CSV table tracking performance. For OpenAI-ES it logs `[generation, mean_reward, max_reward, time]`.
-- **`config.json`**, which combines the full environment configuration with a `training_run` section containing the algorithm name, timestamp, source config path, and all hyperparameters from the run. 
+- **`config.json`**, which combines the effective environment configuration used by the run (including CLI `--set` overrides, when provided) with a `training_run` section containing the algorithm name, timestamp, source config path, and all hyperparameters from the run. 
 
 Configuration presets live under `configs/`. `configs/perfect_comm.json` mirrors the default plant/network settings but forces `network.perfect_communication` to `true`, which is useful for debugging algorithms without channel contention.
 
@@ -169,7 +169,7 @@ Policy testing lives in `tools/policy_tester.py` and evaluates a target policy a
 
 ### Saved Configuration Format
 
-The `config.json` file saved in each run directory preserves the complete environment configuration and adds a `training_run` section with metadata:
+The `config.json` file saved in each run directory preserves the complete effective environment configuration used for training (including CLI `--set` overrides) and adds a `training_run` section with metadata:
 
 ```json
 {
@@ -183,6 +183,9 @@ The `config.json` file saved in each run directory preserves the complete enviro
     "timestamp": "2025-11-20T12:34:56Z",
     "algorithm": "qmix",
     "source_config_path": "/path/to/original/config.json",
+    "set_overrides": [
+      "reward.state_error_reward=kf_info_m_noise"
+    ],
     "hyperparameters": {
       "total_timesteps": 200000,
       "episode_length": 1000,
@@ -198,7 +201,7 @@ The `config.json` file saved in each run directory preserves the complete enviro
 }
 ```
 
-**Important:** Input config files (e.g., `configs/marl_mixed_plants.json`) contain only environment settings (`system`, `lqr`, `reward`, etc.). Training hyperparameters like `double_q`, `learning_rate`, `optimizer` are specified via CLI arguments and saved to the output `config.json` for record-keeping. The `training_run` section is not read from input configs.
+**Important:** Input config files (e.g., `configs/marl_mixed_plants.json`) contain only environment settings (`system`, `lqr`, `reward`, etc.). Training hyperparameters like `double_q`, `learning_rate`, `optimizer` are specified via CLI arguments and saved to the output `config.json` for record-keeping. When `--set` is used, those overrides are applied to the saved top-level config and also listed in `training_run.set_overrides`. The `training_run` section is not read from input configs.
 
 This format allows you to:
 - Reproduce the exact run by inspecting the saved `config.json`

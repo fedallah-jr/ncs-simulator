@@ -329,7 +329,14 @@ def main() -> None:
         device=device,
         mixer_params=mixer_params,
     )
-    save_config_with_hyperparameters(run_dir, args.config, "qplex", hyperparams)
+    save_config_with_hyperparameters(
+        run_dir,
+        args.config,
+        "qplex",
+        hyperparams,
+        resolved_config=cfg,
+        set_overrides=args.set_overrides,
+    )
 
     print_run_summary(run_dir, latest_path, rewards_csv_path, eval_csv_path)
 

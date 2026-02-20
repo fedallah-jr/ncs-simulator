@@ -130,10 +130,16 @@ class NCS_Env(gym.Env):
                     f"must match n_agents ({n_agents})"
                 )
 
-        self.A = np.array(self.system_cfg.get("A"))
-        self.B = np.array(self.system_cfg.get("B"))
-        self.state_dim = self.A.shape[0]
-        self.control_dim = self.B.shape[1]
+        het_cfg = self.system_cfg.get("heterogeneous_plants", None)
+        if self.system_cfg.get("A") is not None:
+            self.state_dim = np.array(self.system_cfg["A"]).shape[0]
+            self.control_dim = np.array(self.system_cfg["B"]).shape[1]
+        elif isinstance(het_cfg, list) and len(het_cfg) > 0:
+            ref = next(e for e in het_cfg if isinstance(e, dict) and "A" in e)
+            self.state_dim = np.array(ref["A"]).shape[0]
+            self.control_dim = np.array(ref["B"]).shape[1]
+        else:
+            raise ValueError("system config must provide A/B or heterogeneous_plants")
         self.initial_state_fixed = bool(self.system_cfg.get("initial_state_fixed", False))
         self.initial_state_fixed_seed = self.system_cfg.get("initial_state_fixed_seed", None)
         if self.initial_state_fixed and self.initial_state_fixed_seed is None:
@@ -188,8 +194,7 @@ class NCS_Env(gym.Env):
     def _initialize_systems(self):
         """Initialize plants, controllers, and the shared network."""
         agent_matrices = self._resolve_agent_system_matrices()
-        A, B = agent_matrices[0]
-        W = np.array(self.system_cfg.get("process_noise_cov", np.eye(self.state_dim)))
+        A, B, W = agent_matrices[0]
         self.process_noise_cov = W
         self.initial_estimate_cov = np.array(
             self.system_cfg.get("initial_state_cov", 4.0 * np.eye(self.state_dim))
@@ -212,7 +217,7 @@ class NCS_Env(gym.Env):
 
         if self.finite_horizon_enabled:
             # Compute time-varying gains for finite horizon (uses self.episode_length)
-            for (A_i, B_i) in agent_matrices:
+            for (A_i, B_i, _) in agent_matrices:
                 gains, costs = compute_finite_horizon_lqr_solution(
                     A_i, B_i, lqr_Q, lqr_R, self.episode_length
                 )
@@ -226,7 +231,7 @@ class NCS_Env(gym.Env):
                 self.M_list.append(m_costs)
         else:
             # Original infinite-horizon DARE solver
-            for (A_i, B_i) in agent_matrices:
+            for (A_i, B_i, _) in agent_matrices:
                 gain, cost = compute_discrete_lqr_solution(A_i, B_i, lqr_Q, lqr_R)
                 self.K_list.append(gain)
                 self.S_list.append(cost)
@@ -271,9 +276,9 @@ class NCS_Env(gym.Env):
                 x0 = self._fixed_initial_states[i].copy()
             else:
                 x0 = self._sample_initial_state()
-            A_i, B_i = agent_matrices[i]
+            A_i, B_i, W_i = agent_matrices[i]
             process_rng = self._process_rng if self._process_rng is not None else self.np_random
-            self.plants.append(Plant(A_i, B_i, W, x0, rng=process_rng))
+            self.plants.append(Plant(A_i, B_i, W_i, x0, rng=process_rng))
 
         self.controllers: List[Controller] = []
         for i in range(self.n_agents):
@@ -284,7 +289,7 @@ class NCS_Env(gym.Env):
                     agent_matrices[i][1],
                     self.K_list[i],
                     initial_estimate,
-                    process_noise_cov=W,
+                    process_noise_cov=agent_matrices[i][2],
                     initial_covariance=self.initial_estimate_cov,
                 )
             )
@@ -293,12 +298,12 @@ class NCS_Env(gym.Env):
             self._agent_P_init_tables: List[List[np.ndarray]] = []
             self._agent_P_open_tables: List[List[np.ndarray]] = []
             for i in range(self.n_agents):
-                A_i = agent_matrices[i][0]
+                A_i, _, W_i = agent_matrices[i]
                 P_init = [self.initial_estimate_cov.copy()]
-                P_open = [np.zeros_like(W)]
+                P_open = [np.zeros_like(W_i)]
                 for _ in range(self.episode_length + 1):
-                    P_init.append(A_i @ P_init[-1] @ A_i.T + W)
-                    P_open.append(A_i @ P_open[-1] @ A_i.T + W)
+                    P_init.append(A_i @ P_init[-1] @ A_i.T + W_i)
+                    P_open.append(A_i @ P_open[-1] @ A_i.T + W_i)
                 self._agent_P_init_tables.append(P_init)
                 self._agent_P_open_tables.append(P_open)
 
@@ -642,21 +647,23 @@ class NCS_Env(gym.Env):
                 self._cleanup_old_pending_transmissions(max_age=100)
                 self._last_cleanup_step = self.timestep
 
+        mode = self.reward_definition.mode
         for i in range(self.n_agents):
             covariance = self.controllers[i].P
-            m_gain = self._compute_kf_step_reward(i, covariance, mode="m")
-            s_gain = self._compute_kf_step_reward(i, covariance, mode="s")
-            self.last_kf_info_gains_m[i] = m_gain
-            self.last_kf_info_gains_s[i] = s_gain
-            self.last_kf_info_gains[i] = m_gain + s_gain
-            # tr(M ee^T) = e^T M e using actual estimation error
-            e = self.plants[i].get_state().reshape(-1) - self.controllers[i].x_hat
-            M = self._get_kf_info_matrix(i)
-            self.last_kf_info_gains_m_noise[i] = -float(e @ M @ e)
-            # Q-weighted estimation uncertainty and error
-            Q = self.state_cost_matrix
-            self.last_kf_q_gains[i] = -float(np.trace(Q @ covariance))
-            self.last_kf_q_noise_gains[i] = -float(e @ Q @ e)
+            if mode in ("kf_info", "kf_info_m"):
+                self.last_kf_info_gains_m[i] = self._compute_kf_step_reward(i, covariance, mode="m")
+            if mode in ("kf_info", "kf_info_s"):
+                self.last_kf_info_gains_s[i] = self._compute_kf_step_reward(i, covariance, mode="s")
+            if mode == "kf_info":
+                self.last_kf_info_gains[i] = self.last_kf_info_gains_m[i] + self.last_kf_info_gains_s[i]
+            if mode in ("kf_info_m_noise", "kf_q_noise"):
+                e = self.plants[i].get_state().reshape(-1) - self.controllers[i].x_hat
+                if mode == "kf_info_m_noise":
+                    self.last_kf_info_gains_m_noise[i] = -float(e @ self._get_kf_info_matrix(i) @ e)
+                else:
+                    self.last_kf_q_noise_gains[i] = -float(e @ self.state_cost_matrix @ e)
+            elif mode == "kf_q":
+                self.last_kf_q_gains[i] = -float(np.trace(self.state_cost_matrix @ covariance))
 
         # Compute control and update plants
         lqr_costs = None
@@ -837,23 +844,29 @@ class NCS_Env(gym.Env):
             mean=np.zeros(self.state_dim), cov=self.initial_estimate_cov
         )
 
-    def _resolve_agent_system_matrices(self) -> List[Tuple[np.ndarray, np.ndarray]]:
+    def _resolve_agent_system_matrices(self) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
         """
-        Resolve per-agent (A, B) matrices.
+        Resolve per-agent (A, B, W) matrices.
 
         Supports `system.heterogeneous_plants` as a list of dictionaries. Each entry may
-        override `A` and/or `B` for the corresponding agent index. A separate entry with
-        `"default": true` can define a fallback override used for agents whose index is
-        not explicitly listed.
+        override `A`, `B`, and/or `process_noise_cov` for the corresponding agent index.
+        A separate entry with `"default": true` can define a fallback override used for
+        agents whose index is not explicitly listed.
 
-        All agents must share the same state/control dimensions because the observation
-        and action spaces are shared across agents.
+        Top-level `system.A` / `system.B` / `system.process_noise_cov` act as fallbacks.
+        When only heterogeneous_plants is provided, every agent must define A and B.
         """
-        base_A = np.array(self.system_cfg.get("A"))
-        base_B = np.array(self.system_cfg.get("B"))
+        raw_A = self.system_cfg.get("A", None)
+        raw_B = self.system_cfg.get("B", None)
+        base_A = np.array(raw_A) if raw_A is not None else None
+        base_B = np.array(raw_B) if raw_B is not None else None
+        base_W = np.array(self.system_cfg.get("process_noise_cov", np.eye(self.state_dim)))
+        expected_A_shape = (self.state_dim, self.state_dim)
+        expected_B_shape = (self.state_dim, self.control_dim)
+
         het_cfg = self.system_cfg.get("heterogeneous_plants", None)
         if not isinstance(het_cfg, list) or len(het_cfg) == 0:
-            return [(base_A, base_B) for _ in range(self.n_agents)]
+            return [(base_A, base_B, base_W) for _ in range(self.n_agents)]
 
         default_entry: Optional[Dict[str, Any]] = None
         for entry in het_cfg:
@@ -861,7 +874,7 @@ class NCS_Env(gym.Env):
                 default_entry = entry
                 break
 
-        matrices: List[Tuple[np.ndarray, np.ndarray]] = []
+        matrices: List[Tuple[np.ndarray, np.ndarray, np.ndarray]] = []
         for i in range(self.n_agents):
             entry: Dict[str, Any] = {}
             if i < len(het_cfg) and isinstance(het_cfg[i], dict):
@@ -869,13 +882,23 @@ class NCS_Env(gym.Env):
             elif default_entry is not None:
                 entry = default_entry
 
-            A_i = np.array(entry.get("A", base_A))
-            B_i = np.array(entry.get("B", base_B))
-            if A_i.shape != base_A.shape:
-                raise ValueError("heterogeneous_plants entries must not change the A matrix shape")
-            if B_i.shape != base_B.shape:
-                raise ValueError("heterogeneous_plants entries must not change the B matrix shape")
-            matrices.append((A_i, B_i))
+            raw = entry.get("A", None)
+            A_i = np.array(raw) if raw is not None else base_A
+            raw = entry.get("B", None)
+            B_i = np.array(raw) if raw is not None else base_B
+            raw = entry.get("process_noise_cov", None)
+            W_i = np.array(raw) if raw is not None else base_W
+            if A_i is None:
+                raise ValueError(f"Agent {i}: A must be defined at system level or in heterogeneous_plants")
+            if B_i is None:
+                raise ValueError(f"Agent {i}: B must be defined at system level or in heterogeneous_plants")
+            if A_i.shape != expected_A_shape:
+                raise ValueError(f"Agent {i}: A shape {A_i.shape} does not match expected {expected_A_shape}")
+            if B_i.shape != expected_B_shape:
+                raise ValueError(f"Agent {i}: B shape {B_i.shape} does not match expected {expected_B_shape}")
+            if W_i.shape != expected_A_shape:
+                raise ValueError(f"Agent {i}: process_noise_cov shape {W_i.shape} does not match expected {expected_A_shape}")
+            matrices.append((A_i, B_i, W_i))
 
         return matrices
 
