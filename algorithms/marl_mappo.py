@@ -251,7 +251,7 @@ def main() -> None:
         activation=args.activation,
         feature_norm=args.feature_norm,
         use_popart=args.popart,
-        popart_beta=float(args.value_norm_beta),
+        popart_beta=float(args.popart_beta),
     ).to(device)
 
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=float(args.learning_rate))
@@ -261,7 +261,12 @@ def main() -> None:
         value_normalizer = None
     else:
         popart_layer = None
-        value_normalizer = ValueNorm((value_dim,), device=device, beta=float(args.value_norm_beta))
+        value_normalizer = ValueNorm(
+            (value_dim,),
+            device=device,
+            beta=float(args.value_norm_beta),
+            per_element_update=bool(args.value_norm_per_element_update),
+        )
     base_lr = float(args.learning_rate)
 
     best_model_tracker = BestModelTracker()

@@ -19,3 +19,4 @@ vis/
 
 # Test files (development only)
 test_*.py
+!tests/test_*.py

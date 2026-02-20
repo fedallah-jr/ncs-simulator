@@ -103,9 +103,15 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--ent-coef", type=float, default=0.01)
     parser.add_argument("--vf-coef", type=float, default=0.5)
     parser.add_argument("--huber-delta", type=float, default=10.0)
-    parser.add_argument("--value-norm-beta", type=float, default=0.999)
+    parser.add_argument("--value-norm-beta", type=float, default=0.99999)
+    parser.add_argument(
+        "--value-norm-per-element-update",
+        action="store_true",
+        help="Scale ValueNorm decay by the number of elements per update (on-policy style).",
+    )
     parser.add_argument("--popart", action="store_true",
                         help="Use PopArt value normalization (output-preserving weight correction)")
+    parser.add_argument("--popart-beta", type=float, default=0.999)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[128, 128])
     parser.add_argument("--activation", type=str, default="relu", choices=["relu", "tanh", "elu"])
@@ -144,7 +150,11 @@ def build_happo_hyperparams(
         "lr_decay": args.lr_decay, "gamma": args.gamma,
         "gae_lambda": args.gae_lambda, "clip_range": args.clip_range,
         "ent_coef": args.ent_coef, "vf_coef": args.vf_coef, "huber_delta": args.huber_delta,
-        "value_norm": True, "value_norm_beta": args.value_norm_beta, "popart": args.popart,
+        "value_norm": True,
+        "value_norm_beta": args.value_norm_beta,
+        "value_norm_per_element_update": args.value_norm_per_element_update,
+        "popart": args.popart,
+        "popart_beta": args.popart_beta,
         "team_reward": args.team_reward, "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip, "obs_norm_eps": args.obs_norm_eps,
         "max_grad_norm": args.max_grad_norm, "hidden_dims": list(args.hidden_dims),
@@ -177,9 +187,15 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--ent-coef", type=float, default=0.01)
     parser.add_argument("--vf-coef", type=float, default=0.5)
     parser.add_argument("--huber-delta", type=float, default=10.0)
-    parser.add_argument("--value-norm-beta", type=float, default=0.999)
+    parser.add_argument("--value-norm-beta", type=float, default=0.99999)
+    parser.add_argument(
+        "--value-norm-per-element-update",
+        action="store_true",
+        help="Scale ValueNorm decay by the number of elements per update (on-policy style).",
+    )
     parser.add_argument("--popart", action="store_true",
                         help="Use PopArt value normalization (output-preserving weight correction)")
+    parser.add_argument("--popart-beta", type=float, default=0.999)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[128, 128])
     parser.add_argument("--activation", type=str, default="relu", choices=["relu", "tanh", "elu"])

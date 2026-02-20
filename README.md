@@ -94,11 +94,14 @@ Learning-based baselines live under `algorithms/`:
   - QPLEX weights agent Qs via Q-attention (state + per-agent Q-values); tune with `--n-head`, `--attend-reg-coef`, `--nonlinear`, `--no-state-bias`, `--no-weighted-head`.
 - MAPPO (multi-agent, PyTorch): `python -m algorithms.marl_mappo --config configs/marl_mixed_plants.json --total-timesteps 200000`
   - `--popart`: Use PopArt value normalization (output-preserving weight correction) instead of the default EMA-based ValueNorm.
+  - PopArt EMA decay can be tuned with `--popart-beta` (default `0.999`).
+  - ValueNorm now follows on-policy math by default (`--value-norm-beta 0.99999`, variance floor `1e-2`); enable `--value-norm-per-element-update` to scale decay by rollout batch size.
 - HAPPO (multi-agent, PyTorch): `python -m algorithms.marl_happo --config configs/marl_mixed_plants.json --total-timesteps 200000`
   - Independent actor per agent with sequential policy update and importance-weighting factor (monotonic improvement guarantee).
   - Uses shared team reward and a scalar centralized critic, matching the paper's fully cooperative formulation.
   - `--fixed-order`: Use fixed agent update order instead of random shuffle each iteration.
   - `--popart`: Use PopArt value normalization instead of the default EMA-based ValueNorm.
+  - PopArt EMA decay can be tuned with `--popart-beta` (default `0.999`).
 
 All MARL Q-learning algorithms (IQL, VDN, QMIX, QPLEX) support these architectural enhancements:
 - `--double-q`: Enable Double DQN (use online network to select actions, target network to evaluate).
