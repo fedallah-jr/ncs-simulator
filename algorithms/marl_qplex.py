@@ -124,7 +124,6 @@ def main() -> None:
         "n_actions": n_actions,
         "hidden_dims": tuple(args.hidden_dims),
         "activation": args.activation,
-        "layer_norm": args.layer_norm,
     }
     if args.dueling:
         agent_kwargs["stream_hidden_dim"] = args.stream_hidden_dim
@@ -219,7 +218,6 @@ def main() -> None:
             parameter_sharing=(not args.independent_agents),
             agent_hidden_dims=list(args.hidden_dims),
             agent_activation=args.activation,
-            agent_layer_norm=args.layer_norm,
             dueling=args.dueling,
             stream_hidden_dim=args.stream_hidden_dim if args.dueling else None,
             agent=learner.agent,

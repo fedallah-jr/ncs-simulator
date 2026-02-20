@@ -66,7 +66,6 @@ class MLPAgent(nn.Module):
         n_actions: int,
         hidden_dims: Sequence[int] = (128, 128),
         activation: str = "relu",
-        layer_norm: bool = False,
     ) -> None:
         super().__init__()
         if input_dim <= 0 or n_actions <= 0:
@@ -79,8 +78,6 @@ class MLPAgent(nn.Module):
         last_dim = input_dim
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(last_dim, int(hidden_dim)))
-            if layer_norm:
-                layers.append(nn.LayerNorm(int(hidden_dim)))
             layers.append(act)
             last_dim = int(hidden_dim)
         layers.append(nn.Linear(last_dim, n_actions))
@@ -108,7 +105,6 @@ class DuelingMLPAgent(nn.Module):
         hidden_dims: Sequence[int] = (128, 128),
         stream_hidden_dim: int = 64,
         activation: str = "relu",
-        layer_norm: bool = False,
     ) -> None:
         super().__init__()
         if input_dim <= 0 or n_actions <= 0:
@@ -123,8 +119,6 @@ class DuelingMLPAgent(nn.Module):
         last_dim = input_dim
         for hidden_dim in hidden_dims:
             feature_layers.append(nn.Linear(last_dim, int(hidden_dim)))
-            if layer_norm:
-                feature_layers.append(nn.LayerNorm(int(hidden_dim)))
             feature_layers.append(act_fn())
             last_dim = int(hidden_dim)
         self.features = nn.Sequential(*feature_layers)
@@ -159,7 +153,6 @@ class CentralValueMLP(nn.Module):
         n_outputs: int,
         hidden_dims: Sequence[int] = (128, 128),
         activation: str = "relu",
-        layer_norm: bool = False,
         use_popart: bool = False,
         popart_beta: float = 0.999,
     ) -> None:
@@ -176,8 +169,6 @@ class CentralValueMLP(nn.Module):
         last_dim = input_dim
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(last_dim, int(hidden_dim)))
-            if layer_norm:
-                layers.append(nn.LayerNorm(int(hidden_dim)))
             layers.append(act)
             last_dim = int(hidden_dim)
 

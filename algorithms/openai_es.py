@@ -87,7 +87,6 @@ def create_policy_net(
     action_dim: int,
     hidden_dims: Tuple[int, ...] = (64, 64),
     activation: str = "tanh",
-    use_layer_norm: bool = False,
 ):
     """Create a PolicyNet instance. Imports Flax lazily."""
     import flax.linen as nn
@@ -99,15 +98,12 @@ def create_policy_net(
         action_dim: int
         hidden_dims: tuple = (64, 64)
         activation: str = "tanh"
-        use_layer_norm: bool = False
 
         @nn.compact
         def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
             act_fn = _activations[self.activation]
             for dim in self.hidden_dims:
                 x = nn.Dense(dim)(x)
-                if self.use_layer_norm:
-                    x = nn.LayerNorm()(x)
                 x = act_fn(x)
             x = nn.Dense(self.action_dim)(x)
             return x
@@ -116,7 +112,6 @@ def create_policy_net(
         action_dim=action_dim,
         hidden_dims=hidden_dims,
         activation=activation,
-        use_layer_norm=use_layer_norm,
     )
 
 
@@ -130,7 +125,6 @@ def _init_worker(
     use_agent_id: bool,
     hidden_dims: Tuple[int, ...] = (64, 64),
     activation: str = "tanh",
-    use_layer_norm: bool = False,
     normalize_obs: bool = True,
     obs_norm_clip: float = 5.0,
     obs_norm_eps: float = 1e-8,
@@ -179,7 +173,6 @@ def _init_worker(
         action_dim,
         hidden_dims=hidden_dims,
         activation=activation,
-        use_layer_norm=use_layer_norm,
     )
     
     rng = jax.random.PRNGKey(0)
@@ -334,7 +327,6 @@ def _load_pt_checkpoint(
     return {
         "hidden_dims": tuple(ckpt["agent_hidden_dims"]),
         "activation": ckpt["agent_activation"],
-        "use_layer_norm": ckpt["agent_layer_norm"],
         "state_dict": ckpt["agent_state_dict"],
         "obs_norm_state": ckpt.get("obs_normalization", {}),
     }
@@ -344,14 +336,13 @@ def _pt_state_dict_to_flax(
     state_dict: Dict[str, Any],
     params_template: Any,
     hidden_dims: Tuple[int, ...],
-    use_layer_norm: bool,
 ) -> Any:
     """Convert a PyTorch MLPAgent state_dict to Flax PolicyNet params."""
     import jax
     import jax.numpy as jnp
 
     n_hidden = len(hidden_dims)
-    stride = 3 if use_layer_norm else 2
+    stride = 2
     params_dict: Dict[str, Dict[str, Any]] = {}
 
     for i in range(n_hidden):
@@ -362,12 +353,6 @@ def _pt_state_dict_to_flax(
             "kernel": jnp.array(w.T, dtype=jnp.float32),
             "bias": jnp.array(b, dtype=jnp.float32),
         }
-        if use_layer_norm:
-            ln_idx = pt_idx + 1
-            params_dict[f"LayerNorm_{i}"] = {
-                "scale": jnp.array(state_dict[f"net.{ln_idx}.weight"].numpy(), dtype=jnp.float32),
-                "bias": jnp.array(state_dict[f"net.{ln_idx}.bias"].numpy(), dtype=jnp.float32),
-            }
 
     pt_out_idx = n_hidden * stride
     w = state_dict[f"net.{pt_out_idx}.weight"].numpy()
@@ -427,7 +412,6 @@ def train(args):
     # Determine architecture (may be overridden by .pt checkpoint)
     hidden_dims = tuple(args.hidden_dims)
     activation = args.activation
-    use_layer_norm = args.use_layer_norm
     _pt_state_dict = None
     _pt_obs_norm_state: Optional[Dict[str, Any]] = None
 
@@ -435,13 +419,12 @@ def train(args):
         pt_info = _load_pt_checkpoint(args.init_checkpoint, obs_dim, n_agents, use_agent_id)
         hidden_dims = pt_info["hidden_dims"]
         activation = pt_info["activation"]
-        use_layer_norm = pt_info["use_layer_norm"]
         _pt_state_dict = pt_info["state_dict"]
         _pt_obs_norm_state = pt_info["obs_norm_state"]
 
     print(f"Observation Dim: {obs_dim}, Input Dim: {input_dim}, Action Dim: {action_dim}")
     print(f"N Agents: {n_agents}, Use Agent Id: {use_agent_id}")
-    print(f"Hidden Dims: {hidden_dims}, Activation: {activation}, Layer Norm: {use_layer_norm}")
+    print(f"Hidden Dims: {hidden_dims}, Activation: {activation}")
     print(
         "Obs normalization: "
         f"{'enabled' if args.normalize_obs else 'disabled'} "
@@ -470,7 +453,6 @@ def train(args):
         action_dim,
         hidden_dims=hidden_dims,
         activation=activation,
-        use_layer_norm=use_layer_norm,
     )
     dummy_obs = jnp.zeros((1, input_dim))
     master_rng, template_rng = jax.random.split(master_rng)
@@ -487,7 +469,7 @@ def train(args):
     # Load .pt checkpoint weights (architecture was already overridden above)
     if _pt_state_dict is not None:
         pretrained_params = _pt_state_dict_to_flax(
-            _pt_state_dict, params_template, hidden_dims, use_layer_norm,
+            _pt_state_dict, params_template, hidden_dims,
         )
         pretrained_flat = np.array(flatten_util.ravel_pytree(pretrained_params)[0])
         if args.normalize_obs and _pt_obs_norm_state and _pt_obs_norm_state.get("enabled", False):
@@ -659,7 +641,6 @@ def train(args):
                 use_agent_id,
                 hidden_dims,
                 activation,
-                use_layer_norm,
                 args.normalize_obs,
                 args.obs_norm_clip,
                 args.obs_norm_eps,
@@ -680,7 +661,6 @@ def train(args):
             use_agent_id,
             hidden_dims,
             activation,
-            use_layer_norm,
             args.normalize_obs,
             args.obs_norm_clip,
             args.obs_norm_eps,
@@ -696,7 +676,6 @@ def train(args):
             "hidden_dims": list(hidden_dims),
             "activation": activation,
             "hidden_size": int(hidden_dims[0]),
-            "use_layer_norm": use_layer_norm,
             "normalize_obs": args.normalize_obs,
             "obs_norm_clip": args.obs_norm_clip,
             "obs_norm_eps": args.obs_norm_eps,
@@ -869,7 +848,6 @@ def train(args):
         "fitness_shaping": args.fitness_shaping,
         "hidden_dims": list(hidden_dims),
         "activation": activation,
-        "use_layer_norm": use_layer_norm,
         "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip,
         "obs_norm_eps": args.obs_norm_eps,
@@ -912,7 +890,6 @@ def parse_args():
                         help="Hidden layer dimensions (e.g., --hidden-dims 128 128).")
     parser.add_argument("--activation", type=str, default="tanh",
                         choices=["tanh", "relu", "elu"], help="Activation function.")
-    parser.add_argument("--use-layer-norm", action="store_true", help="Use LayerNorm.")
     obs_norm_group = parser.add_mutually_exclusive_group()
     obs_norm_group.add_argument(
         "--normalize-obs",

@@ -242,14 +242,12 @@ def main() -> None:
         n_actions=n_actions,
         hidden_dims=tuple(args.hidden_dims),
         activation=args.activation,
-        layer_norm=args.layer_norm,
     ).to(device)
     critic = CentralValueMLP(
         input_dim=critic_input_dim,
         n_outputs=value_dim,
         hidden_dims=tuple(args.hidden_dims),
         activation=args.activation,
-        layer_norm=args.layer_norm,
         use_popart=args.popart,
         popart_beta=float(args.value_norm_beta),
     ).to(device)
@@ -292,10 +290,8 @@ def main() -> None:
             team_reward=args.team_reward,
             agent_hidden_dims=list(args.hidden_dims),
             agent_activation=args.activation,
-            agent_layer_norm=args.layer_norm,
             critic_hidden_dims=list(args.hidden_dims),
             critic_activation=args.activation,
-            critic_layer_norm=args.layer_norm,
             actor=actor,
             critic=critic,
             obs_normalizer=obs_normalizer,

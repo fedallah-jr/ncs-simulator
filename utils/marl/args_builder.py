@@ -41,7 +41,6 @@ def build_base_qlearning_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--epsilon-decay-steps", type=int, default=100_000)
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[64, 64])
     parser.add_argument("--activation", type=str, default="tanh", choices=["relu", "tanh", "elu"])
-    parser.add_argument("--layer-norm", action="store_true")
     parser.add_argument("--dueling", action="store_true")
     parser.add_argument("--stream-hidden-dim", type=int, default=64)
     parser.add_argument("--no-agent-id", action="store_true")
@@ -108,7 +107,6 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[128, 128])
     parser.add_argument("--activation", type=str, default="relu", choices=["relu", "tanh", "elu"])
-    parser.add_argument("--layer-norm", action="store_true")
     parser.add_argument("--fixed-order", action="store_true",
                         help="Use fixed agent update order instead of random shuffle each iteration")
     team_reward_group = parser.add_mutually_exclusive_group()
@@ -146,7 +144,7 @@ def build_happo_hyperparams(
         "team_reward": args.team_reward, "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip, "obs_norm_eps": args.obs_norm_eps,
         "max_grad_norm": args.max_grad_norm, "hidden_dims": list(args.hidden_dims),
-        "activation": args.activation, "layer_norm": args.layer_norm,
+        "activation": args.activation,
         "fixed_order": args.fixed_order, "parameter_sharing": False,
         "eval_freq": args.eval_freq,
         "n_eval_episodes": args.n_eval_episodes, "n_eval_envs": args.n_eval_envs,
@@ -181,7 +179,6 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[128, 128])
     parser.add_argument("--activation", type=str, default="relu", choices=["relu", "tanh", "elu"])
-    parser.add_argument("--layer-norm", action="store_true")
     parser.add_argument("--no-agent-id", action="store_true")
     parser.add_argument("--team-reward", action="store_true")
     obs_norm_group = parser.add_mutually_exclusive_group()

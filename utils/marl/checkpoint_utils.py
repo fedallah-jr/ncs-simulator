@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 def save_qlearning_checkpoint(
     path: Path, algorithm: str, n_agents: int, obs_dim: int, n_actions: int,
     use_agent_id: bool, parameter_sharing: bool, agent_hidden_dims: List[int],
-    agent_activation: str, agent_layer_norm: bool, dueling: bool,
+    agent_activation: str, dueling: bool,
     stream_hidden_dim: Optional[int], agent: torch.nn.Module,
     obs_normalizer: Optional["RunningObsNormalizer"],
     mixer: Optional[torch.nn.Module] = None, mixer_params: Optional[Dict[str, Any]] = None,
@@ -17,7 +17,7 @@ def save_qlearning_checkpoint(
         "algorithm": algorithm, "n_agents": n_agents, "obs_dim": obs_dim,
         "n_actions": n_actions, "use_agent_id": use_agent_id,
         "parameter_sharing": parameter_sharing, "agent_hidden_dims": agent_hidden_dims,
-        "agent_activation": agent_activation, "agent_layer_norm": agent_layer_norm,
+        "agent_activation": agent_activation,
         "dueling": dueling, "stream_hidden_dim": stream_hidden_dim if dueling else None,
     }
     if mixer_params is not None:
@@ -36,8 +36,8 @@ def save_qlearning_checkpoint(
 def save_mappo_checkpoint(
     path: Path, n_agents: int, obs_dim: int, n_actions: int, use_agent_id: bool,
     team_reward: bool, agent_hidden_dims: List[int], agent_activation: str,
-    agent_layer_norm: bool, critic_hidden_dims: List[int], critic_activation: str,
-    critic_layer_norm: bool, actor: torch.nn.Module, critic: torch.nn.Module,
+    critic_hidden_dims: List[int], critic_activation: str,
+    actor: torch.nn.Module, critic: torch.nn.Module,
     obs_normalizer: Optional["RunningObsNormalizer"],
     popart: bool = False,
 ) -> None:
@@ -46,10 +46,10 @@ def save_mappo_checkpoint(
         "n_actions": n_actions, "use_agent_id": use_agent_id,
         "parameter_sharing": True, "team_reward": team_reward,
         "agent_hidden_dims": agent_hidden_dims, "agent_activation": agent_activation,
-        "agent_layer_norm": agent_layer_norm, "dueling": False, "stream_hidden_dim": None,
+        "dueling": False, "stream_hidden_dim": None,
         "agent_state_dict": actor.state_dict(), "critic_state_dict": critic.state_dict(),
         "critic_hidden_dims": critic_hidden_dims, "critic_activation": critic_activation,
-        "critic_layer_norm": critic_layer_norm, "popart": popart,
+        "popart": popart,
     }
     ckpt["obs_normalization"] = (
         obs_normalizer.state_dict() if obs_normalizer is not None else {"enabled": False}
@@ -59,8 +59,8 @@ def save_mappo_checkpoint(
 def save_happo_checkpoint(
     path: Path, n_agents: int, obs_dim: int, n_actions: int,
     agent_hidden_dims: List[int], agent_activation: str,
-    agent_layer_norm: bool, critic_hidden_dims: List[int], critic_activation: str,
-    critic_layer_norm: bool, actors: List[torch.nn.Module], critic: torch.nn.Module,
+    critic_hidden_dims: List[int], critic_activation: str,
+    actors: List[torch.nn.Module], critic: torch.nn.Module,
     obs_normalizer: Optional["RunningObsNormalizer"],
     popart: bool = False,
     team_reward: bool = True,
@@ -70,11 +70,11 @@ def save_happo_checkpoint(
         "n_actions": n_actions, "use_agent_id": False,
         "parameter_sharing": False, "team_reward": team_reward,
         "agent_hidden_dims": agent_hidden_dims, "agent_activation": agent_activation,
-        "agent_layer_norm": agent_layer_norm, "dueling": False, "stream_hidden_dim": None,
+        "dueling": False, "stream_hidden_dim": None,
         "agent_state_dicts": [actor.state_dict() for actor in actors],
         "critic_state_dict": critic.state_dict(),
         "critic_hidden_dims": critic_hidden_dims, "critic_activation": critic_activation,
-        "critic_layer_norm": critic_layer_norm, "popart": popart,
+        "popart": popart,
     }
     ckpt["obs_normalization"] = (
         obs_normalizer.state_dict() if obs_normalizer is not None else {"enabled": False}
@@ -234,7 +234,7 @@ def build_qlearning_hyperparams(
         "optimizer": args.optimizer, "epsilon_start": args.epsilon_start,
         "epsilon_end": args.epsilon_end, "epsilon_decay_steps": args.epsilon_decay_steps,
         "hidden_dims": list(args.hidden_dims), "activation": args.activation,
-        "layer_norm": args.layer_norm, "dueling": args.dueling,
+        "dueling": args.dueling,
         "stream_hidden_dim": args.stream_hidden_dim, "use_agent_id": use_agent_id,
         "independent_agents": args.independent_agents, "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip, "obs_norm_eps": args.obs_norm_eps,
@@ -262,7 +262,7 @@ def build_mappo_hyperparams(
         "team_reward": args.team_reward, "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip, "obs_norm_eps": args.obs_norm_eps,
         "max_grad_norm": args.max_grad_norm, "hidden_dims": list(args.hidden_dims),
-        "activation": args.activation, "layer_norm": args.layer_norm,
+        "activation": args.activation,
         "use_agent_id": use_agent_id, "eval_freq": args.eval_freq,
         "n_eval_episodes": args.n_eval_episodes, "n_eval_envs": args.n_eval_envs,
         "device": str(device), "seed": args.seed,
