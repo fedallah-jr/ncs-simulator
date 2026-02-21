@@ -49,6 +49,6 @@
     "perfect_communication": false,
     "app_ack_packet_size": 30,
     "tx_buffer_bytes": 100,
-    "random_drop_rate": [0.03, 0.001, 0.1]
+    "random_drop_rate": [0.0, 0.0, 0.0]
   }
 }

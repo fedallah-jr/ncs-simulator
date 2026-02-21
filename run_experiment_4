@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiment batch 4: MAPPO team reward with reward normalization
-# Phase 1 (7.5M steps): kf_info_m reward, no dropout
-# Phase 2 (+5M steps): resume, kf_info_m_noise reward, no dropout
-# Phase 3 (+5M steps): resume, kf_info_m_noise reward, with dropout
+# MARL experiment batch 4: MAPPO team reward with PopArt value normalization
+# Phase 1 (7.5M steps): kf_info_m reward
+# Phase 2 (+7.5M steps): resume, kf_info_m_noise reward
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -13,8 +12,7 @@ SEED="${SEED:-0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 
 PHASE1_TIMESTEPS="${PHASE1_TIMESTEPS:-7500000}"
-PHASE2_TIMESTEPS="${PHASE2_TIMESTEPS:-12500000}"
-TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-17500000}"
+PHASE2_TIMESTEPS="${PHASE2_TIMESTEPS:-15000000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_root="${OUTPUT_ROOT}/exp_4_mappo_team_reward_${timestamp}_seed${SEED}"
@@ -92,19 +90,19 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
-# --- Phase 1: kf_info_m reward, no dropout ---
+# --- Phase 1: kf_info_m reward ---
 run_one "algorithms.marl_mappo" "mappo" "mappo_team_reward" \
   --team-reward \
   --no-normalize-obs \
+  --popart \
   --feature-norm \
   --set reward.state_error_reward=kf_info_m \
-  --set reward.normalize=false \
-  --set network.random_drop_rate=0
+  --set reward.normalize=false
 
 resume_dir="${run_root}/mappo_team_reward"
 
-# --- Phase 2: resume, kf_info_m_noise reward, no dropout ---
-echo "=== mappo_team_reward (phase 2: kf_info_m_noise, no dropout) ==="
+# --- Phase 2: resume, kf_info_m_noise reward ---
+echo "=== mappo_team_reward (phase 2: kf_info_m_noise) ==="
 echo "Resuming from: ${resume_dir}"
 echo "Total timesteps: ${PHASE2_TIMESTEPS}"
 
@@ -117,30 +115,11 @@ PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m algorithms.marl_mappo \
   --episode-length 250 \
   --team-reward \
   --no-normalize-obs \
+  --popart \
   --feature-norm \
   --set reward.state_error_reward=kf_info_m_noise \
   --set reward.normalize=false \
-  --set network.random_drop_rate=0 \
   2>&1 | tee "${run_root}/logs/mappo_team_reward_phase2.log"
-
-# --- Phase 3: resume, kf_info_m_noise reward, with dropout ---
-echo "=== mappo_team_reward (phase 3: kf_info_m_noise + dropout) ==="
-echo "Resuming from: ${resume_dir}"
-echo "Total timesteps: ${TOTAL_TIMESTEPS}"
-
-PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m algorithms.marl_mappo \
-  --config "${config_path}" \
-  --resume "${resume_dir}" \
-  --seed "${SEED}" \
-  --total-timesteps "${TOTAL_TIMESTEPS}" \
-  --n-eval-episodes 30 \
-  --episode-length 250 \
-  --team-reward \
-  --no-normalize-obs \
-  --feature-norm \
-  --set reward.state_error_reward=kf_info_m_noise \
-  --set reward.normalize=false \
-  2>&1 | tee "${run_root}/logs/mappo_team_reward_phase3.log"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then
