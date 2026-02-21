@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiment batch 4: MAPPO team reward with PopArt value normalization
+# MARL experiment batch 4: MAPPO team reward with ValueNorm
 # Phase 1 (7.5M steps): kf_info_m reward
 # Phase 2 (+7.5M steps): resume, kf_info_m_noise reward
 
@@ -94,7 +94,6 @@ run_one() {
 run_one "algorithms.marl_mappo" "mappo" "mappo_team_reward" \
   --team-reward \
   --no-normalize-obs \
-  --popart \
   --feature-norm \
   --set reward.state_error_reward=kf_info_m \
   --set reward.normalize=false
@@ -115,7 +114,6 @@ PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m algorithms.marl_mappo \
   --episode-length 250 \
   --team-reward \
   --no-normalize-obs \
-  --popart \
   --feature-norm \
   --set reward.state_error_reward=kf_info_m_noise \
   --set reward.normalize=false \
