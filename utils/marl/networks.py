@@ -24,17 +24,6 @@ def _get_activation(name: str) -> nn.Module:
     raise ValueError("activation must be one of: relu, tanh, elu")
 
 
-def _get_activation_class(name: str) -> type[nn.Module]:
-    """Return an activation module class by name."""
-    if name == "relu":
-        return nn.ReLU
-    elif name == "tanh":
-        return nn.Tanh
-    elif name == "elu":
-        return nn.ELU
-    raise ValueError("activation must be one of: relu, tanh, elu")
-
-
 def _get_activation_gain(name: str) -> float:
     """Return orthogonal initialization gain for hidden layers."""
     if name == "relu":
@@ -59,6 +48,28 @@ def _apply_orthogonal_init(module: nn.Module, gain: float) -> None:
     for submodule in module.modules():
         if isinstance(submodule, nn.Linear):
             _init_linear(submodule, gain=gain)
+
+
+def build_mlp_hidden(
+    input_dim: int,
+    hidden_dims: Sequence[int],
+    activation: str = "relu",
+    layer_norm: bool = False,
+) -> tuple[nn.Sequential, int]:
+    """Build hidden layers: [Linear -> Activation -> Optional LayerNorm] * N.
+
+    Returns (sequential_module, last_hidden_dim).
+    """
+    act = _get_activation(activation)
+    layers: list[nn.Module] = []
+    last_dim = input_dim
+    for hidden_dim in hidden_dims:
+        layers.append(nn.Linear(last_dim, int(hidden_dim)))
+        layers.append(act)
+        if layer_norm:
+            layers.append(nn.LayerNorm(int(hidden_dim)))
+        last_dim = int(hidden_dim)
+    return nn.Sequential(*layers), last_dim
 
 
 _AGENT_ID_CACHE: dict[tuple[int, torch.device, torch.dtype], torch.Tensor] = {}
@@ -96,6 +107,7 @@ class MLPAgent(nn.Module):
         hidden_dims: Sequence[int] = (128, 128),
         activation: str = "relu",
         feature_norm: bool = False,
+        layer_norm: bool = False,
         output_gain: float = 1.0,
     ) -> None:
         super().__init__()
@@ -106,18 +118,12 @@ class MLPAgent(nn.Module):
 
         self.feature_norm_layer = nn.LayerNorm(input_dim) if feature_norm else None
 
-        act = _get_activation(activation)
-        layers: list[nn.Module] = []
-        last_dim = input_dim
-        for hidden_dim in hidden_dims:
-            layers.append(nn.Linear(last_dim, int(hidden_dim)))
-            layers.append(act)
-            last_dim = int(hidden_dim)
-        layers.append(nn.Linear(last_dim, n_actions))
-        self.net = nn.Sequential(*layers)
+        hidden, last_dim = build_mlp_hidden(input_dim, hidden_dims, activation, layer_norm)
+        output_linear = nn.Linear(last_dim, n_actions)
+        self.net = nn.Sequential(*hidden, output_linear)
         hidden_gain = _get_activation_gain(activation)
         _apply_orthogonal_init(self.net, gain=hidden_gain)
-        _init_linear(self.net[-1], gain=float(output_gain))
+        _init_linear(output_linear, gain=float(output_gain))
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         if self.feature_norm_layer is not None:
@@ -144,6 +150,7 @@ class DuelingMLPAgent(nn.Module):
         stream_hidden_dim: int = 64,
         activation: str = "relu",
         feature_norm: bool = False,
+        layer_norm: bool = False,
         output_gain: float = 1.0,
     ) -> None:
         super().__init__()
@@ -154,28 +161,21 @@ class DuelingMLPAgent(nn.Module):
 
         self.feature_norm_layer = nn.LayerNorm(input_dim) if feature_norm else None
 
-        act_fn = _get_activation_class(activation)
-
         # Shared feature extractor
-        feature_layers: list[nn.Module] = []
-        last_dim = input_dim
-        for hidden_dim in hidden_dims:
-            feature_layers.append(nn.Linear(last_dim, int(hidden_dim)))
-            feature_layers.append(act_fn())
-            last_dim = int(hidden_dim)
-        self.features = nn.Sequential(*feature_layers)
+        self.features, last_dim = build_mlp_hidden(input_dim, hidden_dims, activation, layer_norm)
 
+        act = _get_activation(activation)
         # Value stream: outputs V(s) scalar
         self.value_stream = nn.Sequential(
             nn.Linear(last_dim, stream_hidden_dim),
-            act_fn(),
+            act,
             nn.Linear(stream_hidden_dim, 1),
         )
 
         # Advantage stream: outputs A(s,a) for each action
         self.advantage_stream = nn.Sequential(
             nn.Linear(last_dim, stream_hidden_dim),
-            act_fn(),
+            _get_activation(activation),
             nn.Linear(stream_hidden_dim, n_actions),
         )
         hidden_gain = _get_activation_gain(activation)
@@ -202,6 +202,7 @@ class CentralValueMLP(nn.Module):
         hidden_dims: Sequence[int] = (128, 128),
         activation: str = "relu",
         feature_norm: bool = False,
+        layer_norm: bool = False,
         use_popart: bool = False,
         popart_beta: float = 0.999,
         output_gain: float = 1.0,
@@ -215,20 +216,13 @@ class CentralValueMLP(nn.Module):
         self._use_popart = use_popart
         self.feature_norm_layer = nn.LayerNorm(input_dim) if feature_norm else None
 
-        act = _get_activation(activation)
-        layers: list[nn.Module] = []
-        last_dim = input_dim
-        for hidden_dim in hidden_dims:
-            layers.append(nn.Linear(last_dim, int(hidden_dim)))
-            layers.append(act)
-            last_dim = int(hidden_dim)
+        hidden, last_dim = build_mlp_hidden(input_dim, hidden_dims, activation, layer_norm)
 
         if use_popart:
             self._output_layer = PopArtLayer(last_dim, n_outputs, beta=popart_beta)
         else:
             self._output_layer = nn.Linear(last_dim, n_outputs)
-        layers.append(self._output_layer)
-        self.net = nn.Sequential(*layers)
+        self.net = nn.Sequential(*hidden, self._output_layer)
         hidden_gain = _get_activation_gain(activation)
         _apply_orthogonal_init(self.net, gain=hidden_gain)
         if use_popart:

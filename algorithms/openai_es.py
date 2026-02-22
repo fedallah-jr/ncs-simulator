@@ -64,7 +64,7 @@ _worker_env: Optional[gym.Env] = None
 _worker_model: Any = None
 _worker_params: Any = None
 _worker_config_path: Optional[str] = None
-_worker_episode_length: int = 500
+_worker_episode_length: int = 250
 _worker_n_agents: int = 1
 _worker_use_agent_id: bool = False
 _worker_agent_id_eye: Optional[np.ndarray] = None
@@ -923,7 +923,7 @@ def parse_args():
     parser.add_argument("--config", type=Path, default=None, help="Config JSON path.")
     parser.add_argument("--generations", type=int, default=100, help="Number of generations.")
     parser.add_argument("--popsize", type=int, default=1000, help="Population size.")
-    parser.add_argument("--episode-length", type=int, default=500, help="Episode length.")
+    parser.add_argument("--episode-length", type=int, default=250, help="Episode length.")
     parser.add_argument("--eval-episodes", type=int, default=3, 
                         help="Episodes per individual (anti-overfitting). Default: 3")
     parser.add_argument("--fitness-shaping", type=str, default="centered_rank",

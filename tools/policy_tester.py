@@ -1422,7 +1422,7 @@ def main() -> int:
         help="Policy type for the target policy",
     )
     parser.add_argument("--policy-label", default=None, help="Label for the target policy")
-    parser.add_argument("--episode-length", type=int, default=500, help="Episode length to evaluate")
+    parser.add_argument("--episode-length", type=int, default=250, help="Episode length to evaluate")
     parser.add_argument(
         "--n-agents",
         type=int,

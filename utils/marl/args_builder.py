@@ -23,7 +23,7 @@ def build_base_qlearning_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--resume", type=Path, default=None, help="Resume training from a previous run directory")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--n-agents", type=int, default=3)
-    parser.add_argument("--episode-length", type=int, default=500)
+    parser.add_argument("--episode-length", type=int, default=250)
     parser.add_argument("--total-timesteps", type=int, default=200_000)
     parser.add_argument("--n-envs", type=int, default=1)
     parser.add_argument("--buffer-size", type=int, default=200_000)
@@ -43,6 +43,8 @@ def build_base_qlearning_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--activation", type=str, default="tanh", choices=["relu", "tanh", "elu"])
     parser.add_argument("--feature-norm", action="store_true",
                         help="Apply LayerNorm to input features (first layer).")
+    parser.add_argument("--layer-norm", action="store_true",
+                        help="Apply LayerNorm after each hidden layer.")
     parser.add_argument("--dueling", action="store_true")
     parser.add_argument("--stream-hidden-dim", type=int, default=64)
     parser.add_argument("--no-agent-id", action="store_true")
@@ -60,9 +62,6 @@ def build_base_qlearning_parser(description: str) -> argparse.ArgumentParser:
     _add_set_override_argument(parser)
     parser.set_defaults(normalize_obs=True)
     return parser
-
-def add_team_reward_arg(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--team-reward", action="store_true")
 
 def add_qmix_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mixer-hidden-dim", type=int, default=32)
@@ -89,7 +88,7 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--resume", type=Path, default=None, help="Resume training from a previous run directory")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--n-agents", type=int, default=3)
-    parser.add_argument("--episode-length", type=int, default=500)
+    parser.add_argument("--episode-length", type=int, default=250)
     parser.add_argument("--total-timesteps", type=int, default=200_000)
     parser.add_argument("--n-envs", type=int, default=8)
     parser.add_argument("--n-steps", type=int, default=500)
@@ -100,13 +99,14 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
         help="Number of mini-batches per PPO epoch (1 = full-batch update).",
     )
     parser.add_argument("--n-epochs", type=int, default=4)
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--learning-rate", type=float, default=5e-4)
+    parser.add_argument("--lr-decay", action="store_true", dest="lr_decay")
     parser.add_argument("--no-lr-decay", action="store_false", dest="lr_decay")
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-range", type=float, default=0.2)
     parser.add_argument("--ent-coef", type=float, default=0.01)
-    parser.add_argument("--vf-coef", type=float, default=0.5)
+    parser.add_argument("--vf-coef", type=float, default=1.0)
     parser.add_argument("--huber-delta", type=float, default=10.0)
     parser.add_argument("--value-norm-beta", type=float, default=0.99999)
     parser.add_argument(
@@ -122,13 +122,10 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--activation", type=str, default="relu", choices=["relu", "tanh", "elu"])
     parser.add_argument("--feature-norm", action="store_true",
                         help="Apply LayerNorm to input features (first layer).")
+    parser.add_argument("--layer-norm", action="store_true",
+                        help="Apply LayerNorm after each hidden layer.")
     parser.add_argument("--fixed-order", action="store_true",
                         help="Use fixed agent update order instead of random shuffle each iteration")
-    team_reward_group = parser.add_mutually_exclusive_group()
-    team_reward_group.add_argument("--team-reward", action="store_true", dest="team_reward",
-                                   help="Use shared team reward (paper-faithful, default)")
-    team_reward_group.add_argument("--no-team-reward", action="store_false", dest="team_reward",
-                                   help="Use per-agent rewards and per-agent advantages")
     obs_norm_group = parser.add_mutually_exclusive_group()
     obs_norm_group.add_argument("--normalize-obs", action="store_true")
     obs_norm_group.add_argument("--no-normalize-obs", action="store_false", dest="normalize_obs")
@@ -140,7 +137,7 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--n-eval-episodes", type=int, default=30)
     parser.add_argument("--n-eval-envs", type=int, default=4)
     _add_set_override_argument(parser)
-    parser.set_defaults(normalize_obs=True, lr_decay=True, team_reward=True)
+    parser.set_defaults(normalize_obs=True, lr_decay=False)
     return parser
 
 
@@ -160,10 +157,11 @@ def build_happo_hyperparams(
         "value_norm_per_element_update": args.value_norm_per_element_update,
         "popart": args.popart,
         "popart_beta": args.popart_beta,
-        "team_reward": args.team_reward, "normalize_obs": args.normalize_obs,
+        "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip, "obs_norm_eps": args.obs_norm_eps,
         "max_grad_norm": args.max_grad_norm, "hidden_dims": list(args.hidden_dims),
         "activation": args.activation, "feature_norm": args.feature_norm,
+        "layer_norm": args.layer_norm,
         "fixed_order": args.fixed_order, "parameter_sharing": False,
         "eval_freq": args.eval_freq,
         "n_eval_episodes": args.n_eval_episodes, "n_eval_envs": args.n_eval_envs,
@@ -178,7 +176,7 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--resume", type=Path, default=None, help="Resume training from a previous run directory")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--n-agents", type=int, default=3)
-    parser.add_argument("--episode-length", type=int, default=500)
+    parser.add_argument("--episode-length", type=int, default=250)
     parser.add_argument("--total-timesteps", type=int, default=200_000)
     parser.add_argument("--n-envs", type=int, default=8)
     parser.add_argument("--n-steps", type=int, default=500)
@@ -189,13 +187,14 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
         help="Number of mini-batches per PPO epoch (1 = full-batch update).",
     )
     parser.add_argument("--n-epochs", type=int, default=4)
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--learning-rate", type=float, default=5e-4)
+    parser.add_argument("--lr-decay", action="store_true", dest="lr_decay")
     parser.add_argument("--no-lr-decay", action="store_false", dest="lr_decay")
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-range", type=float, default=0.2)
     parser.add_argument("--ent-coef", type=float, default=0.01)
-    parser.add_argument("--vf-coef", type=float, default=0.5)
+    parser.add_argument("--vf-coef", type=float, default=1.0)
     parser.add_argument("--huber-delta", type=float, default=10.0)
     parser.add_argument("--value-norm-beta", type=float, default=0.99999)
     parser.add_argument(
@@ -211,8 +210,10 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--activation", type=str, default="relu", choices=["relu", "tanh", "elu"])
     parser.add_argument("--feature-norm", action="store_true",
                         help="Apply LayerNorm to input features (first layer).")
+    parser.add_argument("--layer-norm", action="store_true",
+                        help="Apply LayerNorm after each hidden layer.")
     parser.add_argument("--no-agent-id", action="store_true")
-    parser.add_argument("--team-reward", action="store_true")
+    parser.add_argument("--independent-agents", action="store_true")
     obs_norm_group = parser.add_mutually_exclusive_group()
     obs_norm_group.add_argument("--normalize-obs", action="store_true")
     obs_norm_group.add_argument("--no-normalize-obs", action="store_false", dest="normalize_obs")
@@ -224,5 +225,5 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--n-eval-episodes", type=int, default=30)
     parser.add_argument("--n-eval-envs", type=int, default=4)
     _add_set_override_argument(parser)
-    parser.set_defaults(normalize_obs=True, lr_decay=True)
+    parser.set_defaults(normalize_obs=True, lr_decay=False)
     return parser

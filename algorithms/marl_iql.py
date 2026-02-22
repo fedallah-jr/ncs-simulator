@@ -19,7 +19,6 @@ from utils.marl import (
     MLPAgent,
     DuelingMLPAgent,
     build_base_qlearning_parser,
-    add_team_reward_arg,
     save_qlearning_checkpoint,
     save_qlearning_training_state,
     load_qlearning_training_state,
@@ -45,7 +44,6 @@ def parse_args() -> argparse.Namespace:
     parser = build_base_qlearning_parser(
         description="Train IQL (shared MLP) on multi-agent NCS env."
     )
-    add_team_reward_arg(parser)
     return parser.parse_args()
 
 
@@ -113,6 +111,7 @@ def main() -> None:
         "hidden_dims": tuple(args.hidden_dims),
         "activation": args.activation,
         "feature_norm": args.feature_norm,
+        "layer_norm": args.layer_norm,
     }
     if args.dueling:
         agent_kwargs["stream_hidden_dim"] = args.stream_hidden_dim
@@ -178,6 +177,7 @@ def main() -> None:
             agent=learner.agent,
             obs_normalizer=obs_normalizer,
             feature_norm=args.feature_norm,
+            layer_norm=args.layer_norm,
         )
 
     def save_training_state() -> None:
@@ -211,13 +211,9 @@ def main() -> None:
             )
 
             raw_rewards = step.rewards_arr
-            if args.team_reward:
-                team_rewards = raw_rewards.sum(axis=1)
-                rewards = np.repeat(team_rewards[:, None], n_agents, axis=1).astype(np.float32)
-                episode_reward_sums += team_rewards
-            else:
-                rewards = raw_rewards
-                episode_reward_sums += raw_rewards.sum(axis=1)
+            team_rewards = raw_rewards.sum(axis=1)
+            rewards = np.repeat(team_rewards[:, None], n_agents, axis=1).astype(np.float32)
+            episode_reward_sums += team_rewards
 
             next_obs_for_buffer, _ = patch_autoreset_final_obs(
                 step.next_obs_raw, step.infos, step.done_reset, n_agents,

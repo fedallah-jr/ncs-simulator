@@ -35,7 +35,6 @@ from .popart import PopArtLayer
 from .value_norm import ValueNorm
 from .args_builder import (
     build_base_qlearning_parser,
-    add_team_reward_arg,
     add_qmix_args,
     add_qplex_args,
     build_happo_parser,
@@ -63,7 +62,6 @@ __all__ = [
     "QLearnStepResult",
     "add_qmix_args",
     "add_qplex_args",
-    "add_team_reward_arg",
     "append_agent_id",
     "build_base_qlearning_parser",
     "build_happo_hyperparams",

@@ -4,7 +4,7 @@ import argparse
 import csv
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -232,32 +232,57 @@ def main() -> None:
     if global_state_raw.ndim != 2:
         raise ValueError("global_state must have shape (n_envs, state_dim)")
     global_state_dim = int(global_state_raw.shape[-1])
-    actor_input_dim = obs_dim + (n_agents if use_agent_id else 0)
+    independent_agents = getattr(args, "independent_agents", False)
+    if independent_agents:
+        use_agent_id = False
+        actor_input_dim = obs_dim
+    else:
+        actor_input_dim = obs_dim + (n_agents if use_agent_id else 0)
     critic_input_dim = global_state_dim
-    value_dim = 1 if args.team_reward else n_agents
+    value_dim = 1
     obs_normalizer = create_obs_normalizer(
         obs_dim, args.normalize_obs, args.obs_norm_clip, args.obs_norm_eps
     )
 
-    actor = MLPAgent(
-        input_dim=actor_input_dim,
-        n_actions=n_actions,
-        hidden_dims=tuple(args.hidden_dims),
-        activation=args.activation,
-        feature_norm=args.feature_norm,
-        output_gain=0.01,
-    ).to(device)
+    if independent_agents:
+        actors: List[MLPAgent] = []
+        actor_optimizers: List[torch.optim.Adam] = []
+        for _ in range(n_agents):
+            a = MLPAgent(
+                input_dim=actor_input_dim,
+                n_actions=n_actions,
+                hidden_dims=tuple(args.hidden_dims),
+                activation=args.activation,
+                feature_norm=args.feature_norm,
+                layer_norm=args.layer_norm,
+                output_gain=0.01,
+            ).to(device)
+            actors.append(a)
+            actor_optimizers.append(torch.optim.Adam(a.parameters(), lr=float(args.learning_rate)))
+        actor: Union[MLPAgent, List[MLPAgent]] = actors
+        actor_optimizer: Union[torch.optim.Adam, List[torch.optim.Adam]] = actor_optimizers
+    else:
+        actor = MLPAgent(
+            input_dim=actor_input_dim,
+            n_actions=n_actions,
+            hidden_dims=tuple(args.hidden_dims),
+            activation=args.activation,
+            feature_norm=args.feature_norm,
+            layer_norm=args.layer_norm,
+            output_gain=0.01,
+        ).to(device)
+        actor_optimizer = torch.optim.Adam(actor.parameters(), lr=float(args.learning_rate))
     critic = CentralValueMLP(
         input_dim=critic_input_dim,
         n_outputs=value_dim,
         hidden_dims=tuple(args.hidden_dims),
         activation=args.activation,
         feature_norm=args.feature_norm,
+        layer_norm=args.layer_norm,
         use_popart=args.popart,
         popart_beta=float(args.popart_beta),
     ).to(device)
 
-    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=float(args.learning_rate))
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=float(args.learning_rate))
     if args.popart:
         popart_layer = critic.popart_layer()
@@ -297,7 +322,6 @@ def main() -> None:
             obs_dim=obs_dim,
             n_actions=n_actions,
             use_agent_id=use_agent_id,
-            team_reward=args.team_reward,
             agent_hidden_dims=list(args.hidden_dims),
             agent_activation=args.activation,
             critic_hidden_dims=list(args.hidden_dims),
@@ -307,6 +331,8 @@ def main() -> None:
             obs_normalizer=obs_normalizer,
             popart=args.popart,
             feature_norm=args.feature_norm,
+            layer_norm=args.layer_norm,
+            parameter_sharing=not independent_agents,
         )
 
     def save_training_state() -> None:
@@ -348,15 +374,29 @@ def main() -> None:
                     obs = obs_raw
 
                 obs_t = torch.as_tensor(obs, device=device, dtype=torch.float32)
-                if use_agent_id:
-                    obs_t = append_agent_id(obs_t, n_agents)
-                obs_flat = obs_t.reshape(args.n_envs * n_agents, -1)
 
                 with torch.no_grad():
-                    logits = actor(obs_flat)
-                    dist = Categorical(logits=logits)
-                    actions_t = dist.sample()
-                    log_probs_t = dist.log_prob(actions_t)
+                    if independent_agents:
+                        all_actions = []
+                        all_log_probs = []
+                        for agent_id in range(n_agents):
+                            obs_i = obs_t[:, agent_id, :]
+                            logits = actors[agent_id](obs_i)
+                            dist = Categorical(logits=logits)
+                            act = dist.sample()
+                            lp = dist.log_prob(act)
+                            all_actions.append(act)
+                            all_log_probs.append(lp)
+                        actions_t = torch.stack(all_actions, dim=1)
+                        log_probs_t = torch.stack(all_log_probs, dim=1)
+                    else:
+                        if use_agent_id:
+                            obs_t = append_agent_id(obs_t, n_agents)
+                        obs_flat = obs_t.reshape(args.n_envs * n_agents, -1)
+                        logits = actor(obs_flat)
+                        dist = Categorical(logits=logits)
+                        actions_t = dist.sample()
+                        log_probs_t = dist.log_prob(actions_t)
 
                     global_obs = global_state_raw.astype(np.float32)
                     global_obs_t = torch.as_tensor(global_obs, device=device, dtype=torch.float32)
@@ -388,10 +428,7 @@ def main() -> None:
                     next_obs_for_gae = next_obs_for_gae_raw
 
                 raw_rewards = np.asarray(rewards_arr, dtype=np.float32)
-                if args.team_reward:
-                    rewards = raw_rewards.sum(axis=1, keepdims=True)
-                else:
-                    rewards = raw_rewards
+                rewards = raw_rewards.sum(axis=1, keepdims=True)  # (n_envs, 1)
 
                 buffer.add(
                     obs=obs,
@@ -499,35 +536,131 @@ def main() -> None:
             if args.lr_decay:
                 progress = min(float(global_step) / float(args.total_timesteps), 1.0)
                 lr = max(0.0, base_lr * (1.0 - progress))
-                for optimizer in (actor_optimizer, critic_optimizer):
+                if independent_agents:
+                    all_optimizers = list(actor_optimizers) + [critic_optimizer]
+                else:
+                    all_optimizers = [actor_optimizer, critic_optimizer]
+                for optimizer in all_optimizers:
                     for param_group in optimizer.param_groups:
                         param_group["lr"] = lr
 
-            if args.team_reward:
+            if independent_agents:
+                # ---- Independent actor update: per-agent PPO ----
+                # Normalize advantages globally before the per-agent loop.
+                adv_all_mean = advantages.mean()
+                adv_all_std = advantages.std()
+                if adv_all_std > 1e-8:
+                    advantages = (advantages - adv_all_mean) / (adv_all_std + 1e-8)
+                else:
+                    advantages = advantages - adv_all_mean
+
+                for agent_id in range(n_agents):
+                    obs_i = obs_batch[:, :, agent_id, :]   # (T, E, obs_dim)
+                    actions_i = actions_batch[:, :, agent_id]  # (T, E)
+                    old_lp_i = log_probs_batch[:, :, agent_id]  # (T, E)
+
+                    obs_i_t = torch.as_tensor(obs_i, device=device, dtype=torch.float32)
+                    actions_i_t = torch.as_tensor(actions_i, device=device, dtype=torch.long)
+                    old_lp_flat = torch.as_tensor(old_lp_i.reshape(-1), device=device, dtype=torch.float32)
+
+                    obs_flat_i = obs_i_t.reshape(-1, obs_dim)
+                    actions_flat_i = actions_i_t.reshape(-1)
+
+                    adv_i = advantages.squeeze(-1)  # (T, E, 1) -> (T, E)
+                    adv_flat = torch.as_tensor(adv_i.reshape(-1), device=device, dtype=torch.float32)
+
+                    total_samples_i = int(adv_flat.shape[0])
+                    num_actor_mb = min(int(args.num_mini_batch), total_samples_i)
+
+                    for _ in range(args.n_epochs):
+                        indices = rng.permutation(total_samples_i)
+                        for mb_idx in np.array_split(indices, num_actor_mb):
+                            if mb_idx.size == 0:
+                                continue
+                            mb_idx_t = torch.as_tensor(mb_idx, device=device, dtype=torch.long)
+
+                            obs_mb = obs_flat_i[mb_idx_t]
+                            actions_mb = actions_flat_i[mb_idx_t]
+                            old_lp_mb = old_lp_flat[mb_idx_t]
+                            adv_mb = adv_flat[mb_idx_t]
+
+                            logits = actors[agent_id](obs_mb)
+                            dist = Categorical(logits=logits)
+                            new_lp = dist.log_prob(actions_mb)
+                            ratio = (new_lp - old_lp_mb).exp()
+
+                            surr1 = ratio * adv_mb
+                            surr2 = torch.clamp(
+                                ratio, 1.0 - args.clip_range, 1.0 + args.clip_range
+                            ) * adv_mb
+                            policy_loss = -torch.min(surr1, surr2).mean()
+                            entropy = dist.entropy().mean()
+
+                            actor_loss = policy_loss - float(args.ent_coef) * entropy
+
+                            actor_optimizers[agent_id].zero_grad(set_to_none=True)
+                            actor_loss.backward()
+                            nn.utils.clip_grad_norm_(actors[agent_id].parameters(), float(args.max_grad_norm))
+                            actor_optimizers[agent_id].step()
+
+                # ---- Critic update (scalar team value) ----
+                value_targets = normalized_returns_t.squeeze(-1)
+                values_old_targets = values_old.squeeze(-1)
+                global_obs_flat = global_obs_t.reshape(-1, critic_input_dim)
+                value_targets_flat = value_targets.reshape(-1)
+                values_old_flat = values_old_targets.reshape(-1)
+                value_total_samples = int(value_targets_flat.shape[0])
+                num_value_mini_batches = min(int(args.num_mini_batch), value_total_samples)
+
+                for _ in range(args.n_epochs):
+                    value_indices = rng.permutation(value_total_samples)
+                    for value_idx in np.array_split(value_indices, num_value_mini_batches):
+                        if value_idx.size == 0:
+                            continue
+                        value_idx_t = torch.as_tensor(value_idx, device=device, dtype=torch.long)
+
+                        global_obs_mb = global_obs_flat[value_idx_t]
+                        values_pred_mb = critic(global_obs_mb).squeeze(-1)
+                        returns_mb = value_targets_flat[value_idx_t]
+                        values_old_mb = values_old_flat[value_idx_t]
+
+                        value_pred_clipped = values_old_mb + (
+                            values_pred_mb - values_old_mb
+                        ).clamp(-float(args.clip_range), float(args.clip_range))
+
+                        error_original = returns_mb - values_pred_mb
+                        error_clipped = returns_mb - value_pred_clipped
+
+                        value_loss_original = _huber_loss(error_original, args.huber_delta)
+                        value_loss_clipped = _huber_loss(error_clipped, args.huber_delta)
+                        value_loss = torch.max(value_loss_original, value_loss_clipped).mean() * float(
+                            args.vf_coef
+                        )
+
+                        critic_optimizer.zero_grad(set_to_none=True)
+                        value_loss.backward()
+                        nn.utils.clip_grad_norm_(critic.parameters(), float(args.max_grad_norm))
+                        critic_optimizer.step()
+            else:
+                # ---- Shared-parameter actor update (original MAPPO) ----
                 advantages_actor_t = advantages_t.repeat(1, 1, n_agents)
-            else:
-                advantages_actor_t = advantages_t
 
-            obs_flat = obs_t.reshape(-1, obs_dim)
-            actions_flat = actions_t.reshape(-1)
-            old_log_probs_flat = old_log_probs_t.reshape(-1)
-            advantages_flat = advantages_actor_t.reshape(-1)
-            total_samples = int(advantages_flat.shape[0])
-            if not args.team_reward:
-                returns_flat = normalized_returns_t.reshape(-1)
-                values_old_flat = values_old.reshape(-1)
+                obs_flat = obs_t.reshape(-1, obs_dim)
+                actions_flat = actions_t.reshape(-1)
+                old_log_probs_flat = old_log_probs_t.reshape(-1)
+                advantages_flat = advantages_actor_t.reshape(-1)
+                total_samples = int(advantages_flat.shape[0])
 
-            adv_mean = advantages_flat.mean()
-            adv_std = advantages_flat.std()
-            if float(adv_std.item()) > 1e-8:
-                advantages_flat = (advantages_flat - adv_mean) / (adv_std + 1e-8)
-            else:
-                advantages_flat = advantages_flat - adv_mean
+                adv_mean = advantages_flat.mean()
+                adv_std = advantages_flat.std()
+                if float(adv_std.item()) > 1e-8:
+                    advantages_flat = (advantages_flat - adv_mean) / (adv_std + 1e-8)
+                else:
+                    advantages_flat = advantages_flat - adv_mean
 
-            agent_ids = torch.arange(total_samples, device=device) % n_agents
-            num_actor_mini_batches = min(int(args.num_mini_batch), total_samples)
+                agent_ids = torch.arange(total_samples, device=device) % n_agents
+                num_actor_mini_batches = min(int(args.num_mini_batch), total_samples)
 
-            if args.team_reward:
                 for _ in range(args.n_epochs):
                     indices = rng.permutation(total_samples)
                     for mb_idx in np.array_split(indices, num_actor_mini_batches):
@@ -584,69 +717,6 @@ def main() -> None:
                         values_pred_mb = critic(global_obs_mb).squeeze(-1)
                         returns_mb = value_targets_flat[value_idx_t]
                         values_old_mb = values_old_flat[value_idx_t]
-
-                        value_pred_clipped = values_old_mb + (
-                            values_pred_mb - values_old_mb
-                        ).clamp(-float(args.clip_range), float(args.clip_range))
-
-                        error_original = returns_mb - values_pred_mb
-                        error_clipped = returns_mb - value_pred_clipped
-
-                        value_loss_original = _huber_loss(error_original, args.huber_delta)
-                        value_loss_clipped = _huber_loss(error_clipped, args.huber_delta)
-                        value_loss = torch.max(value_loss_original, value_loss_clipped).mean() * float(
-                            args.vf_coef
-                        )
-
-                        critic_optimizer.zero_grad(set_to_none=True)
-                        value_loss.backward()
-                        nn.utils.clip_grad_norm_(critic.parameters(), float(args.max_grad_norm))
-                        critic_optimizer.step()
-            else:
-                for _ in range(args.n_epochs):
-                    indices = rng.permutation(total_samples)
-                    for mb_idx in np.array_split(indices, num_actor_mini_batches):
-                        if mb_idx.size == 0:
-                            continue
-                        mb_idx_t = torch.as_tensor(mb_idx, device=device, dtype=torch.long)
-
-                        obs_mb = obs_flat[mb_idx_t]
-                        actions_mb = actions_flat[mb_idx_t]
-                        old_log_probs_mb = old_log_probs_flat[mb_idx_t]
-                        advantages_mb = advantages_flat[mb_idx_t]
-                        agent_ids_mb = agent_ids[mb_idx_t]
-
-                        if use_agent_id:
-                            obs_in = _append_agent_id_flat(obs_mb, agent_ids_mb, n_agents)
-                        else:
-                            obs_in = obs_mb
-
-                        logits = actor(obs_in)
-                        dist = Categorical(logits=logits)
-                        new_log_probs = dist.log_prob(actions_mb)
-                        ratio = (new_log_probs - old_log_probs_mb).exp()
-
-                        surr1 = ratio * advantages_mb
-                        surr2 = torch.clamp(
-                            ratio, 1.0 - args.clip_range, 1.0 + args.clip_range
-                        ) * advantages_mb
-                        policy_loss = -torch.min(surr1, surr2).mean()
-                        entropy = dist.entropy().mean()
-
-                        actor_loss = policy_loss - float(args.ent_coef) * entropy
-
-                        actor_optimizer.zero_grad(set_to_none=True)
-                        actor_loss.backward()
-                        nn.utils.clip_grad_norm_(actor.parameters(), float(args.max_grad_norm))
-                        actor_optimizer.step()
-
-                        time_env_ids = mb_idx_t // n_agents
-                        returns_mb = returns_flat[mb_idx_t]
-                        values_old_mb = values_old_flat[mb_idx_t]
-
-                        global_obs_mb = global_obs_t.reshape(-1, critic_input_dim)[time_env_ids]
-                        values_pred_all = critic(global_obs_mb)
-                        values_pred_mb = values_pred_all.gather(1, agent_ids_mb.unsqueeze(-1)).squeeze(-1)
 
                         value_pred_clipped = values_old_mb + (
                             values_pred_mb - values_old_mb

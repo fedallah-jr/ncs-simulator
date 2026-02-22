@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True, help="Output .npz file.")
     parser.add_argument("--policy", type=str, default="zero_wait", help="Heuristic policy name.")
     parser.add_argument("--episodes", type=int, default=50, help="Number of episodes to roll out.")
-    parser.add_argument("--episode-length", type=int, default=500, help="Episode length.")
+    parser.add_argument("--episode-length", type=int, default=250, help="Episode length.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument(
         "--n-agents",

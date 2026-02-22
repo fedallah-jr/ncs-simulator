@@ -23,6 +23,7 @@ class MARLTorchCheckpointMetadata:
     agent_hidden_dims: Tuple[int, ...]
     agent_activation: str
     feature_norm: bool = False
+    layer_norm: bool = False
     dueling: bool = False
     stream_hidden_dim: Optional[int] = None
     obs_normalizer: Optional[RunningObsNormalizer] = None
@@ -57,6 +58,7 @@ def load_marl_torch_agents_from_checkpoint(model_path: Path) -> Tuple[MARLAgent,
     hidden_dims = tuple(int(x) for x in ckpt.get("agent_hidden_dims", [128, 128]))
     activation = str(ckpt.get("agent_activation", "relu"))
     feature_norm = bool(ckpt.get("feature_norm", False))
+    layer_norm = bool(ckpt.get("layer_norm", False))
     dueling = bool(ckpt.get("dueling", False))
     stream_hidden_dim = ckpt.get("stream_hidden_dim", 64) if dueling else None
     obs_normalizer: Optional[RunningObsNormalizer] = None
@@ -76,6 +78,7 @@ def load_marl_torch_agents_from_checkpoint(model_path: Path) -> Tuple[MARLAgent,
         "hidden_dims": hidden_dims,
         "activation": activation,
         "feature_norm": feature_norm,
+        "layer_norm": layer_norm,
     }
     if dueling:
         agent_kwargs["stream_hidden_dim"] = stream_hidden_dim
@@ -115,6 +118,7 @@ def load_marl_torch_agents_from_checkpoint(model_path: Path) -> Tuple[MARLAgent,
         agent_hidden_dims=hidden_dims,
         agent_activation=activation,
         feature_norm=feature_norm,
+        layer_norm=layer_norm,
         dueling=dueling,
         stream_hidden_dim=stream_hidden_dim,
         obs_normalizer=obs_normalizer,

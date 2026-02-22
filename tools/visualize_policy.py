@@ -823,8 +823,8 @@ def main():
     parser.add_argument(
         '--episode-length',
         type=int,
-        default=500,
-        help='Length of episode to simulate (default: 500)'
+        default=250,
+        help='Length of episode to simulate (default: 250)'
     )
     parser.add_argument(
         '--seed',

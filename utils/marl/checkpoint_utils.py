@@ -13,12 +13,14 @@ def save_qlearning_checkpoint(
     obs_normalizer: Optional["RunningObsNormalizer"],
     mixer: Optional[torch.nn.Module] = None, mixer_params: Optional[Dict[str, Any]] = None,
     feature_norm: bool = False,
+    layer_norm: bool = False,
 ) -> None:
     ckpt: Dict[str, Any] = {
         "algorithm": algorithm, "n_agents": n_agents, "obs_dim": obs_dim,
         "n_actions": n_actions, "use_agent_id": use_agent_id,
         "parameter_sharing": parameter_sharing, "agent_hidden_dims": agent_hidden_dims,
         "agent_activation": agent_activation, "feature_norm": feature_norm,
+        "layer_norm": layer_norm,
         "dueling": dueling, "stream_hidden_dim": stream_hidden_dim if dueling else None,
     }
     if mixer_params is not None:
@@ -36,23 +38,30 @@ def save_qlearning_checkpoint(
 
 def save_mappo_checkpoint(
     path: Path, n_agents: int, obs_dim: int, n_actions: int, use_agent_id: bool,
-    team_reward: bool, agent_hidden_dims: List[int], agent_activation: str,
+    agent_hidden_dims: List[int], agent_activation: str,
     critic_hidden_dims: List[int], critic_activation: str,
-    actor: torch.nn.Module, critic: torch.nn.Module,
+    actor: Any, critic: torch.nn.Module,
     obs_normalizer: Optional["RunningObsNormalizer"],
     popart: bool = False,
     feature_norm: bool = False,
+    layer_norm: bool = False,
+    parameter_sharing: bool = True,
 ) -> None:
     ckpt: Dict[str, Any] = {
         "algorithm": "mappo", "n_agents": n_agents, "obs_dim": obs_dim,
         "n_actions": n_actions, "use_agent_id": use_agent_id,
-        "parameter_sharing": True, "team_reward": team_reward,
+        "parameter_sharing": parameter_sharing,
         "agent_hidden_dims": agent_hidden_dims, "agent_activation": agent_activation,
-        "feature_norm": feature_norm, "dueling": False, "stream_hidden_dim": None,
-        "agent_state_dict": actor.state_dict(), "critic_state_dict": critic.state_dict(),
+        "feature_norm": feature_norm, "layer_norm": layer_norm,
+        "dueling": False, "stream_hidden_dim": None,
+        "critic_state_dict": critic.state_dict(),
         "critic_hidden_dims": critic_hidden_dims, "critic_activation": critic_activation,
         "popart": popart,
     }
+    if isinstance(actor, list):
+        ckpt["agent_state_dicts"] = [a.state_dict() for a in actor]
+    else:
+        ckpt["agent_state_dict"] = actor.state_dict()
     ckpt["obs_normalization"] = (
         obs_normalizer.state_dict() if obs_normalizer is not None else {"enabled": False}
     )
@@ -65,15 +74,16 @@ def save_happo_checkpoint(
     actors: List[torch.nn.Module], critic: torch.nn.Module,
     obs_normalizer: Optional["RunningObsNormalizer"],
     popart: bool = False,
-    team_reward: bool = True,
     feature_norm: bool = False,
+    layer_norm: bool = False,
 ) -> None:
     ckpt: Dict[str, Any] = {
         "algorithm": "happo", "n_agents": n_agents, "obs_dim": obs_dim,
         "n_actions": n_actions, "use_agent_id": False,
-        "parameter_sharing": False, "team_reward": team_reward,
+        "parameter_sharing": False,
         "agent_hidden_dims": agent_hidden_dims, "agent_activation": agent_activation,
-        "feature_norm": feature_norm, "dueling": False, "stream_hidden_dim": None,
+        "feature_norm": feature_norm, "layer_norm": layer_norm,
+        "dueling": False, "stream_hidden_dim": None,
         "agent_state_dicts": [actor.state_dict() for actor in actors],
         "critic_state_dict": critic.state_dict(),
         "critic_hidden_dims": critic_hidden_dims, "critic_activation": critic_activation,
@@ -178,15 +188,13 @@ def load_qlearning_training_state(
     }
 
 def save_mappo_training_state(
-    path: Path, actor: torch.nn.Module, critic: torch.nn.Module,
-    actor_optimizer: torch.optim.Optimizer, critic_optimizer: torch.optim.Optimizer,
+    path: Path, actor: Any, critic: torch.nn.Module,
+    actor_optimizer: Any, critic_optimizer: torch.optim.Optimizer,
     value_normalizer: Any, obs_normalizer: Any, best_model_tracker: Any,
     global_step: int, episode: int, last_eval_step: int,
 ) -> None:
     state: Dict[str, Any] = {
-        "actor": actor.state_dict(),
         "critic": critic.state_dict(),
-        "actor_optimizer": actor_optimizer.state_dict(),
         "critic_optimizer": critic_optimizer.state_dict(),
         "value_normalizer": value_normalizer.state_dict() if value_normalizer is not None else None,
         "obs_normalizer": obs_normalizer.state_dict() if obs_normalizer is not None else None,
@@ -195,17 +203,31 @@ def save_mappo_training_state(
         "episode": episode,
         "last_eval_step": last_eval_step,
     }
+    if isinstance(actor, list):
+        state["actors"] = [a.state_dict() for a in actor]
+        state["actor_optimizers"] = [o.state_dict() for o in actor_optimizer]
+    else:
+        state["actor"] = actor.state_dict()
+        state["actor_optimizer"] = actor_optimizer.state_dict()
     torch.save(state, path)
 
 def load_mappo_training_state(
-    path: Path, actor: torch.nn.Module, critic: torch.nn.Module,
-    actor_optimizer: torch.optim.Optimizer, critic_optimizer: torch.optim.Optimizer,
+    path: Path, actor: Any, critic: torch.nn.Module,
+    actor_optimizer: Any, critic_optimizer: torch.optim.Optimizer,
     value_normalizer: Any, obs_normalizer: Any, best_model_tracker: Any,
 ) -> Dict[str, Any]:
     state = torch.load(path, map_location="cpu", weights_only=False)
-    actor.load_state_dict(state["actor"])
+    if "actors" in state:
+        # Independent actors
+        for i, a in enumerate(actor):
+            a.load_state_dict(state["actors"][i])
+        for i, o in enumerate(actor_optimizer):
+            o.load_state_dict(state["actor_optimizers"][i])
+    else:
+        # Shared actor
+        actor.load_state_dict(state["actor"])
+        actor_optimizer.load_state_dict(state["actor_optimizer"])
     critic.load_state_dict(state["critic"])
-    actor_optimizer.load_state_dict(state["actor_optimizer"])
     critic_optimizer.load_state_dict(state["critic_optimizer"])
     if value_normalizer is not None and state["value_normalizer"] is not None:
         value_normalizer.load_state_dict(state["value_normalizer"])
@@ -237,15 +259,14 @@ def build_qlearning_hyperparams(
         "optimizer": args.optimizer, "epsilon_start": args.epsilon_start,
         "epsilon_end": args.epsilon_end, "epsilon_decay_steps": args.epsilon_decay_steps,
         "hidden_dims": list(args.hidden_dims), "activation": args.activation,
-        "feature_norm": args.feature_norm, "dueling": args.dueling,
+        "feature_norm": args.feature_norm, "layer_norm": getattr(args, "layer_norm", False),
+        "dueling": args.dueling,
         "stream_hidden_dim": args.stream_hidden_dim, "use_agent_id": use_agent_id,
         "independent_agents": args.independent_agents, "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip, "obs_norm_eps": args.obs_norm_eps,
         "eval_freq": args.eval_freq, "n_eval_episodes": args.n_eval_episodes,
         "n_eval_envs": args.n_eval_envs, "device": str(device), "seed": args.seed,
     }
-    if algorithm == "iql" and hasattr(args, "team_reward"):
-        hyperparams["team_reward"] = args.team_reward
     if mixer_params is not None:
         hyperparams.update(mixer_params)
     return hyperparams
@@ -266,11 +287,15 @@ def build_mappo_hyperparams(
         "value_norm_per_element_update": args.value_norm_per_element_update,
         "popart": args.popart,
         "popart_beta": args.popart_beta,
-        "team_reward": args.team_reward, "normalize_obs": args.normalize_obs,
+        "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip, "obs_norm_eps": args.obs_norm_eps,
         "max_grad_norm": args.max_grad_norm, "hidden_dims": list(args.hidden_dims),
         "activation": args.activation, "feature_norm": args.feature_norm,
-        "use_agent_id": use_agent_id, "eval_freq": args.eval_freq,
+        "layer_norm": getattr(args, "layer_norm", False),
+        "use_agent_id": use_agent_id,
+        "independent_agents": getattr(args, "independent_agents", False),
+        "parameter_sharing": not getattr(args, "independent_agents", False),
+        "eval_freq": args.eval_freq,
         "n_eval_episodes": args.n_eval_episodes, "n_eval_envs": args.n_eval_envs,
         "device": str(device), "seed": args.seed,
     }
