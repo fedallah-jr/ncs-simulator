@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiment batch 4: MAPPO team reward with ValueNorm
+# MARL experiment batch 5: HAPPO (independent actors, sequential update, ValueNorm)
 # Phase 1 (7.5M steps): kf_info_m reward
 # Phase 2 (+7.5M steps): resume, kf_info_m_noise reward
 
@@ -15,7 +15,7 @@ PHASE1_TIMESTEPS="${PHASE1_TIMESTEPS:-7500000}"
 PHASE2_TIMESTEPS="${PHASE2_TIMESTEPS:-15000000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/exp_4_mappo_team_reward_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/exp_5_happo_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -92,21 +92,21 @@ run_one() {
 }
 
 # --- Phase 1: kf_info_m reward ---
-run_one "algorithms.marl_mappo" "mappo" "mappo_team_reward" \
+run_one "algorithms.marl_happo" "happo" "happo" \
   --no-normalize-obs \
   --feature-norm \
   --layer-norm \
   --set reward.state_error_reward=kf_info_m \
   --set reward.normalize=false
 
-resume_dir="${run_root}/mappo_team_reward"
+resume_dir="${run_root}/happo"
 
 # --- Phase 2: resume, kf_info_m_noise reward ---
-echo "=== mappo_team_reward (phase 2: kf_info_m_noise) ==="
+echo "=== happo (phase 2: kf_info_m_noise) ==="
 echo "Resuming from: ${resume_dir}"
 echo "Total timesteps: ${PHASE2_TIMESTEPS}"
 
-PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m algorithms.marl_mappo \
+PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m algorithms.marl_happo \
   --config "${config_path}" \
   --resume "${resume_dir}" \
   --seed "${SEED}" \
@@ -119,7 +119,7 @@ PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m algorithms.marl_mappo \
   --layer-norm \
   --set reward.state_error_reward=kf_info_m_noise \
   --set reward.normalize=false \
-  2>&1 | tee "${run_root}/logs/mappo_team_reward_phase2.log"
+  2>&1 | tee "${run_root}/logs/happo_phase2.log"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then
