@@ -64,7 +64,8 @@ run_one() {
     --output-root "${run_root}"
     --seed "${SEED}"
     --total-timesteps "${PHASE1_TIMESTEPS}"
-    --n-eval-episodes 30
+    --eval-freq 15000
+    --n-eval-episodes 50
     --episode-length 250
   )
 
@@ -110,7 +111,8 @@ PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m algorithms.marl_mappo \
   --resume "${resume_dir}" \
   --seed "${SEED}" \
   --total-timesteps "${PHASE2_TIMESTEPS}" \
-  --n-eval-episodes 30 \
+  --eval-freq 15000 \
+  --n-eval-episodes 50 \
   --episode-length 250 \
   --team-reward \
   --no-normalize-obs \
