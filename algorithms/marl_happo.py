@@ -156,6 +156,7 @@ def main() -> None:
             hidden_dims=tuple(args.hidden_dims),
             activation=args.activation,
             feature_norm=args.feature_norm,
+            output_gain=0.01,
         ).to(device)
         actors.append(actor)
         actor_optimizers.append(torch.optim.Adam(actor.parameters(), lr=float(args.learning_rate)))

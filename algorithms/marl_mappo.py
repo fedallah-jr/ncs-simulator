@@ -245,6 +245,7 @@ def main() -> None:
         hidden_dims=tuple(args.hidden_dims),
         activation=args.activation,
         feature_norm=args.feature_norm,
+        output_gain=0.01,
     ).to(device)
     critic = CentralValueMLP(
         input_dim=critic_input_dim,

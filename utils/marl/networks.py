@@ -10,7 +10,7 @@ from torch.nn import functional as F
 from utils.marl.popart import PopArtLayer
 
 
-ORTHOGONAL_INIT_GAIN = 0.01
+MIXER_INIT_GAIN = float(nn.init.calculate_gain("relu"))
 
 
 def _get_activation(name: str) -> nn.Module:
@@ -36,23 +36,29 @@ def _get_activation_class(name: str) -> type[nn.Module]:
 
 
 def _get_activation_gain(name: str) -> float:
-    """Return orthogonal initialization gain (shared default)."""
+    """Return orthogonal initialization gain for hidden layers."""
     if name == "relu":
-        return float(ORTHOGONAL_INIT_GAIN)
+        return float(nn.init.calculate_gain("relu"))
     elif name == "tanh":
-        return float(ORTHOGONAL_INIT_GAIN)
+        return float(nn.init.calculate_gain("tanh"))
     elif name == "elu":
-        return float(ORTHOGONAL_INIT_GAIN)
+        # PyTorch does not expose a dedicated ELU gain.
+        # ReLU gain is a practical default for ELU-based MLPs.
+        return float(nn.init.calculate_gain("relu"))
     raise ValueError("activation must be one of: relu, tanh, elu")
+
+
+def _init_linear(linear: nn.Linear, gain: float) -> None:
+    nn.init.orthogonal_(linear.weight, gain=gain)
+    if linear.bias is not None:
+        nn.init.constant_(linear.bias, 0.0)
 
 
 def _apply_orthogonal_init(module: nn.Module, gain: float) -> None:
     """Apply orthogonal init to all linear layers in a module tree."""
     for submodule in module.modules():
         if isinstance(submodule, nn.Linear):
-            nn.init.orthogonal_(submodule.weight, gain=gain)
-            if submodule.bias is not None:
-                nn.init.constant_(submodule.bias, 0.0)
+            _init_linear(submodule, gain=gain)
 
 
 _AGENT_ID_CACHE: dict[tuple[int, torch.device, torch.dtype], torch.Tensor] = {}
@@ -90,6 +96,7 @@ class MLPAgent(nn.Module):
         hidden_dims: Sequence[int] = (128, 128),
         activation: str = "relu",
         feature_norm: bool = False,
+        output_gain: float = 1.0,
     ) -> None:
         super().__init__()
         if input_dim <= 0 or n_actions <= 0:
@@ -108,7 +115,9 @@ class MLPAgent(nn.Module):
             last_dim = int(hidden_dim)
         layers.append(nn.Linear(last_dim, n_actions))
         self.net = nn.Sequential(*layers)
-        _apply_orthogonal_init(self.net, gain=_get_activation_gain(activation))
+        hidden_gain = _get_activation_gain(activation)
+        _apply_orthogonal_init(self.net, gain=hidden_gain)
+        _init_linear(self.net[-1], gain=float(output_gain))
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         if self.feature_norm_layer is not None:
@@ -135,6 +144,7 @@ class DuelingMLPAgent(nn.Module):
         stream_hidden_dim: int = 64,
         activation: str = "relu",
         feature_norm: bool = False,
+        output_gain: float = 1.0,
     ) -> None:
         super().__init__()
         if input_dim <= 0 or n_actions <= 0:
@@ -168,7 +178,10 @@ class DuelingMLPAgent(nn.Module):
             act_fn(),
             nn.Linear(stream_hidden_dim, n_actions),
         )
-        _apply_orthogonal_init(self, gain=_get_activation_gain(activation))
+        hidden_gain = _get_activation_gain(activation)
+        _apply_orthogonal_init(self, gain=hidden_gain)
+        _init_linear(self.value_stream[-1], gain=float(output_gain))
+        _init_linear(self.advantage_stream[-1], gain=float(output_gain))
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         if self.feature_norm_layer is not None:
@@ -191,6 +204,7 @@ class CentralValueMLP(nn.Module):
         feature_norm: bool = False,
         use_popart: bool = False,
         popart_beta: float = 0.999,
+        output_gain: float = 1.0,
     ) -> None:
         super().__init__()
         if input_dim <= 0 or n_outputs <= 0:
@@ -215,7 +229,12 @@ class CentralValueMLP(nn.Module):
             self._output_layer = nn.Linear(last_dim, n_outputs)
         layers.append(self._output_layer)
         self.net = nn.Sequential(*layers)
-        _apply_orthogonal_init(self.net, gain=_get_activation_gain(activation))
+        hidden_gain = _get_activation_gain(activation)
+        _apply_orthogonal_init(self.net, gain=hidden_gain)
+        if use_popart:
+            _init_linear(self._output_layer.linear, gain=float(output_gain))
+        else:
+            _init_linear(self._output_layer, gain=float(output_gain))
 
     def popart_layer(self) -> PopArtLayer:
         """Return the PopArt output layer (raises if not using PopArt)."""
@@ -284,7 +303,7 @@ class QMixer(nn.Module):
             nn.ReLU(),
             nn.Linear(hypernet_hidden_dim, 1),
         )
-        _apply_orthogonal_init(self, gain=float(ORTHOGONAL_INIT_GAIN))
+        _apply_orthogonal_init(self, gain=MIXER_INIT_GAIN)
 
     def forward(self, agent_qs: torch.Tensor, states: torch.Tensor) -> torch.Tensor:
         """
@@ -361,7 +380,7 @@ class QPLEXSIWeight(nn.Module):
                     adv_hypernet_layers,
                 )
             )
-        _apply_orthogonal_init(self, gain=float(ORTHOGONAL_INIT_GAIN))
+        _apply_orthogonal_init(self, gain=MIXER_INIT_GAIN)
 
     @staticmethod
     def _make_mlp(input_dim: int, output_dim: int, hidden_dim: int, n_layers: int) -> nn.Module:
@@ -474,7 +493,7 @@ class QPLEXQattenWeight(nn.Module):
             nn.ReLU(),
             nn.Linear(self.embed_dim, 1),
         )
-        _apply_orthogonal_init(self, gain=float(ORTHOGONAL_INIT_GAIN))
+        _apply_orthogonal_init(self, gain=MIXER_INIT_GAIN)
 
     def forward(
         self,
