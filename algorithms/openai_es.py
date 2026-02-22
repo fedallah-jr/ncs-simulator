@@ -41,6 +41,8 @@ from utils.bc import BCPretrainConfig, JaxActorBCAdapter, load_bc_dataset, pretr
 from utils.marl.obs_normalization import RunningObsNormalizer
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
+ORTHOGONAL_INIT_GAIN = 0.01
+
 # -----------------------------------------------------------------------------
 # NOTE: JAX/Flax imports are DEFERRED to avoid TPU initialization issues
 # in worker processes. They are imported lazily inside functions that need them.
@@ -94,7 +96,6 @@ def create_policy_net(
     import jax.numpy as jnp
 
     _activations = {"tanh": nn.tanh, "relu": nn.relu, "elu": nn.elu}
-
     class PolicyNet(nn.Module):
         action_dim: int
         hidden_dims: tuple = (64, 64)
@@ -106,10 +107,19 @@ def create_policy_net(
             if self.feature_norm:
                 x = nn.LayerNorm()(x)
             act_fn = _activations[self.activation]
+            gain = float(ORTHOGONAL_INIT_GAIN)
             for dim in self.hidden_dims:
-                x = nn.Dense(dim)(x)
+                x = nn.Dense(
+                    dim,
+                    kernel_init=nn.initializers.orthogonal(gain),
+                    bias_init=nn.initializers.zeros,
+                )(x)
                 x = act_fn(x)
-            x = nn.Dense(self.action_dim)(x)
+            x = nn.Dense(
+                self.action_dim,
+                kernel_init=nn.initializers.orthogonal(gain),
+                bias_init=nn.initializers.zeros,
+            )(x)
             return x
 
     return PolicyNet(

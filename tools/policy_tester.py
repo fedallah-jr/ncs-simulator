@@ -96,6 +96,13 @@ REWARD_COMPARISON_KEYS: Sequence[str] = (
     "comm_throughput_floor",
 )
 
+NON_DYNAMICS_CONFIG_KEYS: Sequence[str] = (
+    "use_agent_id",
+    "include_agent_id",
+    "no_agent_id",
+    "agent_id",
+)
+
 # ---------------------------------------------------------------------------
 # CSV fieldname constants (used in multiple places)
 # ---------------------------------------------------------------------------
@@ -601,7 +608,6 @@ def _build_env(
         termination_override=termination_override,
         track_true_goodput=True,
         track_lqr_cost=True,
-        track_eval_stats=True,
     )
 
 
@@ -762,13 +768,29 @@ def _filter_rows(rows: List[Dict[str, Any]], fieldnames: Sequence[str]) -> List[
     return [{name: row.get(name, "") for name in fieldnames} for row in rows]
 
 
+def _strip_non_dynamics_config_fields(value: Any) -> Any:
+    """Remove agent-representation keys that do not change environment dynamics."""
+    if isinstance(value, dict):
+        cleaned: Dict[str, Any] = {}
+        for key, item in value.items():
+            if key in NON_DYNAMICS_CONFIG_KEYS:
+                continue
+            cleaned[key] = _strip_non_dynamics_config_fields(item)
+        return cleaned
+    if isinstance(value, list):
+        return [_strip_non_dynamics_config_fields(item) for item in value]
+    return value
+
+
 def _extract_env_signature(config: Dict[str, Any]) -> Dict[str, Any]:
     signature: Dict[str, Any] = {}
     for key in ("system", "lqr", "network", "observation", "termination", "controller"):
         if key in config:
-            signature[key] = config.get(key)
+            signature[key] = _strip_non_dynamics_config_fields(config.get(key))
     reward_cfg = config.get("reward", {})
-    signature["reward"] = {key: reward_cfg.get(key) for key in REWARD_COMPARISON_KEYS if key in reward_cfg}
+    signature["reward"] = _strip_non_dynamics_config_fields(
+        {key: reward_cfg.get(key) for key in REWARD_COMPARISON_KEYS if key in reward_cfg}
+    )
     return signature
 
 

@@ -256,7 +256,7 @@ def build_mappo_hyperparams(
     return {
         "total_timesteps": args.total_timesteps, "episode_length": args.episode_length,
         "n_agents": n_agents, "n_envs": args.n_envs, "n_steps": args.n_steps,
-        "batch_size": args.batch_size,
+        "num_mini_batch": args.num_mini_batch,
         "n_epochs": args.n_epochs, "learning_rate": args.learning_rate,
         "lr_decay": args.lr_decay, "gamma": args.gamma,
         "gae_lambda": args.gae_lambda, "clip_range": args.clip_range,

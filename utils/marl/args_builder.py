@@ -93,7 +93,12 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--total-timesteps", type=int, default=200_000)
     parser.add_argument("--n-envs", type=int, default=8)
     parser.add_argument("--n-steps", type=int, default=500)
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument(
+        "--num-mini-batch",
+        type=int,
+        default=1,
+        help="Number of mini-batches per PPO epoch (1 = full-batch update).",
+    )
     parser.add_argument("--n-epochs", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--no-lr-decay", action="store_false", dest="lr_decay")
@@ -145,7 +150,7 @@ def build_happo_hyperparams(
     return {
         "total_timesteps": args.total_timesteps, "episode_length": args.episode_length,
         "n_agents": n_agents, "n_envs": args.n_envs, "n_steps": args.n_steps,
-        "batch_size": args.batch_size,
+        "num_mini_batch": args.num_mini_batch,
         "n_epochs": args.n_epochs, "learning_rate": args.learning_rate,
         "lr_decay": args.lr_decay, "gamma": args.gamma,
         "gae_lambda": args.gae_lambda, "clip_range": args.clip_range,
@@ -177,7 +182,12 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--total-timesteps", type=int, default=200_000)
     parser.add_argument("--n-envs", type=int, default=8)
     parser.add_argument("--n-steps", type=int, default=500)
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument(
+        "--num-mini-batch",
+        type=int,
+        default=1,
+        help="Number of mini-batches per PPO epoch (1 = full-batch update).",
+    )
     parser.add_argument("--n-epochs", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--no-lr-decay", action="store_false", dest="lr_decay")

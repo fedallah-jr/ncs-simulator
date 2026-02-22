@@ -101,6 +101,8 @@ def main() -> None:
 
     if args.n_envs <= 0:
         raise ValueError("n_envs must be positive")
+    if args.num_mini_batch <= 0:
+        raise ValueError("num_mini_batch must be positive")
 
     shared_reward_normalizer, _shared_reward_manager = setup_shared_reward_normalizer(
         cfg.get("reward", {}), run_dir
@@ -461,15 +463,14 @@ def main() -> None:
                     adv_flat = adv_flat - adv_mean
 
                 total_samples = int(adv_flat.shape[0])
-                batch_size = min(int(args.batch_size), total_samples)
-                if batch_size <= 0:
-                    batch_size = total_samples
+                num_actor_mini_batches = min(int(args.num_mini_batch), total_samples)
 
                 # PPO epochs with factor weighting
                 for _ in range(args.n_epochs):
                     indices = rng.permutation(total_samples)
-                    for start in range(0, total_samples, batch_size):
-                        mb_idx = indices[start:start + batch_size]
+                    for mb_idx in np.array_split(indices, num_actor_mini_batches):
+                        if mb_idx.size == 0:
+                            continue
                         mb_idx_t = torch.as_tensor(mb_idx, device=device, dtype=torch.long)
 
                         obs_mb = obs_flat[mb_idx_t]
@@ -513,14 +514,13 @@ def main() -> None:
                 value_targets_flat = normalized_returns_t.squeeze(-1).reshape(-1)
                 values_old_flat = values_old.squeeze(-1).reshape(-1)
                 value_total_samples = int(value_targets_flat.shape[0])
-                value_batch_size = min(int(args.batch_size), value_total_samples)
-                if value_batch_size <= 0:
-                    value_batch_size = value_total_samples
+                num_value_mini_batches = min(int(args.num_mini_batch), value_total_samples)
 
                 for _ in range(args.n_epochs):
                     value_indices = rng.permutation(value_total_samples)
-                    for start in range(0, value_total_samples, value_batch_size):
-                        value_idx = value_indices[start:start + value_batch_size]
+                    for value_idx in np.array_split(value_indices, num_value_mini_batches):
+                        if value_idx.size == 0:
+                            continue
                         value_idx_t = torch.as_tensor(value_idx, device=device, dtype=torch.long)
 
                         global_obs_mb = global_obs_flat[value_idx_t]
@@ -550,14 +550,13 @@ def main() -> None:
                 returns_flat = normalized_returns_t.reshape(-1)
                 values_old_flat = values_old.reshape(-1)
                 value_total_samples = int(returns_flat.shape[0])
-                value_batch_size = min(int(args.batch_size), value_total_samples)
-                if value_batch_size <= 0:
-                    value_batch_size = value_total_samples
+                num_value_mini_batches = min(int(args.num_mini_batch), value_total_samples)
 
                 for _ in range(args.n_epochs):
                     value_indices = rng.permutation(value_total_samples)
-                    for start in range(0, value_total_samples, value_batch_size):
-                        value_idx = value_indices[start:start + value_batch_size]
+                    for value_idx in np.array_split(value_indices, num_value_mini_batches):
+                        if value_idx.size == 0:
+                            continue
                         value_idx_t = torch.as_tensor(value_idx, device=device, dtype=torch.long)
 
                         time_env_ids = value_idx_t // n_agents
