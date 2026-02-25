@@ -1,0 +1,54 @@
+{
+  "system": {
+    "n_agents": 3,
+    "heterogeneous_plants": [
+      { "A": [[0.993252, 0.0], [0.0, 1.01264]], "B": [[0.00555], [0.002513]], "process_noise_cov": [[0.0053, 0.0], [0.0, 0.0053]] },
+      { "A": [[0.977997, 0.0], [0.0, 1.032467]], "B": [[0.000205], [0.002115]], "process_noise_cov": [[0.0053, 0.0], [0.0, 0.0053]] },
+      { "A": [[1.067809, 0.0], [0.0, 1.007273]], "B": [[0.015345], [0.010815]], "process_noise_cov": [[0.0053, 0.0], [0.0, 0.0053]] }
+    ],
+    "initial_state_cov": [[1.0, 0.0], [0.0, 1.0]],
+    "initial_state_fixed": false,
+    "initial_state_fixed_seed": 0
+  },
+  "lqr": {
+    "Q": [[1.5, 0.0], [0.0, 1.5]],
+    "R": [[0.02]]
+  },
+    "reward": {
+      "state_error_reward": "kf_info_m",
+      "comm_penalty_alpha": 0.0,
+      "comm_throughput_floor": 0.0,
+      "normalize": false,
+    "no_normalization_scale": 1.5,
+    "reward_clip_max": 10,
+    "reward_clip_min": -1000000000000000,
+    "evaluation": {
+      "state_error_reward": "kf_info_m_noise",
+      "comm_penalty_alpha": 0.0,
+      "simple_comm_penalty_alpha": 0.0,
+      "normalize": false
+    }
+  },
+  "termination": {
+    "enabled": false,
+    "state_error_max": 5000.0,
+    "penalty": -500.0,
+    "evaluation": {
+      "penalty": -1000000.0
+    }
+  },
+  "observation": {
+    "history_window": 10,
+    "state_history_window": 10,
+    "throughput_window": [200, 50, 10],
+    "quantization_step": 0
+  },
+  "network": {
+    "data_rate_kbps": 100,
+    "data_packet_size": 125,
+    "perfect_communication": false,
+    "app_ack_packet_size": 30,
+    "tx_buffer_bytes": 100,
+    "random_drop_rate": [0.03, 0.001, 0.1]
+  }
+}

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # MARL experiment batch 4: MAPPO team reward with ValueNorm
-# Phase 1 (7.5M steps): kf_info_m reward
-# Phase 2 (+7.5M steps): resume, kf_info_m_noise reward
+# Phase 1 (12.5M steps): kf_info_m reward
+# Phase 2 (+12.5M steps): resume, kf_info_m_noise reward
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -11,8 +11,8 @@ cd "${PROJECT_ROOT}"
 SEED="${SEED:-0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 
-PHASE1_TIMESTEPS="${PHASE1_TIMESTEPS:-7500000}"
-PHASE2_TIMESTEPS="${PHASE2_TIMESTEPS:-15000000}"
+PHASE1_TIMESTEPS="${PHASE1_TIMESTEPS:-12500000}"
+PHASE2_TIMESTEPS="${PHASE2_TIMESTEPS:-25000000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_root="${OUTPUT_ROOT}/exp_4_mappo_team_reward_${timestamp}_seed${SEED}"
@@ -33,7 +33,7 @@ else
   exit 1
 fi
 
-config_path="${CONFIG_PATH:-configs/marl_absolute_plants.json}"
+config_path="${CONFIG_PATH:-configs/marl_absolute_plants_hetero.json}"
 if [[ ! -f "${config_path}" ]]; then
   echo "Config not found: ${config_path}" >&2
   exit 1
@@ -64,8 +64,9 @@ run_one() {
     --output-root "${run_root}"
     --seed "${SEED}"
     --total-timesteps "${PHASE1_TIMESTEPS}"
+    --n-envs 16
     --eval-freq 15000
-    --n-eval-episodes 50
+    --n-eval-episodes 30
     --episode-length 250
   )
 
@@ -111,8 +112,9 @@ PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m algorithms.marl_mappo \
   --resume "${resume_dir}" \
   --seed "${SEED}" \
   --total-timesteps "${PHASE2_TIMESTEPS}" \
+  --n-envs 16 \
   --eval-freq 15000 \
-  --n-eval-episodes 50 \
+  --n-eval-episodes 30 \
   --episode-length 250 \
   --no-normalize-obs \
   --feature-norm \
