@@ -350,6 +350,7 @@ def log_completed_episodes(
         return episode
 
     done_indices = np.where(done_reset)[0]
+    done_count = int(done_indices.size)
     for env_idx in done_indices:
         row = [episode, float(episode_reward_sums[env_idx])]
         if episode_lengths is not None:
@@ -370,7 +371,8 @@ def log_completed_episodes(
         if episode % log_interval == 0:
             print(
                 f"[{algo_name}] episode={episode} steps={global_step} "
-                f"reward_sum={episode_reward_sums[env_idx]:.3f}{extra_log_str}"
+                f"reward_sum={episode_reward_sums[env_idx]:.3f}{extra_log_str} "
+                f"(completed_envs_this_step={done_count})"
             )
         episode += 1
         episode_reward_sums[env_idx] = 0.0
