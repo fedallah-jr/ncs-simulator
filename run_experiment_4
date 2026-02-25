@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # MARL experiment batch 4: MAPPO team reward with ValueNorm
-# Phase 1 (12.5M steps): kf_info_m reward
-# Phase 2 (+12.5M steps): resume, kf_info_m_noise reward
+# Phase 1 (10M steps): kf_info_m reward
+# Phase 2 (+10M steps): resume, kf_info_m_noise reward
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -11,8 +11,8 @@ cd "${PROJECT_ROOT}"
 SEED="${SEED:-0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 
-PHASE1_TIMESTEPS="${PHASE1_TIMESTEPS:-12500000}"
-PHASE2_TIMESTEPS="${PHASE2_TIMESTEPS:-25000000}"
+PHASE1_TIMESTEPS="${PHASE1_TIMESTEPS:-10000000}"
+PHASE2_TIMESTEPS="${PHASE2_TIMESTEPS:-20000000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_root="${OUTPUT_ROOT}/exp_4_mappo_team_reward_${timestamp}_seed${SEED}"
@@ -64,7 +64,7 @@ run_one() {
     --output-root "${run_root}"
     --seed "${SEED}"
     --total-timesteps "${PHASE1_TIMESTEPS}"
-    --n-envs 16
+    --n-envs 8
     --eval-freq 15000
     --n-eval-episodes 30
     --episode-length 250
@@ -112,7 +112,7 @@ PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m algorithms.marl_mappo \
   --resume "${resume_dir}" \
   --seed "${SEED}" \
   --total-timesteps "${PHASE2_TIMESTEPS}" \
-  --n-envs 16 \
+  --n-envs 8 \
   --eval-freq 15000 \
   --n-eval-episodes 30 \
   --episode-length 250 \
