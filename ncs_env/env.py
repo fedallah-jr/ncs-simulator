@@ -117,6 +117,7 @@ class NCS_Env(gym.Env):
         self._process_rng: Optional[np.random.Generator] = None
         self._network_rng: Optional[np.random.Generator] = None
         self._drop_rng: Optional[np.random.Generator] = None
+        self._measurement_rng: Optional[np.random.Generator] = None
 
         self._net_cfg = self._merge_config_override(self.config.get("network", {}), network_override)
         drop_cfg = self._net_cfg.get("random_drop_rate", 0.0)
@@ -209,6 +210,10 @@ class NCS_Env(gym.Env):
         controller_cfg = self.config.get("controller", {})
         self.use_true_state_control = bool(controller_cfg.get("use_true_state_control", False))
         agent_measurement_noise_covs = self._resolve_agent_measurement_noise_covariances()
+        self.agent_measurement_noise_covs = agent_measurement_noise_covs
+        self._agent_has_measurement_noise = [
+            not np.allclose(cov, 0.0) for cov in self.agent_measurement_noise_covs
+        ]
 
         # Check if finite-horizon LQR is enabled (default: True)
         self.finite_horizon_enabled = bool(lqr_cfg.get("finite_horizon", True))
@@ -291,7 +296,7 @@ class NCS_Env(gym.Env):
                     self.K_list[i],
                     initial_estimate,
                     process_noise_cov=agent_matrices[i][2],
-                    measurement_noise_cov=agent_measurement_noise_covs[i],
+                    measurement_noise_cov=self.agent_measurement_noise_covs[i],
                     initial_covariance=self.initial_estimate_cov,
                 )
             )
@@ -906,7 +911,10 @@ class NCS_Env(gym.Env):
 
     def _resolve_agent_measurement_noise_covariances(self) -> List[np.ndarray]:
         """
-        Resolve per-agent Kalman measurement noise covariance matrices.
+        Resolve per-agent measurement noise covariance matrices.
+
+        The resolved matrices are used for both sensor noise injection
+        and the Kalman filter measurement covariance (R).
 
         Sources (highest precedence first):
         1) `system.heterogeneous_plants[i].measurement_noise_cov`
@@ -1110,11 +1118,13 @@ class NCS_Env(gym.Env):
             self._process_rng = None
             self._network_rng = None
             self._drop_rng = None
+            self._measurement_rng = None
             return
-        seeds = self.np_random.integers(0, 2**32 - 1, size=3, dtype=np.uint32)
+        seeds = self.np_random.integers(0, 2**32 - 1, size=4, dtype=np.uint32)
         self._init_rng = np.random.default_rng(int(seeds[0]))
         self._process_rng = np.random.default_rng(int(seeds[1]))
         self._network_rng = np.random.default_rng(int(seeds[2]))
+        self._measurement_rng = np.random.default_rng(int(seeds[3]))
         drop_seed = int(self.np_random.integers(0, 2**32 - 1))
         self._drop_rng = np.random.default_rng(drop_seed)
 
@@ -1412,9 +1422,20 @@ class NCS_Env(gym.Env):
             self.state_history[i].append(quantized_state)
 
     def _update_sensor_measurements(self) -> None:
-        self.last_sensor_measurements = [
-            self.plants[i].get_state() for i in range(self.n_agents)
-        ]
+        rng = self._measurement_rng if self._measurement_rng is not None else self.np_random
+        if rng is None:
+            rng = np.random.default_rng()
+        measurements: List[np.ndarray] = []
+        for i in range(self.n_agents):
+            measurement = self.plants[i].get_state()
+            if self._agent_has_measurement_noise[i]:
+                noise = rng.multivariate_normal(
+                    np.zeros(self.state_dim),
+                    self.agent_measurement_noise_covs[i],
+                )
+                measurement = measurement + noise
+            measurements.append(measurement)
+        self.last_sensor_measurements = measurements
 
     def _get_global_state(self) -> np.ndarray:
         perceived_goodput = np.asarray(

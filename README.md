@@ -77,6 +77,7 @@ Note: `tx_buffer_bytes` applies only to data packets; MAC/app ACKs are still sen
 
 ### `controller`
 - `use_true_state_control`: When `true`, controllers compute `u = -K x` using the true plant state instead of the Kalman estimate (`x_hat`). The Kalman filter still runs, but control no longer depends on it.
+- `measurement_noise_cov`: Covariance matrix for additive sensor measurement noise (`z = x + v`, `v ~ N(0, R)`). The same noisy measurement appears in the agent observation and is transmitted to the controller when `action=1`. The Kalman filter uses this same matrix as `R`; setting it to a zero matrix gives perfect measurements.
 
 Adjusting these parameters lets you explore different plant dynamics, estimator fidelity, reward shaping, or network congestion levels without modifying the source code.
 
