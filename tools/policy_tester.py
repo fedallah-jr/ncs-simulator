@@ -27,6 +27,11 @@ import copy
 import csv
 import json
 import os
+
+# Prevent thread thrashing when using ProcessPoolExecutor with PyTorch
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
