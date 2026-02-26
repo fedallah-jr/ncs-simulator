@@ -33,6 +33,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from ncs_env.env import NCS_Env
 from ncs_env.config import load_config
+from utils.marl.args_builder import _add_set_override_argument
+from utils.marl_training import load_config_with_overrides
 from utils.reward_normalization import (
     configure_shared_running_normalizers,
     reset_shared_running_normalizers,
@@ -155,6 +157,9 @@ def _init_worker(
     normalize_obs: bool = True,
     obs_norm_clip: float = 5.0,
     obs_norm_eps: float = 1e-8,
+    reward_override: Optional[Dict[str, Any]] = None,
+    network_override: Optional[Dict[str, Any]] = None,
+    termination_override: Optional[Dict[str, Any]] = None,
 ):
     """Initialize the environment and model in the worker process."""
     global _worker_env, _worker_model, _worker_params, _worker_config_path, _worker_episode_length
@@ -195,6 +200,9 @@ def _init_worker(
         episode_length=episode_length,
         config_path=config_path,
         seed=seed,
+        reward_override=reward_override,
+        network_override=network_override,
+        termination_override=termination_override,
     )
     _worker_model = create_policy_net(
         action_dim,
@@ -430,14 +438,18 @@ def train(args):
         raise ValueError("--bc-batch-size must be positive")
     if args.bc_init_std < 0.0:
         raise ValueError("--bc-init-std must be >= 0")
-    config_path_str = str(args.config) if args.config is not None else None
-    cfg = load_config(config_path_str)
-    system_cfg = cfg.get("system", {})
-    n_agents = int(system_cfg.get("n_agents", 1))
-    use_agent_id = n_agents > 1
+    
+    cfg, config_path_str, n_agents, use_agent_id, eval_reward_override, eval_termination_override, network_override, training_reward_override = (
+        load_config_with_overrides(args.config, args.n_agents, not args.no_agent_id, args.set_overrides)
+    )
 
     # 1. Setup Dummy Environment to get shapes
-    dummy_env = NCS_Env(n_agents=n_agents, config_path=config_path_str)
+    dummy_env = NCS_Env(
+        n_agents=n_agents, 
+        config_path=config_path_str,
+        reward_override=training_reward_override,
+        network_override=network_override,
+    )
     obs_dim = dummy_env.observation_space["agent_0"].shape[0]
     action_dim = dummy_env.action_space["agent_0"].n
     dummy_env.close()
@@ -684,6 +696,9 @@ def train(args):
                 args.normalize_obs,
                 args.obs_norm_clip,
                 args.obs_norm_eps,
+                training_reward_override,
+                network_override,
+                eval_termination_override,
             ),
         )
         map_fn = pool.map
@@ -705,6 +720,9 @@ def train(args):
             args.normalize_obs,
             args.obs_norm_clip,
             args.obs_norm_eps,
+            training_reward_override,
+            network_override,
+            eval_termination_override,
         )
 
     # 5. Logging Setup
@@ -911,7 +929,14 @@ def train(args):
         "bc_init_std": args.bc_init_std,
         "init_checkpoint": str(args.init_checkpoint) if args.init_checkpoint is not None else None,
     }
-    save_config_with_hyperparameters(run_dir, args.config, "openai_es", hyperparams)
+    save_config_with_hyperparameters(
+        run_dir, 
+        args.config, 
+        "openai_es", 
+        hyperparams,
+        resolved_config=cfg,
+        set_overrides=args.set_overrides,
+    )
     
     print(f"\nTraining complete. Artifacts saved to {run_dir}")
     print(f"Best fixed-seed eval achieved: {best_eval_all_time:.2f}")
@@ -921,6 +946,12 @@ def train(args):
 def parse_args():
     parser = argparse.ArgumentParser(description="Train OpenAI-ES on NCS env.")
     parser.add_argument("--config", type=Path, default=None, help="Config JSON path.")
+    parser.add_argument("--n-agents", type=int, default=1, help="Number of agents (if not in config).")
+    parser.add_argument(
+        "--no-agent-id",
+        action="store_true",
+        help="Disable appending one-hot agent ID to observations.",
+    )
     parser.add_argument("--generations", type=int, default=100, help="Number of generations.")
     parser.add_argument("--popsize", type=int, default=1000, help="Population size.")
     parser.add_argument("--episode-length", type=int, default=250, help="Episode length.")
@@ -1008,6 +1039,7 @@ def parse_args():
     )
     parser.add_argument("--n-workers", type=int, default=multiprocessing.cpu_count(), help="Workers.")
     parser.add_argument("--checkpoint-freq", type=int, default=5, help="Checkpoint frequency.")
+    _add_set_override_argument(parser)
     parser.add_argument("--output-root", type=Path, default=Path("outputs"), help="Output directory.")
     parser.set_defaults(normalize_obs=True)
     return parser.parse_args()
