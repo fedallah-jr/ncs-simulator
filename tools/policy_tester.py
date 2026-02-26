@@ -568,21 +568,6 @@ def _write_perfect_comm_config(config: Dict[str, Any], output_path: Path) -> Pat
     return output_path
 
 
-def _write_perfect_control_config(
-    config: Dict[str, Any],
-    output_path: Path,
-) -> Path:
-    config_copy = copy.deepcopy(config)
-    network_cfg = config_copy.setdefault("network", {})
-    network_cfg["perfect_communication"] = True
-    controller_cfg = config_copy.setdefault("controller", {})
-    controller_cfg["use_true_state_control"] = True
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w") as handle:
-        json.dump(config_copy, handle, indent=2, sort_keys=True, ensure_ascii=True)
-    return output_path
-
-
 def _resolve_n_agents(
     config: Dict[str, Any],
     specs: Sequence[PolicySpec],
@@ -1671,35 +1656,6 @@ def main() -> int:
                     **_summarize_results(perfect_comm_results),
                 }
             )
-            perfect_control_config_path = _write_perfect_control_config(
-                config, run_dir / "perfect_control_config.json"
-            )
-            _log("Perfect control baseline:")
-            perfect_control_spec = PolicySpec(
-                label="perfect_control_always_send",
-                policy_type="heuristic",
-                policy_path="always_send",
-            )
-            perfect_control_results = _evaluate_policy(
-                perfect_control_spec,
-                config_path=perfect_control_config_path,
-                episode_length=int(args.episode_length),
-                n_agents=resolved_n_agents,
-                seeds=seeds,
-                termination_override=termination_override,
-                reward_override=reward_override,
-                num_workers=int(args.num_workers),
-            )
-            for result in perfect_control_results:
-                per_seed_rows.append(_episode_result_to_seed_row(result))
-            summary_rows.append(
-                {
-                    "policy_label": "perfect_control_always_send",
-                    "policy_type": "heuristic",
-                    "num_seeds": len(perfect_control_results),
-                    **_summarize_results(perfect_control_results),
-                }
-            )
 
         # Replay test: compare original policy vs replay on test seeds
         if args.test_replay and not args.only_heuristics and policy_type is not None:
@@ -2123,39 +2079,6 @@ def main() -> int:
     perfect_comm_summary["checkpoint"] = "always_send"
     leaderboard_rows.append(perfect_comm_summary)
     _log(f"results: {perfect_comm_dir / 'summary_results.csv'}", indent=2)
-
-    perfect_control_root = models_root / "perfect_control"
-    perfect_control_config_path = _write_perfect_control_config(
-        reference_config,
-        perfect_control_root / "perfect_control_config.json",
-    )
-    _log("Perfect control baseline:")
-    _log(f"config: {perfect_control_config_path}", indent=2)
-    perfect_control_spec = PolicySpec(
-        label="perfect_control/always_send",
-        policy_type="heuristic",
-        policy_path="always_send",
-    )
-    perfect_control_results = _evaluate_policy(
-        perfect_control_spec,
-        config_path=perfect_control_config_path,
-        episode_length=int(args.episode_length),
-        n_agents=resolved_n_agents,
-        seeds=seeds,
-        termination_override=termination_override,
-        reward_override=reward_override,
-        num_workers=int(args.num_workers),
-    )
-    perfect_control_dir = perfect_control_root / "policy_tests" / "always_send_eval"
-    perfect_control_summary = _write_policy_results(
-        perfect_control_dir,
-        perfect_control_spec,
-        perfect_control_results,
-    )
-    perfect_control_summary["model_name"] = "perfect_control"
-    perfect_control_summary["checkpoint"] = "always_send"
-    leaderboard_rows.append(perfect_control_summary)
-    _log(f"results: {perfect_control_dir / 'summary_results.csv'}", indent=2)
 
     leaderboard_rows.sort(key=lambda row: float(row["mean_total_reward"]), reverse=True)
     ranked_rows: List[Dict[str, Any]] = []

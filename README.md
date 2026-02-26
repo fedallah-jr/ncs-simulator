@@ -168,7 +168,7 @@ Policy testing lives in `tools/policy_tester.py` and evaluates a target policy a
   - Expects subfolders like `model_1/config.json`, `model_1/best_model.pt`, `model_1/latest_model.pt`.
   - Writes `leaderboard.csv` at the models root plus per-model evaluation folders under `model_*/policy_tests/`.
 - Example (heuristics only): `python -m tools.policy_tester --config configs/marl_mixed_plants.json --only-heuristics --num-seeds 50`
-  - Evaluates heuristic baselines (`zero_wait`, `perfect_sync`, `always_send`, `never_send`, `random_50`) plus a perfect communication baseline (`always_send` with `network.perfect_communication=true`) and a perfect control baseline (`always_send` with `controller.use_true_state_control=true`).
+  - Evaluates heuristic baselines (`zero_wait`, `perfect_sync`, `always_send`, `never_send`, `random_50`) plus a perfect communication baseline (`always_send` with `network.perfect_communication=true`).
   - `perfect_sync` supports aliases `perfect_sync_n2`, `perfect_sync_n3`, ... (equivalently `perfect_sync_2`, `perfect_sync_3`, ...) to enforce extra idle spacing.
   - Useful for establishing baseline performance metrics before training.
 
