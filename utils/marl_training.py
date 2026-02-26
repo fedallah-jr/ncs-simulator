@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
+import copy
+import json
+import os
+import tempfile
 from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
 
 import multiprocessing
@@ -75,12 +79,26 @@ def load_config_with_overrides(
 
     config_path_str = str(config_path) if config_path is not None else None
     cfg = load_config(config_path_str)
+    cfg_base = copy.deepcopy(cfg)
 
     if set_overrides:
         from tools._common import parse_set_overrides, deep_merge
         overrides = parse_set_overrides(set_overrides)
         if overrides:
             deep_merge(cfg, overrides)
+            # Persist merged config so non-reward/non-network overrides (e.g. controller/system)
+            # are honored by environment constructors that load from config_path.
+            # Keep eval network semantics unchanged by preserving the original network section;
+            # training env still receives overridden network via network_override below.
+            cfg_for_file = copy.deepcopy(cfg)
+            if "network" in cfg_base:
+                cfg_for_file["network"] = copy.deepcopy(cfg_base["network"])
+            else:
+                cfg_for_file.pop("network", None)
+            fd, tmp_path = tempfile.mkstemp(prefix="ncs_cfg_merged_", suffix=".json")
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+                json.dump(cfg_for_file, tmp_file)
+            config_path_str = tmp_path
     system_cfg = cfg.get("system", {})
     n_agents = int(system_cfg.get("n_agents", default_n_agents))
     use_agent_id = use_agent_id_flag
