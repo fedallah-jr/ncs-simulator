@@ -34,7 +34,7 @@
     "comm_penalty_alpha": 0.0,
     "comm_throughput_floor": 0.0,
     "normalize": false,
-    "no_normalization_scale": 1.5,
+    "no_normalization_scale": 10,
     "reward_clip_max": 10,
     "reward_clip_min": -1000000000000000,
     "evaluation": {
