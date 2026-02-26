@@ -20,7 +20,7 @@ class NCSParallelEnv(ParallelEnv):
     def __init__(
         self,
         n_agents: int = 3,
-        episode_length: int = 1000,
+        episode_length: int = 250,
         config_path: Optional[str] = None,
         seed: Optional[int] = None,
     ):

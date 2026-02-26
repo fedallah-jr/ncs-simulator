@@ -81,7 +81,7 @@ class NCS_Env(gym.Env):
     def __init__(
         self,
         n_agents: int = 3,
-        episode_length: int = 1000,
+        episode_length: int = 250,
         config_path: Optional[str] = None,
         seed: Optional[int] = None,
         reward_override: Optional[Dict[str, Any]] = None,

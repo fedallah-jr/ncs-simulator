@@ -124,7 +124,7 @@ All MARL algorithms (IQL, VDN, QMIX, QPLEX, MAPPO, HAPPO) support observation no
 Generate an actor-only behavioral cloning dataset from a heuristic policy:
 ```bash
 python -m tools.generate_bc_dataset --config configs/marl_mixed_plants.json \
-  --episodes 50 --episode-length 500 --output outputs/bc_zero_wait.npz
+  --episodes 50 --episode-length 250 --output outputs/bc_zero_wait.npz
 ```
 
 Warm-start OpenAI-ES from the dataset:
