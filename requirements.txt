@@ -3,7 +3,6 @@ scipy
 filterpy
 gymnasium
 torch
-pettingzoo
 matplotlib
 jax
 jaxlib
