@@ -212,6 +212,7 @@ class Controller:
         K: Union[np.ndarray, List[np.ndarray]],
         initial_estimate: np.ndarray,
         process_noise_cov: np.ndarray,
+        measurement_noise_cov: Optional[np.ndarray] = None,
         initial_covariance: Optional[np.ndarray] = None,
         max_delay: int = 100,
     ):
@@ -265,8 +266,12 @@ class Controller:
         # Process noise covariance
         self.kf.Q = process_noise_cov.copy()
 
-        # Measurement noise covariance (perfect measurements)
-        self.kf.R = np.zeros((state_dim, state_dim))
+        # Measurement noise covariance
+        # Defaults to zero (perfect measurements) for backward compatibility.
+        if measurement_noise_cov is None:
+            self.kf.R = np.zeros((state_dim, state_dim))
+        else:
+            self.kf.R = measurement_noise_cov.copy()
 
         # Initial state estimate
         self.kf.x = initial_estimate.copy().reshape(-1, 1)

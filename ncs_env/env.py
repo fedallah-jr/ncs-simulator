@@ -208,6 +208,7 @@ class NCS_Env(gym.Env):
 
         controller_cfg = self.config.get("controller", {})
         self.use_true_state_control = bool(controller_cfg.get("use_true_state_control", False))
+        agent_measurement_noise_covs = self._resolve_agent_measurement_noise_covariances()
 
         # Check if finite-horizon LQR is enabled (default: True)
         self.finite_horizon_enabled = bool(lqr_cfg.get("finite_horizon", True))
@@ -290,6 +291,7 @@ class NCS_Env(gym.Env):
                     self.K_list[i],
                     initial_estimate,
                     process_noise_cov=agent_matrices[i][2],
+                    measurement_noise_cov=agent_measurement_noise_covs[i],
                     initial_covariance=self.initial_estimate_cov,
                 )
             )
@@ -901,6 +903,65 @@ class NCS_Env(gym.Env):
             matrices.append((A_i, B_i, W_i))
 
         return matrices
+
+    def _resolve_agent_measurement_noise_covariances(self) -> List[np.ndarray]:
+        """
+        Resolve per-agent Kalman measurement noise covariance matrices.
+
+        Sources (highest precedence first):
+        1) `system.heterogeneous_plants[i].measurement_noise_cov`
+        2) `system.heterogeneous_plants` entry with `"default": true`
+        3) `controller.measurement_noise_cov` (global fallback)
+
+        If none is provided, defaults to zero matrix (perfect measurements).
+        """
+        controller_cfg = self.config.get("controller", {})
+        expected_shape = (self.state_dim, self.state_dim)
+        raw_base = controller_cfg.get("measurement_noise_cov", None)
+        if raw_base is None:
+            base_R = np.zeros(expected_shape)
+        else:
+            base_R = np.array(raw_base, dtype=float)
+        if base_R.shape != expected_shape:
+            raise ValueError(
+                "controller.measurement_noise_cov shape "
+                f"{base_R.shape} does not match expected {expected_shape}"
+            )
+
+        het_cfg = self.system_cfg.get("heterogeneous_plants", None)
+        default_entry: Optional[Dict[str, Any]] = None
+        if isinstance(het_cfg, list):
+            for entry in het_cfg:
+                if isinstance(entry, dict) and bool(entry.get("default", False)):
+                    default_entry = entry
+                    break
+
+        covariances: List[np.ndarray] = []
+        for i in range(self.n_agents):
+            entry: Dict[str, Any] = {}
+            if isinstance(het_cfg, list):
+                if i < len(het_cfg) and isinstance(het_cfg[i], dict):
+                    entry = het_cfg[i]
+                elif default_entry is not None:
+                    entry = default_entry
+            raw = entry.get("measurement_noise_cov", None)
+            R_i = np.array(raw, dtype=float) if raw is not None else base_R.copy()
+            if R_i.shape != expected_shape:
+                raise ValueError(
+                    f"Agent {i}: measurement_noise_cov shape {R_i.shape} "
+                    f"does not match expected {expected_shape}"
+                )
+            if not np.allclose(R_i, R_i.T, atol=1e-12):
+                raise ValueError(
+                    f"Agent {i}: measurement_noise_cov must be symmetric"
+                )
+            eigvals = np.linalg.eigvalsh(0.5 * (R_i + R_i.T))
+            if float(np.min(eigvals)) < -1e-12:
+                raise ValueError(
+                    f"Agent {i}: measurement_noise_cov must be positive semidefinite"
+                )
+            covariances.append(R_i)
+        return covariances
 
     @staticmethod
     def _merge_config_override(

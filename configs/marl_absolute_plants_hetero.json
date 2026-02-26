@@ -2,9 +2,24 @@
   "system": {
     "n_agents": 3,
     "heterogeneous_plants": [
-      { "A": [[0.993252, 0.0], [0.0, 1.01264]], "B": [[0.00555], [0.002513]], "process_noise_cov": [[0.0053, 0.0], [0.0, 0.0053]] },
-      { "A": [[0.977997, 0.0], [0.0, 1.032467]], "B": [[0.000205], [0.002115]], "process_noise_cov": [[0.0053, 0.0], [0.0, 0.0053]] },
-      { "A": [[1.067809, 0.0], [0.0, 1.007273]], "B": [[0.015345], [0.010815]], "process_noise_cov": [[0.0053, 0.0], [0.0, 0.0053]] }
+      {
+        "A": [[0.9934784677454015, 0.0], [0.0, 1.0151977685768159]],
+        "B": [[0.005353860268284058], [0.0025564315668373467]],
+        "process_noise_cov": [[0.003, 0.0], [0.0, 0.003]],
+        "measurement_noise_cov": [[0.1, 0.0], [0.0, 0.1]]
+      },
+      {
+        "A": [[0.9749658398820598, 0.0], [0.0, 1.0275101334321681]],
+        "B": [[0.00017235777691924459], [0.001656010087427639]],
+        "process_noise_cov": [[0.003, 0.0], [0.0, 0.003]],
+        "measurement_noise_cov": [[0.1, 0.0], [0.0, 0.1]]
+      },
+      {
+        "A": [[1.0739964883307795, 0.0], [0.0, 1.0022364850388743]],
+        "B": [[0.013258912073891028], [0.013888129904004377]],
+        "process_noise_cov": [[0.003, 0.0], [0.0, 0.003]],
+        "measurement_noise_cov": [[0.1, 0.0], [0.0, 0.1]]
+      }
     ],
     "initial_state_cov": [[1.0, 0.0], [0.0, 1.0]],
     "initial_state_fixed": false,
@@ -14,11 +29,11 @@
     "Q": [[1.5, 0.0], [0.0, 1.5]],
     "R": [[0.02]]
   },
-    "reward": {
-      "state_error_reward": "kf_info_m",
-      "comm_penalty_alpha": 0.0,
-      "comm_throughput_floor": 0.0,
-      "normalize": false,
+  "reward": {
+    "state_error_reward": "kf_info_m",
+    "comm_penalty_alpha": 0.0,
+    "comm_throughput_floor": 0.0,
+    "normalize": false,
     "no_normalization_scale": 1.5,
     "reward_clip_max": 10,
     "reward_clip_min": -1000000000000000,
@@ -40,7 +55,7 @@
   "observation": {
     "history_window": 10,
     "state_history_window": 10,
-    "throughput_window": [2,3,5,10,15],
+    "throughput_window": [2, 3, 5, 10, 15],
     "quantization_step": 0
   },
   "network": {
