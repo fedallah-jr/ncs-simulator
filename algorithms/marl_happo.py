@@ -144,6 +144,7 @@ def main() -> None:
     obs_normalizer = create_obs_normalizer(
         obs_dim, args.normalize_obs, args.obs_norm_clip, args.obs_norm_eps
     )
+    adam_eps = float(args.adam_eps)
 
     # Independent actors: one per agent
     actors: List[MLPAgent] = []
@@ -159,7 +160,9 @@ def main() -> None:
             output_gain=0.01,
         ).to(device)
         actors.append(actor)
-        actor_optimizers.append(torch.optim.Adam(actor.parameters(), lr=float(args.learning_rate)))
+        actor_optimizers.append(
+            torch.optim.Adam(actor.parameters(), lr=float(args.learning_rate), eps=adam_eps)
+        )
 
     critic = CentralValueMLP(
         input_dim=critic_input_dim,
@@ -171,7 +174,9 @@ def main() -> None:
         use_popart=args.popart,
         popart_beta=float(args.popart_beta),
     ).to(device)
-    critic_optimizer = torch.optim.Adam(critic.parameters(), lr=float(args.learning_rate))
+    critic_optimizer = torch.optim.Adam(
+        critic.parameters(), lr=float(args.learning_rate), eps=adam_eps
+    )
 
     if args.popart:
         popart_layer = critic.popart_layer()
@@ -192,6 +197,10 @@ def main() -> None:
     last_eval_step = 0
     eval_seed = args.seed
 
+    def _set_optimizer_eps(optimizer: torch.optim.Optimizer) -> None:
+        for param_group in optimizer.param_groups:
+            param_group["eps"] = adam_eps
+
     if resuming:
         counters = load_happo_training_state(
             training_state_path, actors, critic, actor_optimizers, critic_optimizer,
@@ -201,6 +210,10 @@ def main() -> None:
         episode = counters["episode"]
         last_eval_step = counters["last_eval_step"]
         print(f"Resumed from {run_dir} at step {global_step}")
+
+    for optimizer in actor_optimizers:
+        _set_optimizer_eps(optimizer)
+    _set_optimizer_eps(critic_optimizer)
 
     arch_args = _get_arch_args(args)
 

@@ -279,6 +279,7 @@ def build_mappo_hyperparams(
         "n_agents": n_agents, "n_envs": args.n_envs, "n_steps": args.n_steps,
         "num_mini_batch": args.num_mini_batch,
         "n_epochs": args.n_epochs, "learning_rate": args.learning_rate,
+        "adam_eps": args.adam_eps,
         "lr_decay": args.lr_decay, "gamma": args.gamma,
         "gae_lambda": args.gae_lambda, "clip_range": args.clip_range,
         "ent_coef": args.ent_coef, "vf_coef": args.vf_coef, "huber_delta": args.huber_delta,

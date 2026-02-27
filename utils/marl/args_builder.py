@@ -100,6 +100,7 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
     )
     parser.add_argument("--n-epochs", type=int, default=5)
     parser.add_argument("--learning-rate", type=float, default=5e-4)
+    parser.add_argument("--adam-eps", type=float, default=1e-5)
     parser.add_argument("--lr-decay", action="store_true", dest="lr_decay")
     parser.add_argument("--no-lr-decay", action="store_false", dest="lr_decay")
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -149,6 +150,7 @@ def build_happo_hyperparams(
         "n_agents": n_agents, "n_envs": args.n_envs, "n_steps": args.n_steps,
         "num_mini_batch": args.num_mini_batch,
         "n_epochs": args.n_epochs, "learning_rate": args.learning_rate,
+        "adam_eps": args.adam_eps,
         "lr_decay": args.lr_decay, "gamma": args.gamma,
         "gae_lambda": args.gae_lambda, "clip_range": args.clip_range,
         "ent_coef": args.ent_coef, "vf_coef": args.vf_coef, "huber_delta": args.huber_delta,
@@ -188,6 +190,7 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     )
     parser.add_argument("--n-epochs", type=int, default=5)
     parser.add_argument("--learning-rate", type=float, default=5e-4)
+    parser.add_argument("--adam-eps", type=float, default=1e-5)
     parser.add_argument("--lr-decay", action="store_true", dest="lr_decay")
     parser.add_argument("--no-lr-decay", action="store_false", dest="lr_decay")
     parser.add_argument("--gamma", type=float, default=0.99)
