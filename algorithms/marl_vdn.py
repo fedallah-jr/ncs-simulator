@@ -145,6 +145,7 @@ def main() -> None:
     global_step = 0
     episode = 0
     last_eval_step = 0
+    eval_seed = args.seed
     vector_step = 0
 
     if resuming:
@@ -249,12 +250,13 @@ def main() -> None:
                     eval_env=eval_env, agent=learner.agent,
                     n_eval_envs=args.n_eval_envs, n_agents=n_agents, n_actions=n_actions,
                     use_agent_id=use_agent_id, device=device,
-                    n_episodes=args.n_eval_episodes, seed=args.seed,
+                    n_episodes=args.n_eval_episodes, seed=eval_seed,
                     obs_normalizer=obs_normalizer, eval_writer=eval_writer, eval_f=eval_f,
                     best_model_tracker=best_model_tracker, run_dir=run_dir,
                     save_checkpoint=save_checkpoint, global_step=global_step,
                     algo_name="VDN",
                 )
+                eval_seed += args.n_eval_envs
                 last_eval_step = global_step
                 save_training_state()
 

@@ -73,11 +73,12 @@ HEURISTIC_POLICY_NAMES: Sequence[str] = (
     "perfect_sync_n2",
     "always_send",
     "never_send",
-    "random_50",
+    "random_33",
+    "random_20",
 )
 
 # Names for stochastic heuristics that should use non-deterministic actions.
-STOCHASTIC_HEURISTICS: Sequence[str] = ("random_50",)
+STOCHASTIC_HEURISTICS: Sequence[str] = ("random_33", "random_20")
 
 # Reward override for evaluation: absolute reward, no normalization by default.
 # Reward clipping is disabled by default but can be enabled via --use-reward-clipping.

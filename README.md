@@ -95,14 +95,14 @@ Learning-based baselines live under `algorithms/`:
   - QPLEX weights agent Qs via Q-attention (state + per-agent Q-values); tune with `--n-head`, `--attend-reg-coef`, `--nonlinear`, `--no-state-bias`, `--no-weighted-head`.
 - MAPPO (multi-agent, PyTorch): `python -m algorithms.marl_mappo --config configs/marl_mixed_plants.json --total-timesteps 200000`
   - `--num-mini-batch`: Number of mini-batches per PPO epoch (default `1`, i.e., full-batch updates).
-  - Key PPO defaults: `--learning-rate 5e-4`, `--vf-coef 1.0`, and LR decay disabled by default (enable with `--lr-decay`).
+  - Key PPO defaults: `--n-epochs 5`, `--learning-rate 5e-4`, `--vf-coef 1.0`, and LR decay disabled by default (enable with `--lr-decay`).
   - `--popart`: Use PopArt value normalization (output-preserving weight correction) instead of the default EMA-based ValueNorm.
   - PopArt EMA decay can be tuned with `--popart-beta` (default `0.999`).
   - ValueNorm now follows on-policy math by default (`--value-norm-beta 0.99999`, variance floor `1e-2`); enable `--value-norm-per-element-update` to scale decay by rollout batch size.
 - HAPPO (multi-agent, PyTorch): `python -m algorithms.marl_happo --config configs/marl_mixed_plants.json --total-timesteps 200000`
   - Independent actor per agent with sequential policy update and importance-weighting factor (monotonic improvement guarantee).
   - `--num-mini-batch`: Number of mini-batches per PPO epoch (default `1`, i.e., full-batch updates).
-  - Key PPO defaults: `--learning-rate 5e-4`, `--vf-coef 1.0`, and LR decay disabled by default (enable with `--lr-decay`).
+  - Key PPO defaults: `--n-epochs 5`, `--learning-rate 5e-4`, `--vf-coef 1.0`, and LR decay disabled by default (enable with `--lr-decay`).
   - Uses shared team reward and a scalar centralized critic, matching the paper's fully cooperative formulation.
   - `--fixed-order`: Use fixed agent update order instead of random shuffle each iteration.
   - `--popart`: Use PopArt value normalization instead of the default EMA-based ValueNorm.

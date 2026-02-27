@@ -98,7 +98,7 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
         default=1,
         help="Number of mini-batches per PPO epoch (1 = full-batch update).",
     )
-    parser.add_argument("--n-epochs", type=int, default=4)
+    parser.add_argument("--n-epochs", type=int, default=5)
     parser.add_argument("--learning-rate", type=float, default=5e-4)
     parser.add_argument("--lr-decay", action="store_true", dest="lr_decay")
     parser.add_argument("--no-lr-decay", action="store_false", dest="lr_decay")
@@ -186,7 +186,7 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
         default=1,
         help="Number of mini-batches per PPO epoch (1 = full-batch update).",
     )
-    parser.add_argument("--n-epochs", type=int, default=4)
+    parser.add_argument("--n-epochs", type=int, default=5)
     parser.add_argument("--learning-rate", type=float, default=5e-4)
     parser.add_argument("--lr-decay", action="store_true", dest="lr_decay")
     parser.add_argument("--no-lr-decay", action="store_false", dest="lr_decay")
