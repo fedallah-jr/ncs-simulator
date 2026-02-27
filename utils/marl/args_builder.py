@@ -57,8 +57,8 @@ def build_base_qlearning_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--eval-freq", type=int, default=10000)
-    parser.add_argument("--n-eval-episodes", type=int, default=30)
-    parser.add_argument("--n-eval-envs", type=int, default=4)
+    parser.add_argument("--n-eval-episodes", type=int, default=80)
+    parser.add_argument("--n-eval-envs", type=int, default=8)
     _add_set_override_argument(parser)
     parser.set_defaults(normalize_obs=True)
     return parser
@@ -134,8 +134,8 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--eval-freq", type=int, default=10000)
-    parser.add_argument("--n-eval-episodes", type=int, default=30)
-    parser.add_argument("--n-eval-envs", type=int, default=4)
+    parser.add_argument("--n-eval-episodes", type=int, default=80)
+    parser.add_argument("--n-eval-envs", type=int, default=8)
     _add_set_override_argument(parser)
     parser.set_defaults(normalize_obs=True, lr_decay=False)
     return parser
@@ -222,8 +222,8 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--eval-freq", type=int, default=10000)
-    parser.add_argument("--n-eval-episodes", type=int, default=30)
-    parser.add_argument("--n-eval-envs", type=int, default=4)
+    parser.add_argument("--n-eval-episodes", type=int, default=80)
+    parser.add_argument("--n-eval-envs", type=int, default=8)
     _add_set_override_argument(parser)
     parser.set_defaults(normalize_obs=True, lr_decay=False)
     return parser
