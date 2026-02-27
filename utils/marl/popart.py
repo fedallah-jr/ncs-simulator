@@ -73,7 +73,7 @@ class PopArtLayer(nn.Module):
     def update_and_correct(self, raw_targets: torch.Tensor) -> None:
         """Update running statistics from *raw_targets* and correct weights.
 
-        Should be called **once per rollout**, before mini-batch training.
+        Called per critic mini-batch to track reward scale changes.
         """
         # ---------- save old stats ----------
         mu_old = self.mu.clone()

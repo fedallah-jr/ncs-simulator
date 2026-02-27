@@ -411,15 +411,8 @@ def main() -> None:
             returns_t = torch.as_tensor(returns, device=device, dtype=torch.float32)
             values_old = torch.as_tensor(values_batch, device=device, dtype=torch.float32)
 
-            if args.popart:
-                popart_layer.update_and_correct(returns_t)
-                normalized_returns_t = popart_layer.normalize_targets(returns_t)
-                values_old = popart_layer.normalize_targets(
-                    torch.as_tensor(values_raw, device=device, dtype=torch.float32)
-                )
-            else:
-                value_normalizer.update(returns_t)
-                normalized_returns_t = value_normalizer.normalize(returns_t)
+            # ValueNorm/PopArt stats updated per critic mini-batch (HARL-style)
+            values_raw_t = torch.as_tensor(values_raw, device=device, dtype=torch.float32)
 
             # ---- Learning rate decay ----
             if args.lr_decay:
@@ -518,12 +511,11 @@ def main() -> None:
                     factor = factor * ratio_i.cpu().numpy().reshape(rollout_len, args.n_envs, 1)
 
             # ---- Critic update ----
-            global_obs_flat = global_obs_t.reshape(-1, critic_input_dim)
-
-            # Scalar value: (T, E, 1) -> (T*E,)
-            value_targets_flat = normalized_returns_t.squeeze(-1).reshape(-1)
+            raw_returns_flat = returns_t.reshape(-1, value_dim)
             values_old_flat = values_old.squeeze(-1).reshape(-1)
-            value_total_samples = int(value_targets_flat.shape[0])
+            values_raw_flat = values_raw_t.reshape(-1, value_dim)
+            global_obs_flat = global_obs_t.reshape(-1, critic_input_dim)
+            value_total_samples = int(raw_returns_flat.shape[0])
             num_value_mini_batches = min(int(args.num_mini_batch), value_total_samples)
 
             for _ in range(args.n_epochs):
@@ -533,10 +525,20 @@ def main() -> None:
                         continue
                     value_idx_t = torch.as_tensor(value_idx, device=device, dtype=torch.long)
 
+                    raw_ret_mb = raw_returns_flat[value_idx_t]
+                    if args.popart:
+                        popart_layer.update_and_correct(raw_ret_mb)
+                        returns_mb = popart_layer.normalize_targets(raw_ret_mb).squeeze(-1)
+                        values_old_mb = popart_layer.normalize_targets(
+                            values_raw_flat[value_idx_t]
+                        ).squeeze(-1)
+                    else:
+                        value_normalizer.update(raw_ret_mb)
+                        returns_mb = value_normalizer.normalize(raw_ret_mb).squeeze(-1)
+                        values_old_mb = values_old_flat[value_idx_t]
+
                     global_obs_mb = global_obs_flat[value_idx_t]
                     values_pred_mb = critic(global_obs_mb).squeeze(-1)
-                    returns_mb = value_targets_flat[value_idx_t]
-                    values_old_mb = values_old_flat[value_idx_t]
 
                     value_pred_clipped = values_old_mb + (
                         values_pred_mb - values_old_mb
