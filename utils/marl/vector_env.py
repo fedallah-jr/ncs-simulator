@@ -130,6 +130,24 @@ class VectorEnvAdapter:
     def get_perfect_communication(self) -> bool:
         return bool(getattr(self.env, "perfect_communication", False))
 
+    def get_wrapper_attr(self, name: str) -> Any:
+        """Gymnasium AsyncVectorEnv compatibility for `call` commands."""
+        if hasattr(self, name):
+            return getattr(self, name)
+        if hasattr(self.env, "get_wrapper_attr"):
+            return self.env.get_wrapper_attr(name)
+        return getattr(self.env, name)
+
+    def set_wrapper_attr(self, name: str, value: Any, *, force: bool = True) -> None:
+        """Gymnasium AsyncVectorEnv compatibility for `set_attr` commands."""
+        if hasattr(self, name):
+            setattr(self, name, value)
+            return
+        if hasattr(self.env, "set_wrapper_attr"):
+            self.env.set_wrapper_attr(name, value, force=force)
+            return
+        setattr(self.env, name, value)
+
 
 def create_async_vector_env(
     n_envs: int,
