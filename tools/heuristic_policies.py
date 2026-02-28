@@ -319,7 +319,7 @@ class PerfectSyncPolicy(BaseHeuristicPolicy):
             state: None
         """
         cycle_len = self.n_agents * self.slot_spacing_multiplier
-        agent_slot = self.agent_index * self.slot_spacing_multiplier
+        agent_slot = (self.n_agents - 1 - self.agent_index) * self.slot_spacing_multiplier
         action = 1 if (self.timestep % cycle_len) == agent_slot else 0
         self.timestep += 1
         return action, None

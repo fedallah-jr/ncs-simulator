@@ -2,8 +2,7 @@
 set -euo pipefail
 
 # MARL experiment batch 4: MAPPO team reward with ValueNorm
-# Phase 1 (10M steps): kf_info_m reward
-# Phase 2 (+10M steps): resume, kf_info_m_noise reward
+# Single-stage training with kf_info_m_noise + reward normalization.
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -11,8 +10,7 @@ cd "${PROJECT_ROOT}"
 SEED="${SEED:-0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 
-PHASE1_TIMESTEPS="${PHASE1_TIMESTEPS:-10000000}"
-PHASE2_TIMESTEPS="${PHASE2_TIMESTEPS:-20000000}"
+TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-20000000}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_root="${OUTPUT_ROOT}/exp_4_mappo_team_reward_${timestamp}_seed${SEED}"
@@ -63,7 +61,7 @@ run_one() {
     --config "${config_path}"
     --output-root "${run_root}"
     --seed "${SEED}"
-    --total-timesteps "${PHASE1_TIMESTEPS}"
+    --total-timesteps "${TOTAL_TIMESTEPS}"
     --n-envs 8
     --eval-freq 20000
     --n-eval-episodes 80
@@ -91,36 +89,13 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
-# --- Phase 1: kf_info_m reward ---
+# Single-stage training: kf_info_m_noise + reward normalization.
 run_one "algorithms.marl_mappo" "mappo" "mappo_team_reward" \
   --no-normalize-obs \
   --feature-norm \
   --layer-norm \
-  --set reward.state_error_reward=kf_info_m \
-  --set reward.normalize=false
-
-resume_dir="${run_root}/mappo_team_reward"
-
-# --- Phase 2: resume, kf_info_m_noise reward ---
-echo "=== mappo_team_reward (phase 2: kf_info_m_noise) ==="
-echo "Resuming from: ${resume_dir}"
-echo "Total timesteps: ${PHASE2_TIMESTEPS}"
-
-PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m algorithms.marl_mappo \
-  --config "${config_path}" \
-  --resume "${resume_dir}" \
-  --seed "${SEED}" \
-  --total-timesteps "${PHASE2_TIMESTEPS}" \
-  --n-envs 8 \
-  --eval-freq 15000 \
-  --n-eval-episodes 30 \
-  --episode-length 250 \
-  --no-normalize-obs \
-  --feature-norm \
-  --layer-norm \
   --set reward.state_error_reward=kf_info_m_noise \
-  --set reward.normalize=false \
-  2>&1 | tee "${run_root}/logs/mappo_team_reward_phase2.log"
+  --set reward.normalize=true
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then

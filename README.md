@@ -34,7 +34,7 @@ The configuration file is divided into sections; each key controls a specific as
 - `normalize`: Explicit flag (default: `false`) for reward normalization in multi-agent runs. When `true`, running normalization scales the per-step reward.
 - `no_normalization_scale`: Scalar divisor applied to rewards when normalization is disabled (default `1.0`).
 - `reward_clip_min` / `reward_clip_max`: Optional bounds applied to rewards after scaling/normalization.
-- `normalization_gamma`: Discount factor for running normalization returns (default `0.99`).
+- `normalization_gamma`: Discount factor for running normalization returns (default `0.999`).
 - `comm_throughput_floor`: Small positive value to keep the throughput estimate from collapsing to zero when no ACKs have been observed recently.
 
 When `perfect_communication=true`, the whole communication logic is bypassed directly resulting in instant package transmission.

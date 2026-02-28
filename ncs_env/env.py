@@ -246,7 +246,7 @@ class NCS_Env(gym.Env):
 
         base_reward_cfg = self.config.get("reward", {})
         reward_cfg = self._merge_config_override(base_reward_cfg, self.reward_override)
-        self.reward_normalization_gamma = float(reward_cfg.get("normalization_gamma", 0.99))
+        self.reward_normalization_gamma = float(reward_cfg.get("normalization_gamma", 0.999))
         self.state_cost_matrix = self.lqr_Q.copy()
         self.comm_recent_window = int(reward_cfg.get("comm_recent_window", self.history_window))
         self.comm_throughput_window = int(
