@@ -32,6 +32,7 @@ from utils.marl.vector_env import create_async_vector_env, create_eval_async_vec
 from utils.marl_training import (
     setup_device_and_rng,
     load_config_with_overrides,
+    resolve_training_eval_baseline,
     create_obs_normalizer,
     print_run_summary,
     setup_shared_reward_normalizer,
@@ -181,6 +182,7 @@ def main() -> None:
     cfg, config_path_str, n_agents, use_agent_id, eval_reward_override, eval_termination_override, network_override, training_reward_override = (
         load_config_with_overrides(args.config, args.n_agents, not args.no_agent_id, args.set_overrides)
     )
+    eval_baseline = resolve_training_eval_baseline(cfg, n_agents)
 
     resuming = args.resume is not None
     if resuming:
@@ -488,8 +490,9 @@ def main() -> None:
                         best_model_tracker=best_model_tracker, run_dir=run_dir,
                         save_checkpoint=save_checkpoint, global_step=global_step,
                         algo_name="MAPPO",
+                        eval_baseline=eval_baseline,
                     )
-                    eval_seed += args.n_eval_envs
+                    eval_seed += args.n_eval_episodes
                     last_eval_step = global_step
                     save_training_state()
 

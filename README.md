@@ -79,6 +79,13 @@ Note: `tx_buffer_bytes` applies only to data packets; MAC/app ACKs are still sen
 - `use_true_state_control`: When `true`, controllers compute `u = -K x` using the true plant state instead of the Kalman estimate (`x_hat`). The Kalman filter still runs, but control no longer depends on it.
 - `measurement_noise_cov`: Covariance matrix for additive sensor measurement noise (`z = x + v`, `v ~ N(0, R)`). The same noisy measurement appears in the agent observation and is transmitted to the controller when `action=1`. The Kalman filter uses this same matrix as `R`; setting it to a zero matrix gives perfect measurements.
 
+### `training_evaluation`
+- `baseline_policy`: Heuristic baseline used during training-time evaluation/model selection.
+  - `"perfect_comm"`: Alias for `always_send` with `network.perfect_communication=true`.
+  - Any heuristic policy name (e.g., `"random_20"`, `"always_send"`, `"perfect_sync"`): evaluated with normal network settings.
+- The provided config files currently set `training_evaluation.baseline_policy` to `"perfect_sync_n2"`.
+- During each evaluation checkpoint, the learned policy and baseline are evaluated seed-by-seed on the same episode seed list. The code reports mean/std of per-seed drop ratio and selects `best_model.pt` by minimizing mean drop ratio.
+
 Adjusting these parameters lets you explore different plant dynamics, estimator fidelity, reward shaping, or network congestion levels without modifying the source code.
 
 ## Algorithms
@@ -143,6 +150,7 @@ CLI flags let you change environment parameters. Use `--output-root` (defaults t
   - For OpenAI-ES: `best_model.npz` (flattened params of best individual) and `latest_model.npz`.
   - For MARL (IQL/VDN/QMIX/MAPPO): `best_model.pt` and `latest_model.pt`.
 - `training_rewards.csv`: A simple CSV table tracking performance. For OpenAI-ES it logs `[generation, mean_reward, max_reward, time]`.
+- `evaluation_drop_stats.csv`: Training-time baseline comparison stats per eval step: baseline policy, policy/baseline mean/std rewards, and drop-ratio mean/std used for `best_model.pt` selection.
 - **`config.json`**, which combines the effective environment configuration used by the run (including CLI `--set` overrides, when provided) with a `training_run` section containing the algorithm name, timestamp, source config path, and all hyperparameters from the run. 
 
 Configuration presets live under `configs/`. `configs/perfect_comm.json` mirrors the default plant/network settings but forces `network.perfect_communication` to `true`, which is useful for debugging algorithms without channel contention.

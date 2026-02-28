@@ -13,7 +13,7 @@ import copy
 import json
 import os
 import tempfile
-from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import multiprocessing
 from multiprocessing.managers import SyncManager
@@ -222,6 +222,63 @@ def create_obs_normalizer(
     )
 
 
+def _heuristic_is_stochastic(policy_name: str) -> bool:
+    return str(policy_name).strip().startswith("random_")
+
+
+def resolve_training_eval_baseline(
+    cfg: Dict[str, Any],
+    n_agents: int,
+) -> Dict[str, Any]:
+    """Resolve training-time evaluation baseline policy from config.
+
+    Config path:
+      training_evaluation.baseline_policy
+
+    Supported values:
+      - "perfect_comm" (alias for always_send with perfect_communication=true)
+      - Any heuristic name from tools/heuristic_policies.py (e.g., "random_20")
+    """
+    training_eval_cfg = cfg.get("training_evaluation", {})
+    baseline_policy = "perfect_comm"
+    if isinstance(training_eval_cfg, dict):
+        raw_policy = training_eval_cfg.get("baseline_policy", baseline_policy)
+        if raw_policy is not None:
+            baseline_policy = str(raw_policy).strip()
+    if not baseline_policy:
+        baseline_policy = "perfect_comm"
+
+    if baseline_policy == "perfect_comm":
+        return {
+            "label": "perfect_comm",
+            "heuristic_policy": "always_send",
+            "use_perfect_communication": True,
+            "deterministic": True,
+        }
+
+    from tools.heuristic_policies import get_heuristic_policy
+
+    try:
+        get_heuristic_policy(
+            baseline_policy,
+            n_agents=max(1, int(n_agents)),
+            seed=0,
+            agent_index=0,
+        )
+    except Exception as exc:
+        raise ValueError(
+            "Invalid training_evaluation.baseline_policy="
+            f"{baseline_policy!r}. Use 'perfect_comm' or a valid heuristic policy name."
+        ) from exc
+
+    return {
+        "label": baseline_policy,
+        "heuristic_policy": baseline_policy,
+        "use_perfect_communication": False,
+        "deterministic": not _heuristic_is_stochastic(baseline_policy),
+    }
+
+
 def print_run_summary(
     run_dir: Path,
     latest_path: Path,
@@ -306,11 +363,21 @@ def evaluate_and_log(
     save_checkpoint: Callable[[Path], None],
     global_step: int,
     algo_name: str,
+    eval_baseline: Dict[str, Any],
 ) -> None:
-    """Run vectorized evaluation, write CSV row, update best model, and print."""
-    from utils.marl.common import run_evaluation_vectorized
+    """Run paired-seed evaluation, write CSV row, update best model, and print."""
+    from utils.marl.common import run_evaluation_vectorized_seeded
 
-    mean_eval_reward, std_eval_reward, _ = run_evaluation_vectorized(
+    if n_episodes <= 0:
+        raise ValueError("n_episodes must be positive")
+
+    episode_seeds: List[Optional[int]]
+    if seed is None:
+        episode_seeds = [None for _ in range(int(n_episodes))]
+    else:
+        episode_seeds = [int(seed) + ep for ep in range(int(n_episodes))]
+
+    mean_eval_reward, std_eval_reward, policy_rewards = run_evaluation_vectorized_seeded(
         eval_env=eval_env,
         agent=agent,
         n_eval_envs=n_eval_envs,
@@ -318,20 +385,98 @@ def evaluate_and_log(
         n_actions=n_actions,
         use_agent_id=use_agent_id,
         device=device,
-        n_episodes=n_episodes,
-        seed=seed,
+        episode_seeds=episode_seeds,
         obs_normalizer=obs_normalizer,
     )
+
+    baseline_label = str(eval_baseline.get("label", "perfect_comm"))
+    baseline_policy = str(eval_baseline.get("heuristic_policy", "always_send"))
+    baseline_deterministic = bool(eval_baseline.get("deterministic", True))
+    baseline_perfect_comm = bool(eval_baseline.get("use_perfect_communication", False))
+
+    current_pc_states = eval_env.call("get_perfect_communication")
+    current_pc = bool(current_pc_states[0]) if current_pc_states else False
+    if baseline_perfect_comm != current_pc:
+        eval_env.call("set_perfect_communication", baseline_perfect_comm)
+
+    try:
+        heuristic_name = None if baseline_policy == "always_send" else baseline_policy
+        mean_baseline_reward, std_baseline_reward, baseline_rewards = run_evaluation_vectorized_seeded(
+            eval_env=eval_env,
+            agent=agent,
+            n_eval_envs=n_eval_envs,
+            n_agents=n_agents,
+            n_actions=n_actions,
+            use_agent_id=use_agent_id,
+            device=device,
+            episode_seeds=episode_seeds,
+            obs_normalizer=obs_normalizer,
+            heuristic_policy_name=heuristic_name,
+            heuristic_deterministic=baseline_deterministic,
+            fixed_action=1 if baseline_policy == "always_send" else None,
+        )
+    finally:
+        if baseline_perfect_comm != current_pc:
+            eval_env.call("set_perfect_communication", current_pc)
+
+    if len(policy_rewards) != len(baseline_rewards):
+        raise RuntimeError("Policy and baseline evaluation episode counts do not match")
+
+    policy_arr = np.asarray(policy_rewards, dtype=np.float64)
+    baseline_arr = np.asarray(baseline_rewards, dtype=np.float64)
+    denom = np.maximum(np.abs(baseline_arr), 1e-8)
+    drop_ratios = (baseline_arr - policy_arr) / denom
+    mean_drop_ratio = float(np.mean(drop_ratios))
+    std_drop_ratio = float(np.std(drop_ratios))
+
+    drop_csv_path = run_dir / "evaluation_drop_stats.csv"
+    write_drop_header = (not drop_csv_path.exists()) or drop_csv_path.stat().st_size == 0
+    with drop_csv_path.open("a", newline="", encoding="utf-8") as drop_f:
+        drop_writer = csv.writer(drop_f)
+        if write_drop_header:
+            drop_writer.writerow(
+                [
+                    "step",
+                    "baseline_policy",
+                    "baseline_perfect_communication",
+                    "policy_mean_reward",
+                    "policy_std_reward",
+                    "baseline_mean_reward",
+                    "baseline_std_reward",
+                    "drop_ratio_mean",
+                    "drop_ratio_std",
+                    "num_episodes",
+                ]
+            )
+        drop_writer.writerow(
+            [
+                global_step,
+                baseline_label,
+                int(baseline_perfect_comm),
+                mean_eval_reward,
+                std_eval_reward,
+                mean_baseline_reward,
+                std_baseline_reward,
+                mean_drop_ratio,
+                std_drop_ratio,
+                len(drop_ratios),
+            ]
+        )
+        drop_f.flush()
+
     eval_writer.writerow([global_step, mean_eval_reward, std_eval_reward])
     eval_f.flush()
 
     best_model_tracker.update(
-        "eval", mean_eval_reward, run_dir / "best_model.pt", save_checkpoint
+        "eval_drop_ratio", -mean_drop_ratio, run_dir / "best_model.pt", save_checkpoint
     )
 
     print(
         f"[{algo_name}] Eval at step {global_step}: "
-        f"mean_reward={mean_eval_reward:.3f} std={std_eval_reward:.3f}"
+        f"mean_reward={mean_eval_reward:.3f} std={std_eval_reward:.3f} | "
+        f"baseline={baseline_label} "
+        f"mean={mean_baseline_reward:.3f} std={std_baseline_reward:.3f} | "
+        f"drop_ratio_mean={mean_drop_ratio:.6f} drop_ratio_std={std_drop_ratio:.6f}"
     )
 
 

@@ -121,6 +121,15 @@ class VectorEnvAdapter:
     def close(self) -> None:
         self.env.close()
 
+    def set_perfect_communication(self, enabled: bool) -> None:
+        enabled_bool = bool(enabled)
+        self.env.perfect_communication = enabled_bool
+        if hasattr(self.env, "_net_cfg") and isinstance(self.env._net_cfg, dict):
+            self.env._net_cfg["perfect_communication"] = enabled_bool
+
+    def get_perfect_communication(self) -> bool:
+        return bool(getattr(self.env, "perfect_communication", False))
+
 
 def create_async_vector_env(
     n_envs: int,

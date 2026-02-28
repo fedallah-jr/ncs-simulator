@@ -250,50 +250,149 @@ def run_evaluation_vectorized(
     Returns:
         Tuple of (mean_reward, std_reward, episode_rewards).
     """
-    episode_rewards: List[float] = []
+    episode_seeds: List[Optional[int]]
+    if seed is None:
+        episode_seeds = [None for _ in range(int(n_episodes))]
+    else:
+        episode_seeds = [int(seed) + ep for ep in range(int(n_episodes))]
+
+    return run_evaluation_vectorized_seeded(
+        eval_env=eval_env,
+        agent=agent,
+        n_eval_envs=n_eval_envs,
+        n_agents=n_agents,
+        n_actions=n_actions,
+        use_agent_id=use_agent_id,
+        device=device,
+        episode_seeds=episode_seeds,
+        obs_normalizer=obs_normalizer,
+    )
+
+
+@torch.no_grad()
+def run_evaluation_vectorized_seeded(
+    eval_env: AsyncVectorEnv,
+    agent: Union[MLPAgent, Sequence[MLPAgent]],
+    n_eval_envs: int,
+    n_agents: int,
+    n_actions: int,
+    use_agent_id: bool,
+    device: torch.device,
+    episode_seeds: Sequence[Optional[int]],
+    obs_normalizer: Optional[RunningObsNormalizer] = None,
+    heuristic_policy_name: Optional[str] = None,
+    heuristic_deterministic: bool = True,
+    fixed_action: Optional[int] = None,
+) -> Tuple[float, float, List[float]]:
+    """Run vectorized evaluation on an explicit seed list (paired-seed friendly).
+
+    Each seed corresponds to one complete episode reward in the returned list.
+    """
+    if n_eval_envs <= 0:
+        raise ValueError("n_eval_envs must be positive")
+    if not episode_seeds:
+        raise ValueError("episode_seeds must not be empty")
+    if fixed_action is not None and heuristic_policy_name is not None:
+        raise ValueError("fixed_action and heuristic_policy_name are mutually exclusive")
+
     dummy_rng = np.random.default_rng(0)
+    all_episode_rewards: List[float] = []
 
-    env_seeds = None if seed is None else [seed + i for i in range(n_eval_envs)]
-    obs_dict, _infos = eval_env.reset(seed=env_seeds)
-    obs = stack_vector_obs(obs_dict, n_agents)
-    if obs_normalizer is not None:
-        obs = obs_normalizer.normalize(obs, update=False)
+    for start in range(0, len(episode_seeds), n_eval_envs):
+        batch_seeds = list(episode_seeds[start:start + n_eval_envs])
+        active_count = len(batch_seeds)
+        if active_count < n_eval_envs:
+            pad_seed = batch_seeds[-1]
+            batch_seeds.extend([pad_seed] * (n_eval_envs - active_count))
 
-    env_reward_sums = np.zeros(n_eval_envs, dtype=np.float64)
+        if all(s is None for s in batch_seeds):
+            reset_seeds: Optional[List[int]] = None
+        else:
+            if any(s is None for s in batch_seeds):
+                raise ValueError("episode_seeds must be all None or all integers")
+            reset_seeds = [int(s) for s in batch_seeds]  # type: ignore[arg-type]
 
-    while len(episode_rewards) < n_episodes:
-        actions = select_actions_batched(
-            agent=agent,
-            obs=obs,
-            n_envs=n_eval_envs,
-            n_agents=n_agents,
-            n_actions=n_actions,
-            epsilon=0.0,
-            rng=dummy_rng,
-            device=device,
-            use_agent_id=use_agent_id,
-        )
-        action_dict = {f"agent_{i}": actions[:, i] for i in range(n_agents)}
-        next_obs_dict, rewards, terminated, truncated, _infos = eval_env.step(action_dict)
-
-        rewards_arr = np.asarray(rewards, dtype=np.float64)
-        env_reward_sums += rewards_arr.sum(axis=1)
-
-        done = np.logical_or(terminated, truncated)
-        if np.any(done):
-            for env_idx in np.where(done)[0]:
-                if len(episode_rewards) < n_episodes:
-                    episode_rewards.append(float(env_reward_sums[env_idx]))
-                env_reward_sums[env_idx] = 0.0
-
-        next_obs = stack_vector_obs(next_obs_dict, n_agents)
+        obs_dict, _infos = eval_env.reset(seed=reset_seeds)
+        obs = stack_vector_obs(obs_dict, n_agents)
         if obs_normalizer is not None:
-            next_obs = obs_normalizer.normalize(next_obs, update=False)
-        obs = next_obs
+            obs = obs_normalizer.normalize(obs, update=False)
 
-    mean_reward = float(np.mean(episode_rewards))
-    std_reward = float(np.std(episode_rewards))
-    return mean_reward, std_reward, episode_rewards
+        active_mask = np.zeros(n_eval_envs, dtype=np.bool_)
+        active_mask[:active_count] = True
+        done = np.zeros(n_eval_envs, dtype=np.bool_)
+        env_reward_sums = np.zeros(n_eval_envs, dtype=np.float64)
+
+        heuristic_policies: Optional[List[List[Any]]] = None
+        if heuristic_policy_name is not None:
+            from tools.heuristic_policies import get_heuristic_policy
+
+            heuristic_policies = []
+            for env_idx in range(n_eval_envs):
+                env_seed = None if reset_seeds is None else int(reset_seeds[env_idx])
+                env_policies: List[Any] = []
+                for agent_idx in range(n_agents):
+                    policy_seed = None if env_seed is None else int(env_seed) + agent_idx
+                    policy = get_heuristic_policy(
+                        heuristic_policy_name,
+                        n_agents=n_agents,
+                        seed=policy_seed,
+                        agent_index=agent_idx,
+                    )
+                    if hasattr(policy, "reset"):
+                        policy.reset()
+                    env_policies.append(policy)
+                heuristic_policies.append(env_policies)
+
+        while not np.all(done[:active_count]):
+            if fixed_action is not None:
+                actions = np.full((n_eval_envs, n_agents), int(fixed_action), dtype=np.int64)
+            elif heuristic_policies is not None:
+                actions = np.zeros((n_eval_envs, n_agents), dtype=np.int64)
+                for env_idx in range(active_count):
+                    if done[env_idx]:
+                        continue
+                    for agent_idx in range(n_agents):
+                        action, _ = heuristic_policies[env_idx][agent_idx].predict(
+                            obs[env_idx, agent_idx], deterministic=heuristic_deterministic
+                        )
+                        actions[env_idx, agent_idx] = int(action)
+            else:
+                actions = select_actions_batched(
+                    agent=agent,
+                    obs=obs,
+                    n_envs=n_eval_envs,
+                    n_agents=n_agents,
+                    n_actions=n_actions,
+                    epsilon=0.0,
+                    rng=dummy_rng,
+                    device=device,
+                    use_agent_id=use_agent_id,
+                )
+
+            action_dict = {f"agent_{i}": actions[:, i] for i in range(n_agents)}
+            next_obs_dict, rewards, terminated, truncated, _infos = eval_env.step(action_dict)
+
+            rewards_arr = np.asarray(rewards, dtype=np.float64)
+            team_rewards = rewards_arr.sum(axis=1)
+            running = np.logical_and(active_mask, np.logical_not(done))
+            env_reward_sums[running] += team_rewards[running]
+
+            done_now = np.logical_or(
+                np.asarray(terminated, dtype=np.bool_),
+                np.asarray(truncated, dtype=np.bool_),
+            )
+            done = np.logical_or(done, np.logical_and(done_now, active_mask))
+
+            next_obs = stack_vector_obs(next_obs_dict, n_agents)
+            if obs_normalizer is not None:
+                next_obs = obs_normalizer.normalize(next_obs, update=False)
+            obs = next_obs
+
+        all_episode_rewards.extend(float(env_reward_sums[idx]) for idx in range(active_count))
+
+    mean_reward = float(np.mean(all_episode_rewards))
+    std_reward = float(np.std(all_episode_rewards))
+    return mean_reward, std_reward, all_episode_rewards
 
 
 def patch_autoreset_final_obs(

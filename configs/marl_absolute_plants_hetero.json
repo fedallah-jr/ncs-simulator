@@ -65,5 +65,8 @@
     "app_ack_packet_size": 30,
     "tx_buffer_bytes": 100,
     "random_drop_rate": [0.03, 0.001, 0.1]
+  },
+  "training_evaluation": {
+    "baseline_policy": "perfect_sync_n2"
   }
 }
