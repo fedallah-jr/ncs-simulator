@@ -63,8 +63,8 @@ run_one() {
     --seed "${SEED}"
     --total-timesteps "${TOTAL_TIMESTEPS}"
     --n-envs 8
-    --eval-freq 50000
-    --n-eval-episodes 400
+    --eval-freq 20000
+    --n-eval-episodes 80
   )
 
   local log_path="${run_root}/logs/${run_label}.log"
