@@ -11,7 +11,7 @@ cd "${PROJECT_ROOT}"
 SEED="${SEED:-0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 
-TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-15000000}"
+TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-6000000}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-$((TOTAL_TIMESTEPS * 60 / 100))}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -93,6 +93,7 @@ run_one() {
 run_one "algorithms.marl_vdn" "vdn" "vdn_doubleq" \
   --double-q --batch-size 512 --learning-rate 2.5e-5 \
   --epsilon-decay-steps "${EPS_DECAY_STEPS}" \
+  --eval-freq 20000 \
   --set "observation.throughput_window=[200,50,10]" \
   --set reward.state_error_reward=kf_info_m_noise
 
