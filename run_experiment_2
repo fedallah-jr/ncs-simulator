@@ -66,7 +66,7 @@ run_one() {
     --total-timesteps "${TOTAL_TIMESTEPS}"
     --n-envs 8
     --n-eval-envs 8
-    --n-eval-episodes 56
+    --n-eval-episodes 80
     --episode-length 250
   )
 
@@ -96,8 +96,14 @@ run_one "algorithms.marl_qmix" "qmix" "qmix_doubleq" \
   --double-q --batch-size 512 --learning-rate 2.5e-5 \
   --epsilon-decay-steps "${EPS_DECAY_STEPS}" \
   --eval-freq 20000 \
-  --set "observation.throughput_window=[200,50,10]" \
-  --set reward.state_error_reward=kf_info_m_noise
+  --no-normalize-obs \
+  --feature-norm \
+  --layer-norm \
+  --set reward.state_error_reward=kf_info_m_noise \
+  --set reward.evaluation.state_error_reward=kf_info_m_noise \
+  --set reward.normalize=true \
+  --set reward.no_normalization_scale=2.5 \
+  --set "controller.measurement_noise_cov=[[0.1,0.0],[0.0,0.1]]"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then
