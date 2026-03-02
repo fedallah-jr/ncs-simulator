@@ -64,7 +64,9 @@ run_one() {
     --output-root "${run_root}"
     --seed "${SEED}"
     --total-timesteps "${TOTAL_TIMESTEPS}"
-    --n-eval-episodes 30
+    --n-envs 8
+    --n-eval-envs 8
+    --n-eval-episodes 56
     --episode-length 250
   )
 
