@@ -11,7 +11,7 @@ cd "${PROJECT_ROOT}"
 SEED="${SEED:-0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 
-TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-6000000}"
+TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-10000000}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-$((TOTAL_TIMESTEPS * 60 / 100))}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -38,6 +38,10 @@ if [[ ! -f "${config_path}" ]]; then
   echo "Config not found: ${config_path}" >&2
   exit 1
 fi
+
+# Override heterogeneous_plants to set process_noise_cov=0.0025 for all plants.
+# A and B matrices are kept identical to configs/marl_absolute_plants.json.
+PLANTS_OVERRIDE='[{"A":[[1.0065,0.0],[0.0,1.0009]],"B":[[0.000301],[0.00031]],"process_noise_cov":[[0.0025,0.0],[0.0,0.0025]]},{"A":[[1.0004,0.0],[0.0,1.00903]],"B":[[0.0012],[0.003]],"process_noise_cov":[[0.0025,0.0],[0.0,0.0025]]},{"A":[[1.0019,0.0],[0.0,1.00296]],"B":[[0.002],[0.00011]],"process_noise_cov":[[0.0025,0.0],[0.0,0.0025]]}]'
 
 next_run_dir() {
   local algo="$1"
@@ -103,7 +107,8 @@ run_one "algorithms.marl_iql" "iql" "iql_doubleq" \
   --set reward.evaluation.state_error_reward=kf_info_m_noise \
   --set reward.normalize=true \
   --set reward.no_normalization_scale=2.5 \
-  --set "controller.measurement_noise_cov=[[0.1,0.0],[0.0,0.1]]"
+  --set "controller.measurement_noise_cov=[[0.1,0.0],[0.0,0.1]]" \
+  --set "system.heterogeneous_plants=${PLANTS_OVERRIDE}"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then
