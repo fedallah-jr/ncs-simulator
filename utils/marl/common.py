@@ -298,6 +298,16 @@ def run_evaluation_vectorized_seeded(
     dummy_rng = np.random.default_rng(0)
     all_episode_rewards: List[float] = []
 
+    if heuristic_policy_name is not None:
+        from tools.heuristic_policies import get_heuristic_policy
+
+    if fixed_action is not None:
+        precomputed_fixed_actions = np.full((n_eval_envs, n_agents), int(fixed_action), dtype=np.int64)
+    else:
+        precomputed_fixed_actions = None
+        
+    heuristic_actions_buffer = np.zeros((n_eval_envs, n_agents), dtype=np.int64) if heuristic_policy_name is not None else None
+
     for start in range(0, len(episode_seeds), n_eval_envs):
         batch_seeds = list(episode_seeds[start:start + n_eval_envs])
         active_count = len(batch_seeds)
@@ -324,8 +334,6 @@ def run_evaluation_vectorized_seeded(
 
         heuristic_policies: Optional[List[List[Any]]] = None
         if heuristic_policy_name is not None:
-            from tools.heuristic_policies import get_heuristic_policy
-
             heuristic_policies = []
             for env_idx in range(n_eval_envs):
                 env_seed = None if reset_seeds is None else int(reset_seeds[env_idx])
@@ -345,9 +353,10 @@ def run_evaluation_vectorized_seeded(
 
         while not np.all(done[:active_count]):
             if fixed_action is not None:
-                actions = np.full((n_eval_envs, n_agents), int(fixed_action), dtype=np.int64)
+                actions = precomputed_fixed_actions
             elif heuristic_policies is not None:
-                actions = np.zeros((n_eval_envs, n_agents), dtype=np.int64)
+                actions = heuristic_actions_buffer
+                actions.fill(0)
                 for env_idx in range(active_count):
                     if done[env_idx]:
                         continue

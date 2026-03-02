@@ -373,7 +373,8 @@ def evaluate_and_log(
 
     episode_seeds: List[Optional[int]]
     if seed is None:
-        episode_seeds = [None for _ in range(int(n_episodes))]
+        base_seed = int(np.random.randint(0, 2**31 - 1))
+        episode_seeds = [base_seed + ep for ep in range(int(n_episodes))]
     else:
         episode_seeds = [int(seed) + ep for ep in range(int(n_episodes))]
 
