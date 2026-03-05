@@ -34,7 +34,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from ncs_env.env import NCS_Env
 from ncs_env.config import load_config
 from utils.marl.args_builder import _add_set_override_argument
-from utils.marl_training import load_config_with_overrides
+from utils.marl_training import load_config_with_overrides, resolve_training_eval_baseline
 from utils.reward_normalization import (
     configure_shared_running_normalizers,
     reset_shared_running_normalizers,
@@ -74,6 +74,7 @@ _worker_obs_normalizer: Optional[RunningObsNormalizer] = None
 _worker_obs_dim: int = 0
 _worker_predict: Any = None
 _worker_unravel_fn: Any = None
+_worker_baseline_cfg: Optional[Dict[str, Any]] = None
 
 
 def _build_obs_batch(obs_dict: Dict[str, np.ndarray]) -> np.ndarray:
@@ -160,11 +161,12 @@ def _init_worker(
     reward_override: Optional[Dict[str, Any]] = None,
     network_override: Optional[Dict[str, Any]] = None,
     termination_override: Optional[Dict[str, Any]] = None,
+    baseline_cfg: Optional[Dict[str, Any]] = None,
 ):
     """Initialize the environment and model in the worker process."""
     global _worker_env, _worker_model, _worker_params, _worker_config_path, _worker_episode_length
     global _worker_n_agents, _worker_use_agent_id, _worker_agent_id_eye, _worker_obs_dim
-    global _worker_obs_normalizer, _worker_predict, _worker_unravel_fn
+    global _worker_obs_normalizer, _worker_predict, _worker_unravel_fn, _worker_baseline_cfg
     
     # Set JAX to use CPU BEFORE importing JAX
     os.environ["JAX_PLATFORMS"] = "cpu"
@@ -224,6 +226,7 @@ def _init_worker(
         return jnp.argmax(_worker_model.apply(params, obs), axis=1)
 
     _worker_predict = _predict
+    _worker_baseline_cfg = baseline_cfg
 
 
 def _run_single_episode(
@@ -297,6 +300,92 @@ def _evaluate_params_fixed_seeds(
 
     rewards_array = np.asarray(rewards, dtype=np.float64)
     return float(np.mean(rewards_array)), float(np.std(rewards_array))
+
+
+def _run_baseline_episode(episode_seed: int) -> float:
+    """Run one baseline episode and return total reward."""
+    global _worker_env, _worker_baseline_cfg, _worker_n_agents
+
+    if _worker_baseline_cfg is None:
+        raise RuntimeError("Baseline config not set in worker")
+
+    baseline_policy = str(_worker_baseline_cfg.get("heuristic_policy", "always_send"))
+    use_perfect_comm = bool(_worker_baseline_cfg.get("use_perfect_communication", False))
+    deterministic = bool(_worker_baseline_cfg.get("deterministic", True))
+    fixed_action = 1 if baseline_policy == "always_send" else None
+
+    # Toggle perfect communication if needed
+    orig_pc = _worker_env.perfect_communication
+    if use_perfect_comm != orig_pc:
+        _worker_env.perfect_communication = use_perfect_comm
+        if hasattr(_worker_env, "_net_cfg") and isinstance(_worker_env._net_cfg, dict):
+            _worker_env._net_cfg["perfect_communication"] = use_perfect_comm
+
+    heuristic_policies = None
+    if fixed_action is None:
+        from tools.heuristic_policies import get_heuristic_policy
+        heuristic_policies = []
+        for agent_idx in range(_worker_n_agents):
+            policy_seed = int(episode_seed) + agent_idx
+            heuristic_policies.append(
+                get_heuristic_policy(
+                    baseline_policy,
+                    n_agents=_worker_n_agents,
+                    seed=policy_seed,
+                    agent_index=agent_idx,
+                )
+            )
+
+    try:
+        obs_dict, _ = _worker_env.reset(seed=episode_seed)
+        total_reward = 0.0
+        done = False
+        while not done:
+            if fixed_action is not None:
+                action_dict = {f"agent_{i}": fixed_action for i in range(_worker_n_agents)}
+            else:
+                action_dict = {}
+                for i in range(_worker_n_agents):
+                    obs_i = np.asarray(obs_dict[f"agent_{i}"], dtype=np.float32)
+                    action, _ = heuristic_policies[i].predict(obs_i, deterministic=deterministic)
+                    action_dict[f"agent_{i}"] = int(action)
+
+            obs_dict, rewards, terminated, truncated, _ = _worker_env.step(action_dict)
+            step_reward = float(np.sum([rewards[f"agent_{i}"] for i in range(_worker_n_agents)]))
+            total_reward += step_reward
+            done = any(
+                terminated[f"agent_{i}"] or truncated[f"agent_{i}"]
+                for i in range(_worker_n_agents)
+            )
+    finally:
+        # Restore perfect communication
+        if use_perfect_comm != orig_pc:
+            _worker_env.perfect_communication = orig_pc
+            if hasattr(_worker_env, "_net_cfg") and isinstance(_worker_env._net_cfg, dict):
+                _worker_env._net_cfg["perfect_communication"] = orig_pc
+
+    return total_reward
+
+
+def _evaluate_baseline_fixed_seeds(
+    episode_seeds: List[int],
+) -> List[float]:
+    """Evaluate baseline policy on fixed seeds and return per-seed rewards."""
+    return [_run_baseline_episode(seed) for seed in episode_seeds]
+
+
+def _evaluate_policy_per_seed(
+    args_tuple: Tuple[np.ndarray, List[int], Optional[Tuple[np.ndarray, np.ndarray, int]]]
+) -> List[float]:
+    """Evaluate params on fixed seeds and return per-seed reward list."""
+    flat_params, episode_seeds, obs_state = args_tuple
+
+    _set_obs_normalizer_state(obs_state)
+    rewards: List[float] = []
+    for seed in episode_seeds:
+        reward, _obs_sum, _obs_sumsq, _obs_count = _run_single_episode(flat_params, seed)
+        rewards.append(reward)
+    return rewards
 
 
 def get_fitness_shaping_fn(method: str = "centered_rank"):
@@ -443,6 +532,8 @@ def train(args):
         load_config_with_overrides(args.config, args.n_agents, not args.no_agent_id, args.set_overrides)
     )
 
+    eval_baseline = resolve_training_eval_baseline(cfg, n_agents)
+
     # 1. Setup Dummy Environment to get shapes
     dummy_env = NCS_Env(
         n_agents=n_agents, 
@@ -495,7 +586,6 @@ def train(args):
     else:
         print("⚠ Running on CPU only (no TPU/GPU detected)")
     print(f"Fitness evaluations will run on {args.n_workers} CPU workers in parallel")
-    fixed_eval_seeds: List[int] = list(range(30))
 
     # 2. Setup Flax Model & Initial Params
     master_rng = jax.random.PRNGKey(args.seed if args.seed is not None else 0)
@@ -699,6 +789,7 @@ def train(args):
                 training_reward_override,
                 network_override,
                 eval_termination_override,
+                eval_baseline,
             ),
         )
         map_fn = pool.map
@@ -723,6 +814,7 @@ def train(args):
             training_reward_override,
             network_override,
             eval_termination_override,
+            eval_baseline,
         )
 
     # 5. Logging Setup
@@ -769,14 +861,22 @@ def train(args):
         writer = csv.writer(f)
         writer.writerow(["generation", "mean_reward", "max_reward", "min_reward", "std_reward", "time_elapsed"])
 
-    eval_rewards_file = run_dir / "evaluation_rewards.csv"
-    with eval_rewards_file.open("w", newline="", encoding="utf-8") as f:
+    eval_drop_stats_file = run_dir / "evaluation_drop_stats.csv"
+    with eval_drop_stats_file.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["step", "mean_reward", "std_reward"])
+        writer.writerow([
+            "step", "baseline_policy", "baseline_perfect_communication",
+            "policy_mean_reward", "policy_std_reward",
+            "baseline_mean_reward", "baseline_std_reward",
+            "drop_ratio_mean", "drop_ratio_std", "num_episodes",
+        ])
 
+    baseline_label = str(eval_baseline.get("label", "perfect_comm"))
+    baseline_perfect_comm = bool(eval_baseline.get("use_perfect_communication", False))
+    print(f"Evaluation baseline: {baseline_label} (perfect_comm={baseline_perfect_comm})")
     print(f"Starting training for {args.generations} generations...")
     start_time = time.time()
-    best_eval_all_time = -float("inf")
+    best_drop_ratio_all_time = float("inf")
     best_fitness_all_time = -float("inf")
 
     # 6. Training Loop
@@ -824,8 +924,22 @@ def train(args):
 
         fitness_array = jnp.array(fitness_values)
         best_idx_generation = int(jnp.argmax(fitness_array))
-        fixed_eval_payload = (population_flat[best_idx_generation], fixed_eval_seeds, obs_state)
-        fixed_eval_mean, fixed_eval_std = map_fn(_evaluate_params_fixed_seeds, [fixed_eval_payload])[0]
+
+        # Evaluate best individual and baseline on same gen seeds, compute drop ratios
+        policy_seed_payload = (population_flat[best_idx_generation], gen_episode_seeds, obs_state)
+        policy_seed_rewards = map_fn(_evaluate_policy_per_seed, [policy_seed_payload])[0]
+        baseline_seed_rewards = map_fn(_evaluate_baseline_fixed_seeds, [gen_episode_seeds])[0]
+
+        policy_arr = np.asarray(policy_seed_rewards, dtype=np.float64)
+        baseline_arr = np.asarray(baseline_seed_rewards, dtype=np.float64)
+        eval_mean = float(np.mean(policy_arr))
+        eval_std = float(np.std(policy_arr))
+        denom = np.maximum(np.abs(baseline_arr), 1e-8)
+        drop_ratios = (baseline_arr - policy_arr) / denom
+        mean_drop_ratio = float(np.mean(drop_ratios))
+        std_drop_ratio = float(np.std(drop_ratios))
+        mean_baseline_reward = float(np.mean(baseline_arr))
+        std_baseline_reward = float(np.std(baseline_arr))
 
         if obs_normalizer is not None:
             obs_sum_total = np.zeros((obs_dim,), dtype=np.float64)
@@ -855,20 +969,26 @@ def train(args):
         print(
             f"Gen {gen}/{args.generations} | Mean: {mean_fit:.1f} | "
             f"Max: {max_fit:.1f} | Min: {min_fit:.1f} | Std: {std_fit:.1f} | "
-            f"Eval(0-29): {fixed_eval_mean:.1f} ± {fixed_eval_std:.1f} | "
+            f"Eval: {eval_mean:.1f} ± {eval_std:.1f} | "
+            f"drop_ratio: {mean_drop_ratio:.6f} ± {std_drop_ratio:.6f} | "
             f"Time: {elapsed:.1f}s"
         )
-            
+
         with rewards_file.open("a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow([gen, mean_fit, max_fit, min_fit, std_fit, elapsed])
 
-        with eval_rewards_file.open("a", newline="", encoding="utf-8") as f:
+        with eval_drop_stats_file.open("a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow([gen, fixed_eval_mean, fixed_eval_std])
+            writer.writerow([
+                gen, baseline_label, int(baseline_perfect_comm),
+                eval_mean, eval_std,
+                mean_baseline_reward, std_baseline_reward,
+                mean_drop_ratio, std_drop_ratio, len(gen_episode_seeds),
+            ])
 
-        if fixed_eval_mean > best_eval_all_time:
-            best_eval_all_time = fixed_eval_mean
+        if mean_drop_ratio < best_drop_ratio_all_time:
+            best_drop_ratio_all_time = mean_drop_ratio
             np.savez(
                 run_dir / "best_model.npz",
                 **build_checkpoint_payload(population_flat[best_idx_generation]),
@@ -904,7 +1024,7 @@ def train(args):
         "popsize": args.popsize,
         "episode_length": args.episode_length,
         "eval_episodes": args.eval_episodes,
-        "eval_best_fixed_seeds": fixed_eval_seeds,
+        "eval_episodes_per_gen": args.eval_episodes,
         "fitness_shaping": args.fitness_shaping,
         "hidden_dims": list(hidden_dims),
         "activation": activation,
@@ -928,6 +1048,7 @@ def train(args):
         "bc_lr": bc_lr,
         "bc_init_std": args.bc_init_std,
         "init_checkpoint": str(args.init_checkpoint) if args.init_checkpoint is not None else None,
+        "eval_baseline": baseline_label,
     }
     save_config_with_hyperparameters(
         run_dir, 
@@ -939,7 +1060,7 @@ def train(args):
     )
     
     print(f"\nTraining complete. Artifacts saved to {run_dir}")
-    print(f"Best fixed-seed eval achieved: {best_eval_all_time:.2f}")
+    print(f"Best drop ratio achieved: {best_drop_ratio_all_time:.6f}")
     print(f"Best fitness achieved: {best_fitness_all_time:.2f}")
 
 
