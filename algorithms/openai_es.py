@@ -89,23 +89,20 @@ def create_policy_net(
     action_dim: int,
     hidden_dims: Tuple[int, ...] = (64, 64),
     activation: str = "tanh",
-    feature_norm: bool = False,
 ):
     """Create a PolicyNet instance. Imports Flax lazily."""
     import flax.linen as nn
     import jax.numpy as jnp
 
     _activations = {"tanh": nn.tanh, "relu": nn.relu, "elu": nn.elu}
+
     class PolicyNet(nn.Module):
         action_dim: int
         hidden_dims: tuple = (64, 64)
         activation: str = "tanh"
-        feature_norm: bool = False
 
         @nn.compact
         def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-            if self.feature_norm:
-                x = nn.LayerNorm()(x)
             act_fn = _activations[self.activation]
             for dim in self.hidden_dims:
                 x = nn.Dense(dim)(x)
@@ -117,7 +114,6 @@ def create_policy_net(
         action_dim=action_dim,
         hidden_dims=hidden_dims,
         activation=activation,
-        feature_norm=feature_norm,
     )
 
 
@@ -131,7 +127,6 @@ def _init_worker(
     use_agent_id: bool,
     hidden_dims: Tuple[int, ...] = (64, 64),
     activation: str = "tanh",
-    feature_norm: bool = False,
     normalize_obs: bool = True,
     obs_norm_clip: float = 5.0,
     obs_norm_eps: float = 1e-8,
@@ -186,7 +181,6 @@ def _init_worker(
         action_dim,
         hidden_dims=hidden_dims,
         activation=activation,
-        feature_norm=feature_norm,
     )
     
     rng = jax.random.PRNGKey(0)
@@ -337,11 +331,12 @@ def _load_pt_checkpoint(
         raise ValueError(f"Checkpoint obs_dim={ckpt['obs_dim']} != env obs_dim={obs_dim}")
     if ckpt.get("use_agent_id", False) != use_agent_id:
         raise ValueError(f"Checkpoint use_agent_id={ckpt['use_agent_id']} != {use_agent_id}")
+    if ckpt.get("feature_norm", False) or ckpt.get("layer_norm", False):
+        raise ValueError("LayerNorm checkpoints are no longer supported by openai_es.")
 
     return {
         "hidden_dims": tuple(ckpt["agent_hidden_dims"]),
         "activation": ckpt["agent_activation"],
-        "feature_norm": bool(ckpt.get("feature_norm", False)),
         "state_dict": ckpt["agent_state_dict"],
         "obs_norm_state": ckpt.get("obs_normalization", {}),
     }
@@ -351,7 +346,6 @@ def _pt_state_dict_to_flax(
     state_dict: Dict[str, Any],
     params_template: Any,
     hidden_dims: Tuple[int, ...],
-    feature_norm: bool = False,
 ) -> Any:
     """Convert a PyTorch MLPAgent state_dict to Flax PolicyNet params."""
     import jax
@@ -360,12 +354,6 @@ def _pt_state_dict_to_flax(
     n_hidden = len(hidden_dims)
     stride = 2
     params_dict: Dict[str, Dict[str, Any]] = {}
-
-    if feature_norm:
-        params_dict["LayerNorm_0"] = {
-            "scale": jnp.array(state_dict["feature_norm_layer.weight"].numpy(), dtype=jnp.float32),
-            "bias": jnp.array(state_dict["feature_norm_layer.bias"].numpy(), dtype=jnp.float32),
-        }
 
     for i in range(n_hidden):
         pt_idx = i * stride
@@ -435,10 +423,9 @@ def train(args):
     # obs_normalizer is initialized later - either from BC dataset or fresh
     obs_normalizer: Optional[RunningObsNormalizer] = None
 
-    # Determine architecture (may be overridden by .pt checkpoint)
+    # Determine architecture (may be overridden by compatible checkpoints)
     hidden_dims = tuple(args.hidden_dims)
     activation = args.activation
-    feature_norm = args.feature_norm
     _pt_state_dict = None
     _pt_obs_norm_state: Optional[Dict[str, Any]] = None
 
@@ -446,13 +433,16 @@ def train(args):
         pt_info = _load_pt_checkpoint(args.init_checkpoint, obs_dim, n_agents, use_agent_id)
         hidden_dims = pt_info["hidden_dims"]
         activation = pt_info["activation"]
-        feature_norm = pt_info["feature_norm"]
         _pt_state_dict = pt_info["state_dict"]
         _pt_obs_norm_state = pt_info["obs_norm_state"]
+    elif args.init_checkpoint is not None and args.init_checkpoint.suffix == ".npz":
+        with np.load(args.init_checkpoint, allow_pickle=False) as ckpt:
+            if bool(ckpt["feature_norm"]) if "feature_norm" in ckpt else False:
+                raise ValueError("LayerNorm ES checkpoints are no longer supported.")
 
     print(f"Observation Dim: {obs_dim}, Input Dim: {input_dim}, Action Dim: {action_dim}")
     print(f"N Agents: {n_agents}, Use Agent Id: {use_agent_id}")
-    print(f"Hidden Dims: {hidden_dims}, Activation: {activation}, Feature Norm: {feature_norm}")
+    print(f"Hidden Dims: {hidden_dims}, Activation: {activation}")
     print(
         "Obs normalization: "
         f"{'enabled' if args.normalize_obs else 'disabled'} "
@@ -481,7 +471,6 @@ def train(args):
         action_dim,
         hidden_dims=hidden_dims,
         activation=activation,
-        feature_norm=feature_norm,
     )
     dummy_obs = jnp.zeros((1, input_dim))
     master_rng, template_rng = jax.random.split(master_rng)
@@ -498,7 +487,7 @@ def train(args):
     # Load .pt checkpoint weights (architecture was already overridden above)
     if _pt_state_dict is not None:
         pretrained_params = _pt_state_dict_to_flax(
-            _pt_state_dict, params_template, hidden_dims, feature_norm=feature_norm,
+            _pt_state_dict, params_template, hidden_dims,
         )
         pretrained_flat = np.array(flatten_util.ravel_pytree(pretrained_params)[0])
         if args.normalize_obs and _pt_obs_norm_state and _pt_obs_norm_state.get("enabled", False):
@@ -670,7 +659,6 @@ def train(args):
                 use_agent_id,
                 hidden_dims,
                 activation,
-                feature_norm,
                 args.normalize_obs,
                 args.obs_norm_clip,
                 args.obs_norm_eps,
@@ -694,7 +682,6 @@ def train(args):
             use_agent_id,
             hidden_dims,
             activation,
-            feature_norm,
             args.normalize_obs,
             args.obs_norm_clip,
             args.obs_norm_eps,
@@ -713,7 +700,6 @@ def train(args):
             "hidden_dims": list(hidden_dims),
             "activation": activation,
             "hidden_size": int(hidden_dims[0]),
-            "feature_norm": feature_norm,
             "normalize_obs": args.normalize_obs,
             "obs_norm_clip": args.obs_norm_clip,
             "obs_norm_eps": args.obs_norm_eps,
@@ -886,7 +872,6 @@ def train(args):
         "fitness_shaping": args.fitness_shaping,
         "hidden_dims": list(hidden_dims),
         "activation": activation,
-        "feature_norm": feature_norm,
         "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip,
         "obs_norm_eps": args.obs_norm_eps,
@@ -942,8 +927,6 @@ def parse_args():
                         help="Hidden layer dimensions (e.g., --hidden-dims 128 128).")
     parser.add_argument("--activation", type=str, default="tanh",
                         choices=["tanh", "relu", "elu"], help="Activation function.")
-    parser.add_argument("--feature-norm", action="store_true",
-                        help="Apply LayerNorm to input features (first layer).")
     obs_norm_group = parser.add_mutually_exclusive_group()
     obs_norm_group.add_argument(
         "--normalize-obs",
