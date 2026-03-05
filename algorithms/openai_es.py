@@ -43,19 +43,6 @@ from utils.bc import BCPretrainConfig, JaxActorBCAdapter, load_bc_dataset, pretr
 from utils.marl.obs_normalization import RunningObsNormalizer
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
-POLICY_OUTPUT_INIT_GAIN = 0.01
-
-
-def _hidden_init_gain(activation: str) -> float:
-    if activation == "relu":
-        return float(np.sqrt(2.0))
-    if activation == "tanh":
-        return float(5.0 / 3.0)
-    if activation == "elu":
-        # JAX/Flax does not expose ELU gain directly; ReLU gain is a practical default.
-        return float(np.sqrt(2.0))
-    raise ValueError("activation must be one of: relu, tanh, elu")
-
 # -----------------------------------------------------------------------------
 # NOTE: JAX/Flax imports are DEFERRED to avoid TPU initialization issues
 # in worker processes. They are imported lazily inside functions that need them.
@@ -120,19 +107,10 @@ def create_policy_net(
             if self.feature_norm:
                 x = nn.LayerNorm()(x)
             act_fn = _activations[self.activation]
-            hidden_gain = _hidden_init_gain(self.activation)
             for dim in self.hidden_dims:
-                x = nn.Dense(
-                    dim,
-                    kernel_init=nn.initializers.orthogonal(hidden_gain),
-                    bias_init=nn.initializers.zeros,
-                )(x)
+                x = nn.Dense(dim)(x)
                 x = act_fn(x)
-            x = nn.Dense(
-                self.action_dim,
-                kernel_init=nn.initializers.orthogonal(POLICY_OUTPUT_INIT_GAIN),
-                bias_init=nn.initializers.zeros,
-            )(x)
+            x = nn.Dense(self.action_dim)(x)
             return x
 
     return PolicyNet(
