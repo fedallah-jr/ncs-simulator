@@ -98,6 +98,7 @@ def run_episode_multi_agent(
     estimate_covariances = np.zeros((episode_length + 1, n_agents, state_dim, state_dim), dtype=np.float32)
     actions = np.zeros((episode_length, n_agents), dtype=np.int64)
     drop_delay_steps = np.full((episode_length, n_agents), np.nan, dtype=np.float32)
+    kf_info_m_noise = np.full((episode_length, n_agents), np.nan, dtype=np.float32)
     rewards = np.zeros((episode_length, n_agents), dtype=np.float32)
     state_errors = np.zeros((episode_length + 1, n_agents), dtype=np.float32)
     throughputs = np.zeros(episode_length + 1, dtype=np.float32)
@@ -130,6 +131,19 @@ def run_episode_multi_agent(
         actions[t] = np.asarray([action_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.int64)
         obs_dict, rewards_dict, terminated, truncated, info = env.step(action_dict)
         rewards[t] = np.asarray([rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32)
+        reward_components = info.get("reward_components", {})
+        if isinstance(reward_components, dict):
+            for i in range(n_agents):
+                agent_components = reward_components.get(f"agent_{i}", {})
+                if not isinstance(agent_components, dict):
+                    continue
+                metric_value = agent_components.get("kf_info_gain_m_noise", np.nan)
+                try:
+                    # Environment stores kf_info_m_noise as -e^T M e.
+                    # Visualization panel uses tr(M e e^T) = e^T M e.
+                    kf_info_m_noise[t, i] = -float(metric_value)
+                except (TypeError, ValueError):
+                    kf_info_m_noise[t, i] = np.nan
 
         states[t + 1] = np.asarray(info.get("states", states[t + 1]), dtype=np.float32)
         estimates[t + 1] = np.asarray(info.get("estimates", estimates[t + 1]), dtype=np.float32)
@@ -162,6 +176,7 @@ def run_episode_multi_agent(
             estimate_covariances = estimate_covariances[: end + 1]
             actions = actions[:end]
             drop_delay_steps = drop_delay_steps[:end]
+            kf_info_m_noise = kf_info_m_noise[:end]
             rewards = rewards[:end]
             state_errors = state_errors[: end + 1]
             throughputs = throughputs[: end + 1]
@@ -174,6 +189,7 @@ def run_episode_multi_agent(
         "estimate_covariances": estimate_covariances,
         "actions": actions,
         "drop_delay_steps": drop_delay_steps,
+        "kf_info_m_noise": kf_info_m_noise,
         "rewards": rewards,
         "state_errors": state_errors,
         "throughput_kbps": throughputs,
@@ -356,35 +372,31 @@ def plot_marl_action_raster(
     actions = np.asarray(traj["actions"], dtype=np.int64)
     n_steps, n_agents = actions.shape
 
-    # Get drop delay map and error covariances
+    # Get drop-delay map and tr(M e e^T) uncertainty metric.
     drop_delay_steps = np.asarray(
         traj.get("drop_delay_steps", np.full(actions.shape, np.nan, dtype=np.float32)),
         dtype=np.float32,
     )
-    estimate_covariances = np.asarray(traj["estimate_covariances"], dtype=np.float32)
+    kf_info_m_noise = np.asarray(
+        traj.get("kf_info_m_noise", np.full(actions.shape, np.nan, dtype=np.float32)),
+        dtype=np.float32,
+    )
 
-    # Compute trace of P for each agent at each timestep (measure of total uncertainty)
-    # estimate_covariances shape: (n_steps+1, n_agents, state_dim, state_dim)
-    covariances_aligned = estimate_covariances[1:, :, :, :]  # Shape: (n_steps, n_agents, state_dim, state_dim)
-    trace_P = np.trace(covariances_aligned, axis1=2, axis2=3)  # Shape: (n_steps, n_agents)
+    # Create figure with 2 subplots:
+    # 1) Drop outcomes with drop-delay coloring
+    # 2) Uncertainty metric growth as row-wise line plots (one row per agent)
+    fig, axes = plt.subplots(
+        2,
+        1,
+        figsize=(14.5, 6.8 + 0.40 * n_agents),
+        sharex=True,
+        gridspec_kw={"height_ratios": [1.0, 1.15]},
+    )
+    fig.patch.set_facecolor("white")
 
-    # Create figure with 3 subplots
-    fig, axes = plt.subplots(3, 1, figsize=(14, 9 + 0.3 * n_agents), sharex=True)
-
-    # Plot 1: Actions
+    # Plot 1: Drop outcomes (non-drops as category + drop delay heatmap)
     ax1 = axes[0]
-    im1 = ax1.imshow(actions.T, aspect="auto", interpolation="nearest", cmap="Greys", vmin=0, vmax=1)
-    ax1.set_ylabel("Agent", fontsize=12)
-    ax1.set_yticks(np.arange(n_agents))
-    ax1.set_yticklabels([f"agent_{i}" for i in range(n_agents)])
-    ax1.set_title(f"Actions - {label}", fontsize=14, fontweight="bold")
-    cbar1 = fig.colorbar(im1, ax=ax1, fraction=0.02, pad=0.02)
-    cbar1.set_label("Action (0=No Send, 1=Send)", fontsize=10)
-    cbar1.set_ticks([0, 1])
-    ax1.grid(False)
-
-    # Plot 2: Drop outcomes (non-drops as category + drop delay heatmap)
-    ax2 = axes[1]
+    ax1.set_facecolor("white")
     sent_mask = actions > 0
     drop_mask = np.isfinite(drop_delay_steps)
     sent_not_dropped_mask = sent_mask & ~drop_mask
@@ -392,7 +404,7 @@ def plot_marl_action_raster(
     base_outcomes[sent_not_dropped_mask] = 1
     base_outcomes_vis = base_outcomes.T
     base_cmap = ListedColormap(["#f5f5f5", "#457b9d"])
-    ax2.imshow(base_outcomes_vis, aspect="auto", interpolation="nearest", cmap=base_cmap, vmin=0, vmax=1)
+    ax1.imshow(base_outcomes_vis, aspect="auto", interpolation="nearest", cmap=base_cmap, vmin=0, vmax=1, origin="upper")
 
     drop_delay_vis = drop_delay_steps.T
     masked_drop_delay = np.ma.masked_invalid(drop_delay_vis)
@@ -400,33 +412,36 @@ def plot_marl_action_raster(
         max_drop_delay = float(masked_drop_delay.max())
         if max_drop_delay <= 0.0:
             max_drop_delay = 1.0
-        im2 = ax2.imshow(
+        im1 = ax1.imshow(
             masked_drop_delay,
             aspect="auto",
             interpolation="nearest",
             cmap="YlOrRd",
             vmin=0.0,
             vmax=max_drop_delay,
+            origin="upper",
         )
-        cbar2 = fig.colorbar(im2, ax=ax2, fraction=0.02, pad=0.02)
-        cbar2.set_label("Drop delay (timesteps)", fontsize=10)
+        cbar1 = fig.colorbar(im1, ax=ax1, fraction=0.02, pad=0.02)
+        cbar1.set_label("Drop delay (timesteps)", fontsize=10)
+        cbar1.ax.tick_params(labelsize=9)
     else:
-        ax2.text(
+        ax1.text(
             0.5,
             0.5,
             "No dropped packets",
-            transform=ax2.transAxes,
+            transform=ax1.transAxes,
             ha="center",
             va="center",
             fontsize=11,
             color="#444444",
         )
 
-    ax2.set_ylabel("Agent", fontsize=12)
-    ax2.set_yticks(np.arange(n_agents))
-    ax2.set_yticklabels([f"agent_{i}" for i in range(n_agents)])
-    ax2.set_title(f"Drops (color = delay) - {label}", fontsize=14, fontweight="bold")
-    ax2.legend(
+    ax1.set_ylabel("Agent", fontsize=12)
+    ax1.set_yticks(np.arange(n_agents))
+    ax1.set_yticklabels([f"agent_{i}" for i in range(n_agents)])
+    ax1.tick_params(axis="both", labelsize=10)
+    ax1.set_title(f"Drops (color = delay) - {label}", fontsize=14, fontweight="bold")
+    ax1.legend(
         handles=[
             Patch(facecolor="#f5f5f5", edgecolor="#bdbdbd", label="No send"),
             Patch(facecolor="#457b9d", edgecolor="#457b9d", label="Sent, not dropped"),
@@ -436,28 +451,148 @@ def plot_marl_action_raster(
         fontsize=9,
         frameon=True,
     )
+    ax1.grid(False)
+
+    # Plot 2: tr(M e e^T) growth as row-wise line plots (one row per agent)
+    ax2 = axes[1]
+    ax2.set_facecolor("white")
+    agent_colors = plt.cm.tab10(np.linspace(0, 1, max(n_agents, 1)))
+    row_pad = 0.08
+    row_bottoms = np.arange(n_agents, dtype=np.float64) + row_pad
+    row_tops = np.arange(n_agents, dtype=np.float64) + (1.0 - row_pad)
+    row_centers = 0.5 * (row_bottoms + row_tops)
+
+    metric_matrix = np.where(np.isfinite(kf_info_m_noise), kf_info_m_noise, np.nan)
+    global_scale_low = float("nan")
+    global_scale_high = float("nan")
+    peak_values = np.full((n_agents,), np.nan, dtype=np.float64)
+    peak_timesteps = np.full((n_agents,), -1, dtype=np.int64)
+    if np.all(np.isnan(metric_matrix)):
+        ax2.text(
+            0.5,
+            0.5,
+            "No finite tr(M e e^T) values",
+            transform=ax2.transAxes,
+            ha="center",
+            va="center",
+            fontsize=11,
+            color="#444444",
+        )
+    else:
+        x = np.arange(n_steps, dtype=np.float64)
+        scale_start_idx = 1 if n_steps > 1 else 0
+        finite_scale_source = metric_matrix[scale_start_idx:, :][np.isfinite(metric_matrix[scale_start_idx:, :])]
+        if finite_scale_source.size == 0:
+            finite_scale_source = metric_matrix[np.isfinite(metric_matrix)]
+        global_scale_low, global_scale_high = np.percentile(finite_scale_source, [5.0, 95.0])
+        if global_scale_high <= global_scale_low:
+            global_scale_low = float(np.min(finite_scale_source))
+            global_scale_high = float(np.max(finite_scale_source))
+        global_scale_span = max(global_scale_high - global_scale_low, 1e-12)
+
+        for i in range(n_agents):
+            row_bottom = row_bottoms[i]
+            row_top = row_tops[i]
+            row_height = row_top - row_bottom
+            vals = metric_matrix[:, i].astype(np.float64, copy=False)
+            finite_vals = vals[np.isfinite(vals)]
+            if finite_vals.size == 0:
+                continue
+
+            peak_local_idx = int(np.nanargmax(vals))
+            peak_values[i] = float(vals[peak_local_idx])
+            peak_timesteps[i] = peak_local_idx
+
+            clipped_vals = np.clip(vals, global_scale_low, global_scale_high)
+            scaled = (clipped_vals - global_scale_low) / global_scale_span
+            row_curve = row_bottom + row_height * scaled
+            row_curve[~np.isfinite(vals)] = np.nan
+
+            ax2.plot(
+                x,
+                row_curve,
+                color=agent_colors[i],
+                linewidth=2.0,
+                alpha=0.95,
+                solid_capstyle="round",
+            )
+            ax2.fill_between(
+                x,
+                row_bottom,
+                row_curve,
+                where=np.isfinite(row_curve),
+                color=agent_colors[i],
+                alpha=0.16,
+                linewidth=0.0,
+            )
+            if 0 <= peak_local_idx < n_steps and np.isfinite(row_curve[peak_local_idx]):
+                ax2.scatter(
+                    [float(peak_local_idx)],
+                    [float(row_curve[peak_local_idx])],
+                    s=26,
+                    color=agent_colors[i],
+                    edgecolors="#111111",
+                    linewidths=0.6,
+                    zorder=4,
+                )
+
+    for y in range(n_agents + 1):
+        ax2.axhline(float(y), color="#d0d4d8", linewidth=0.9, zorder=0)
+
+    if n_steps > 0:
+        ax2.set_xlim(0, n_steps - 1)
+    ax2.set_ylim(0, n_agents)
+    ax2.set_xlabel("Timestep", fontsize=12)
+    ax2.set_ylabel("Agent", fontsize=12)
+    ax2.set_yticks(row_centers)
+    ax2.set_yticklabels([f"agent_{i}" for i in range(n_agents)])
+    ax2.tick_params(axis="both", labelsize=10)
+    ax2.set_title(r"$\mathrm{tr}(M e e^\top)$" + f" - {label}", fontsize=15, fontweight="bold")
+    ax2.invert_yaxis()
+
+    # Right-side labels: one global scale (shared by all rows) + per-agent peak reports.
+    right_scale_transform = ax2.get_yaxis_transform()
+    for i in range(n_agents):
+        if not np.isfinite(peak_values[i]):
+            continue
+        ax2.text(
+            1.01,
+            row_centers[i],
+            f"peak {peak_values[i]:.3g} @ t={int(peak_timesteps[i])}",
+            transform=right_scale_transform,
+            ha="left",
+            va="center",
+            fontsize=9,
+            color=agent_colors[i],
+            clip_on=False,
+        )
+    if np.isfinite(global_scale_low) and np.isfinite(global_scale_high):
+        ax2.text(
+            1.01,
+            float(n_agents) + 0.02,
+            f"global clipped scale\n(top p95 {global_scale_high:.3g} / bot p5 {global_scale_low:.3g})",
+            transform=right_scale_transform,
+            ha="left",
+            va="bottom",
+            fontsize=9,
+            color="#303030",
+            fontweight="semibold",
+            linespacing=1.1,
+            clip_on=False,
+        )
+
     ax2.grid(False)
 
-    # Plot 3: Estimation Error Covariance (trace of P)
-    ax3 = axes[2]
-    trace_P_vis = trace_P.T
-    vmin_cov = np.percentile(trace_P_vis, 1)
-    vmax_cov = np.percentile(trace_P_vis, 99)
-    im3 = ax3.imshow(trace_P_vis, aspect="auto", interpolation="nearest",
-                     cmap="RdPu", vmin=vmin_cov, vmax=vmax_cov)
-    ax3.set_xlabel("Timestep", fontsize=12)
-    ax3.set_ylabel("Agent", fontsize=12)
-    ax3.set_yticks(np.arange(n_agents))
-    ax3.set_yticklabels([f"agent_{i}" for i in range(n_agents)])
-    ax3.set_title(f"Estimation Uncertainty (tr(P)) - {label}", fontsize=14, fontweight="bold")
-    cbar3 = fig.colorbar(im3, ax=ax3, fraction=0.02, pad=0.02)
-    cbar3.set_label("Trace of P", fontsize=10)
-    ax3.grid(False)
-
-    plt.tight_layout()
-    plt.savefig(str(save_path), dpi=300, bbox_inches="tight")
+    plt.tight_layout(rect=[0.0, 0.0, 0.88, 1.0])
+    plt.savefig(str(save_path), dpi=400, bbox_inches="tight")
     plt.close(fig)
-    print(f"✓ Saved action raster with drops and estimation uncertainty to {save_path}")
+    peak_report_parts: List[str] = []
+    for i in range(n_agents):
+        if np.isfinite(peak_values[i]):
+            peak_report_parts.append(f"agent_{i}: {peak_values[i]:.6g} @ t={int(peak_timesteps[i])}")
+    if peak_report_parts:
+        print(f"  Peaks tr(M e e^T): {', '.join(peak_report_parts)}")
+    print(f"✓ Saved coordination raster with drops and tr(M e e^T) uncertainty to {save_path}")
 
 
 def plot_marl_state_space_2d(
@@ -551,6 +686,258 @@ def plot_marl_comparison_summary(
     plt.savefig(str(save_path), dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"✓ Saved MARL summary plot to {save_path}")
+
+
+def plot_marl_two_policy_comparison(
+    trajectories: List[Dict[str, np.ndarray]],
+    labels: List[str],
+    save_path: Path,
+    title: str = "Two-Policy Comparison",
+    split_t: Optional[int] = None,
+) -> None:
+    if len(trajectories) != 2 or len(labels) != 2:
+        raise ValueError("plot_marl_two_policy_comparison requires exactly two trajectories and two labels")
+
+    horizons = []
+    for traj in trajectories:
+        actions_shape = np.asarray(traj["actions"], dtype=np.int64).shape
+        if len(actions_shape) != 2 or actions_shape[0] <= 0:
+            raise ValueError("Each trajectory must contain non-empty actions with shape (timesteps, n_agents)")
+        horizons.append(int(actions_shape[0]))
+    common_steps = min(horizons)
+    if common_steps <= 1:
+        raise ValueError("Need at least 2 timesteps for two-policy comparison")
+
+    if split_t is None:
+        split_t = estimate_two_policy_split_timestep(trajectories)
+    split_t = int(np.clip(int(split_t), 1, common_steps - 1))
+
+    fig = plt.figure(figsize=(18, 11))
+    fig.patch.set_facecolor("white")
+    grid = fig.add_gridspec(
+        2,
+        3,
+        height_ratios=[1.0, 1.35],
+        width_ratios=[1.0, 1.0, 0.045],
+        hspace=0.24,
+        wspace=0.16,
+    )
+    top_axes = [fig.add_subplot(grid[0, 0]), fig.add_subplot(grid[0, 1])]
+    cbar_ax = fig.add_subplot(grid[0, 2])
+    cbar_ax.set_visible(False)
+    bottom_grid = grid[1, :2].subgridspec(1, 2, wspace=0.16)
+    ax_bottom_early = fig.add_subplot(bottom_grid[0, 0])
+    ax_bottom_late = fig.add_subplot(bottom_grid[0, 1])
+    ax_bottom_early.set_facecolor("white")
+    ax_bottom_late.set_facecolor("white")
+
+    max_drop_delay = 1.0
+    for traj in trajectories:
+        actions = np.asarray(traj["actions"], dtype=np.int64)[:common_steps]
+        drop_delay_steps = np.asarray(
+            traj.get("drop_delay_steps", np.full(actions.shape, np.nan, dtype=np.float32)),
+            dtype=np.float32,
+        )[:common_steps]
+        masked_drop_delay = np.ma.masked_invalid(drop_delay_steps.T)
+        if masked_drop_delay.count() > 0:
+            max_drop_delay = max(max_drop_delay, float(masked_drop_delay.max()))
+
+    drop_im = None
+    for idx, (ax, traj, label) in enumerate(zip(top_axes, trajectories, labels)):
+        ax.set_facecolor("white")
+        actions = np.asarray(traj["actions"], dtype=np.int64)[:common_steps]
+        n_steps, n_agents = actions.shape
+        drop_delay_steps = np.asarray(
+            traj.get("drop_delay_steps", np.full(actions.shape, np.nan, dtype=np.float32)),
+            dtype=np.float32,
+        )[:common_steps]
+
+        sent_mask = actions > 0
+        drop_mask = np.isfinite(drop_delay_steps)
+        sent_not_dropped_mask = sent_mask & ~drop_mask
+        base_outcomes = np.zeros((n_steps, n_agents), dtype=np.int64)
+        base_outcomes[sent_not_dropped_mask] = 1
+        base_outcomes_vis = base_outcomes.T
+        base_cmap = ListedColormap(["#f5f5f5", "#457b9d"])
+        extent = (-0.5, common_steps - 0.5, n_agents - 0.5, -0.5)
+        ax.imshow(
+            base_outcomes_vis,
+            aspect="auto",
+            interpolation="nearest",
+            cmap=base_cmap,
+            vmin=0,
+            vmax=1,
+            origin="upper",
+            extent=extent,
+        )
+
+        masked_drop_delay = np.ma.masked_invalid(drop_delay_steps.T)
+        if masked_drop_delay.count() > 0:
+            drop_im = ax.imshow(
+                masked_drop_delay,
+                aspect="auto",
+                interpolation="nearest",
+                cmap="YlOrRd",
+                vmin=0.0,
+                vmax=max_drop_delay,
+                origin="upper",
+                extent=extent,
+            )
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "No dropped packets",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+                fontsize=10,
+                color="#444444",
+            )
+
+        ax.set_title(label, fontsize=13, fontweight="bold")
+        ax.set_xlabel("Timestep", fontsize=11)
+        ax.set_yticks(np.arange(n_agents))
+        # Keep agent_0 at the top row deterministically.
+        ax.set_ylim(n_agents - 0.5, -0.5)
+        ax.set_xlim(-0.5, common_steps - 0.5)
+        if idx == 0:
+            ax.set_ylabel("Agent", fontsize=11)
+            ax.set_yticklabels([f"agent_{i}" for i in range(n_agents)])
+        else:
+            ax.set_ylabel("")
+            ax.set_yticklabels([])
+        ax.tick_params(axis="both", labelsize=9)
+
+    if drop_im is not None:
+        cbar_ax.set_visible(True)
+        cbar = fig.colorbar(drop_im, cax=cbar_ax)
+        cbar.set_label("Drop delay (timesteps)", fontsize=10)
+        cbar.ax.tick_params(labelsize=9)
+
+    top_axes[1].legend(
+        handles=[
+            Patch(facecolor="#f5f5f5", edgecolor="#bdbdbd", label="No send"),
+            Patch(facecolor="#457b9d", edgecolor="#457b9d", label="Sent, not dropped"),
+            Patch(facecolor="#d7301f", edgecolor="#d7301f", label="Dropped (delay heatmap)"),
+        ],
+        loc="upper left",
+        fontsize=9,
+        frameon=True,
+    )
+
+    policy_colors = ["#1f77b4", "#d62728"]
+    metric_per_policy: List[np.ndarray] = []
+    for traj in trajectories:
+        metric_full = np.asarray(traj.get("kf_info_m_noise", []), dtype=np.float32)
+        if metric_full.ndim != 2:
+            metric_full = np.full((common_steps, 1), np.nan, dtype=np.float32)
+        metric_per_policy.append(metric_full[:common_steps])
+
+    def _plot_metric_window(ax: Axes, t0: int, t1: int, subtitle: str) -> None:
+        for idx, (metric, label) in enumerate(zip(metric_per_policy, labels)):
+            if t1 <= t0 or metric.shape[0] < t1:
+                continue
+            window_metric = metric[t0:t1]
+            if window_metric.size == 0 or np.all(np.isnan(window_metric)):
+                continue
+            x = np.arange(t0, t1, dtype=np.int64)
+            mean_metric = np.nanmean(window_metric, axis=1)
+            q25 = np.nanpercentile(window_metric, 25, axis=1)
+            q75 = np.nanpercentile(window_metric, 75, axis=1)
+            valid = np.isfinite(mean_metric)
+            integrate_fn = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+            if np.count_nonzero(valid) >= 2:
+                auc = float(integrate_fn(mean_metric[valid], x=x[valid]))
+            elif np.count_nonzero(valid) == 1:
+                auc = float(mean_metric[valid][0])
+            else:
+                auc = float("nan")
+            color = policy_colors[idx % len(policy_colors)]
+            auc_str = f"{auc:.4g}" if np.isfinite(auc) else "nan"
+            ax.plot(x, mean_metric, color=color, linewidth=2.5, label=f"{label} (mean, AUC={auc_str})")
+            ax.fill_between(x, q25, q75, color=color, alpha=0.16, linewidth=0)
+
+        ax.set_title(subtitle, fontsize=12, fontweight="bold")
+        ax.set_xlabel("Timestep", fontsize=11)
+        ax.grid(True, alpha=0.25)
+        ax.set_xlim(t0 - 0.5, t1 - 0.5)
+
+    _plot_metric_window(
+        ax_bottom_early,
+        0,
+        split_t,
+        rf"$\mathrm{{tr}}(M e e^\top)$ Early Window (t=0..{split_t - 1})",
+    )
+    _plot_metric_window(
+        ax_bottom_late,
+        split_t,
+        common_steps,
+        rf"$\mathrm{{tr}}(M e e^\top)$ Late Window (t={split_t}..{common_steps - 1})",
+    )
+
+    ax_bottom_early.set_ylabel(r"$\mathrm{tr}(M e e^\top)$", fontsize=12)
+    ax_bottom_early.legend(fontsize=9, loc="upper right")
+    ax_bottom_late.legend(fontsize=9, loc="upper right")
+
+    fig.suptitle(f"{title}  |  auto split t={split_t}", fontsize=16, fontweight="bold", y=0.99)
+    fig.subplots_adjust(left=0.06, right=0.96, bottom=0.08, top=0.90, hspace=0.24, wspace=0.16)
+    plt.savefig(str(save_path), dpi=400, bbox_inches="tight")
+    plt.close(fig)
+    print(f"✓ Saved two-policy comparison plot to {save_path} (split: t={split_t})")
+
+
+def estimate_two_policy_split_timestep(
+    trajectories: List[Dict[str, np.ndarray]],
+    metric_key: str = "kf_info_m_noise",
+) -> int:
+    """Estimate the transient/end split time from metric scale decay.
+
+    Strategy:
+    - Build a robust per-timestep envelope using the 90th percentile across agents.
+    - Combine policies by taking per-timestep max envelope.
+    - Find the earliest sustained point where envelope drops near tail scale.
+    """
+    envelopes: List[np.ndarray] = []
+    for traj in trajectories:
+        metric = np.asarray(traj.get(metric_key, []), dtype=np.float32)
+        if metric.ndim != 2 or metric.shape[0] < 2:
+            continue
+        q90 = np.nanpercentile(metric, 90, axis=1)
+        envelopes.append(np.abs(q90))
+
+    if not envelopes:
+        return 1
+
+    n_steps = int(min(env.shape[0] for env in envelopes))
+    if n_steps < 4:
+        return 1
+
+    stacked = np.stack([env[:n_steps] for env in envelopes], axis=0)
+    envelope = np.nanmax(stacked, axis=0)
+
+    head_len = max(3, n_steps // 12)
+    tail_len = max(6, n_steps // 5)
+    peak = float(np.nanmax(envelope[:head_len]))
+    tail_level = float(np.nanmedian(envelope[-tail_len:]))
+    if not np.isfinite(peak) or not np.isfinite(tail_level):
+        return max(1, n_steps // 8)
+
+    # Threshold closer to tail than peak to mark post-transient region.
+    threshold = tail_level + 0.15 * max(0.0, peak - tail_level)
+    sustain = max(4, n_steps // 25)
+    split = None
+    for t in range(head_len, n_steps - sustain):
+        if float(np.nanmax(envelope[t:t + sustain])) <= threshold:
+            split = t
+            break
+    if split is None:
+        split = max(1, n_steps // 8)
+
+    # Keep both windows meaningful.
+    min_split = max(1, int(0.04 * n_steps))
+    max_split = max(min_split + 1, int(0.55 * n_steps))
+    return int(np.clip(split, min_split, max_split))
 
 
 def _compute_axis_limits(all_points: np.ndarray, margin: float = 0.15):
@@ -1138,6 +1525,18 @@ def main():
                 save_path=state_space_path,
                 show_estimates=args.show_estimates,
             )
+
+    if len(trajectories) == 2:
+        split_t = estimate_two_policy_split_timestep(trajectories)
+        print(f"✓ Auto-selected two-policy split timestep: t={split_t}")
+        two_policy_plot_path = output_dir / f"{output_prefix}_two_policy_comparison.png"
+        plot_marl_two_policy_comparison(
+            trajectories,
+            policy_labels[:2],
+            two_policy_plot_path,
+            title="Two-Policy Comparison (Drops + tr(M e e^T))",
+            split_t=split_t,
+        )
 
     # Generate video animation if requested
     if args.generate_video:
