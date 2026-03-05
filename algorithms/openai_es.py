@@ -918,17 +918,47 @@ def train(args):
             fitness_array = jnp.array(fitness_values)
             best_idx_generation = int(jnp.argmax(fitness_array))
             candidate_flat_params = population_flat[best_idx_generation]
+
+            if obs_normalizer is not None:
+                obs_sum_total = np.zeros((obs_dim,), dtype=np.float64)
+                obs_sumsq_total = np.zeros((obs_dim,), dtype=np.float64)
+                obs_count_total = 0
+                for _mean_reward, obs_sum, obs_sumsq, obs_count in eval_results:
+                    if obs_count > 0:
+                        obs_sum_total += obs_sum
+                        obs_sumsq_total += obs_sumsq
+                        obs_count_total += int(obs_count)
+                if obs_count_total > 0:
+                    batch_mean = obs_sum_total / float(obs_count_total)
+                    batch_var = obs_sumsq_total / float(obs_count_total) - np.square(batch_mean)
+                    batch_var = np.maximum(batch_var, 0.0)
+                    obs_normalizer.update_from_moments(batch_mean, batch_var, obs_count_total)
+
+            strategy_rng, rng_tell = jax.random.split(strategy_rng)
+            context_state, _ = strategy_context["tell_step"](rng_tell, x, -fitness_array, context_state)
+            strategy_context["state"] = context_state
+            best_strategy_state = strategy_context["state"]
+            mean_flat_params = np.array(best_strategy_state.mean)
+
+            eval_obs_state = None
+            if obs_normalizer is not None:
+                eval_obs_state = (
+                    obs_normalizer.mean.copy(),
+                    obs_normalizer.m2.copy(),
+                    int(obs_normalizer.count),
+                )
+
             fixed_eval_mean, fixed_eval_std, fixed_eval_rewards = _evaluate_policy_fixed_seeds_local(
                 config_path=config_path_str,
                 episode_length=args.episode_length,
                 n_agents=n_agents,
                 obs_dim=obs_dim,
                 use_agent_id=use_agent_id,
-                flat_params=candidate_flat_params,
+                flat_params=mean_flat_params,
                 unravel_fn=unravel_fn,
                 predict_fn=eval_predict,
                 episode_seeds=fixed_eval_seeds,
-                obs_state=obs_state,
+                obs_state=eval_obs_state,
                 obs_norm_clip=args.obs_norm_clip,
                 obs_norm_eps=args.obs_norm_eps,
                 reward_override=eval_reward_override,
@@ -951,7 +981,7 @@ def train(args):
                 unravel_fn=unravel_fn,
                 predict_fn=eval_predict,
                 episode_seeds=fixed_eval_seeds,
-                obs_state=obs_state,
+                obs_state=eval_obs_state,
                 obs_norm_clip=args.obs_norm_clip,
                 obs_norm_eps=args.obs_norm_eps,
                 reward_override=eval_reward_override,
@@ -967,25 +997,6 @@ def train(args):
             drop_ratios = (baseline_arr - policy_arr) / denom
             mean_drop_ratio = float(np.mean(drop_ratios))
             std_drop_ratio = float(np.std(drop_ratios))
-
-            if obs_normalizer is not None:
-                obs_sum_total = np.zeros((obs_dim,), dtype=np.float64)
-                obs_sumsq_total = np.zeros((obs_dim,), dtype=np.float64)
-                obs_count_total = 0
-                for _mean_reward, obs_sum, obs_sumsq, obs_count in eval_results:
-                    if obs_count > 0:
-                        obs_sum_total += obs_sum
-                        obs_sumsq_total += obs_sumsq
-                        obs_count_total += int(obs_count)
-                if obs_count_total > 0:
-                    batch_mean = obs_sum_total / float(obs_count_total)
-                    batch_var = obs_sumsq_total / float(obs_count_total) - np.square(batch_mean)
-                    batch_var = np.maximum(batch_var, 0.0)
-                    obs_normalizer.update_from_moments(batch_mean, batch_var, obs_count_total)
-
-            strategy_rng, rng_tell = jax.random.split(strategy_rng)
-            context_state, _ = strategy_context["tell_step"](rng_tell, x, -fitness_array, context_state)
-            strategy_context["state"] = context_state
 
             mean_fit = float(jnp.mean(fitness_array))
             max_fit = float(jnp.max(fitness_array))
@@ -1031,7 +1042,7 @@ def train(args):
                 best_drop_ratio_all_time = mean_drop_ratio
                 np.savez(
                     run_dir / "best_model.npz",
-                    **build_checkpoint_payload(candidate_flat_params),
+                    **build_checkpoint_payload(mean_flat_params),
                 )
 
             if max_fit > best_fitness_all_time:
@@ -1041,10 +1052,9 @@ def train(args):
                     **build_checkpoint_payload(candidate_flat_params),
                 )
 
-            best_strategy_state = strategy_context["state"]
             np.savez(
                 run_dir / "latest_model.npz",
-                **build_checkpoint_payload(np.array(best_strategy_state.mean)),
+                **build_checkpoint_payload(mean_flat_params),
             )
 
             if gen % args.checkpoint_freq == 0:
