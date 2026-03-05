@@ -171,6 +171,100 @@ def build_happo_hyperparams(
     }
 
 
+def build_hasac_parser(description: str) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--output-root", type=Path, default=Path("outputs"))
+    parser.add_argument("--resume", type=Path, default=None, help="Resume training from a previous run directory")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--n-agents", type=int, default=3)
+    parser.add_argument("--episode-length", type=int, default=250)
+    parser.add_argument("--total-timesteps", type=int, default=20_000_000)
+    parser.add_argument("--n-envs", type=int, default=20)
+    parser.add_argument("--buffer-size", type=int, default=1_000_000)
+    parser.add_argument("--batch-size", type=int, default=1000)
+    parser.add_argument("--start-learning", type=int, default=10_000)
+    parser.add_argument("--train-interval", type=int, default=50)
+    parser.add_argument("--learning-rate", type=float, default=5e-4,
+                        help="Fallback LR for actor and critic if their specific LR is not set.")
+    parser.add_argument("--actor-lr", type=float, default=None,
+                        help="Actor learning rate (defaults to --learning-rate).")
+    parser.add_argument("--critic-lr", type=float, default=None,
+                        help="Critic learning rate (defaults to --learning-rate).")
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--polyak", type=float, default=0.005,
+                        help="Soft target update coefficient (tau).")
+    parser.add_argument("--alpha", type=float, default=0.001,
+                        help="SAC entropy temperature (initial value if auto-alpha).")
+    parser.add_argument("--auto-alpha", action="store_true", dest="auto_alpha",
+                        help="Enable automatic entropy temperature tuning.")
+    parser.add_argument("--no-auto-alpha", action="store_false", dest="auto_alpha")
+    parser.add_argument("--alpha-lr", type=float, default=3e-4,
+                        help="Learning rate for auto-alpha.")
+    parser.add_argument("--target-entropy", type=float, default=None,
+                        help="Target entropy for auto-alpha (default: log(n_actions) * 0.98).")
+    parser.add_argument("--max-grad-norm", type=float, default=10.0)
+    parser.add_argument("--fixed-order", action="store_true",
+                        help="Use fixed agent update order instead of random shuffle.")
+    parser.add_argument("--use-huber-loss", action="store_true", dest="use_huber_loss",
+                        help="Use Huber loss for critic instead of MSE.")
+    parser.add_argument("--no-huber-loss", action="store_false", dest="use_huber_loss")
+    parser.add_argument("--huber-delta", type=float, default=10.0)
+    parser.add_argument("--n-step", type=int, default=20,
+                        help="N-step returns horizon (1 = standard TD, >1 = n-step).")
+    parser.add_argument("--hidden-dims", type=int, nargs="+", default=[128, 128])
+    parser.add_argument("--critic-hidden-dims", type=int, nargs="+", default=[128, 128])
+    parser.add_argument("--activation", type=str, default="relu", choices=["relu", "tanh", "elu"])
+    parser.add_argument("--feature-norm", action="store_true",
+                        help="Apply LayerNorm to input features (first layer).")
+    parser.add_argument("--layer-norm", action="store_true",
+                        help="Apply LayerNorm after each hidden layer.")
+    obs_norm_group = parser.add_mutually_exclusive_group()
+    obs_norm_group.add_argument("--normalize-obs", action="store_true")
+    obs_norm_group.add_argument("--no-normalize-obs", action="store_false", dest="normalize_obs")
+    parser.add_argument("--obs-norm-clip", type=float, default=5.0)
+    parser.add_argument("--obs-norm-eps", type=float, default=1e-8)
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--log-interval", type=int, default=10)
+    parser.add_argument("--eval-freq", type=int, default=10000)
+    parser.add_argument("--n-eval-episodes", type=int, default=80)
+    parser.add_argument("--n-eval-envs", type=int, default=8)
+    _add_set_override_argument(parser)
+    parser.set_defaults(normalize_obs=True, auto_alpha=False, use_huber_loss=True)
+    return parser
+
+
+def build_hasac_hyperparams(
+    args: Any, n_agents: int, device: Any,
+) -> Dict[str, Any]:
+    actor_lr = args.actor_lr if args.actor_lr is not None else args.learning_rate
+    critic_lr = args.critic_lr if args.critic_lr is not None else args.learning_rate
+    return {
+        "total_timesteps": args.total_timesteps, "episode_length": args.episode_length,
+        "n_agents": n_agents, "n_envs": args.n_envs,
+        "buffer_size": args.buffer_size, "batch_size": args.batch_size,
+        "start_learning": args.start_learning, "train_interval": args.train_interval,
+        "learning_rate": args.learning_rate,
+        "actor_lr": actor_lr, "critic_lr": critic_lr,
+        "gamma": args.gamma, "polyak": args.polyak,
+        "alpha": args.alpha, "auto_alpha": args.auto_alpha,
+        "alpha_lr": args.alpha_lr, "target_entropy": args.target_entropy,
+        "max_grad_norm": args.max_grad_norm,
+        "fixed_order": args.fixed_order,
+        "use_huber_loss": args.use_huber_loss, "huber_delta": args.huber_delta,
+        "n_step": args.n_step,
+        "hidden_dims": list(args.hidden_dims),
+        "critic_hidden_dims": list(args.critic_hidden_dims),
+        "activation": args.activation, "feature_norm": args.feature_norm,
+        "layer_norm": args.layer_norm,
+        "normalize_obs": args.normalize_obs,
+        "obs_norm_clip": args.obs_norm_clip, "obs_norm_eps": args.obs_norm_eps,
+        "eval_freq": args.eval_freq,
+        "n_eval_episodes": args.n_eval_episodes, "n_eval_envs": args.n_eval_envs,
+        "device": str(device), "seed": args.seed,
+    }
+
+
 def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--config", type=Path, default=None)

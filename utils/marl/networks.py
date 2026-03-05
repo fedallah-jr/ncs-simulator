@@ -329,6 +329,55 @@ class QMixer(nn.Module):
         return q_tot.view(batch_size, 1)
 
 
+class TwinQNetwork(nn.Module):
+    """Centralized twin Q-critic for HASAC.
+
+    Input: concat(global_state, all_agents_one_hot_actions).
+    Output: two scalar Q-values from independent Q-networks.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: Sequence[int] = (256, 256),
+        activation: str = "relu",
+        feature_norm: bool = False,
+        layer_norm: bool = False,
+        output_gain: float = 1.0,
+    ) -> None:
+        super().__init__()
+        if input_dim <= 0:
+            raise ValueError("input_dim must be positive")
+        if not hidden_dims:
+            raise ValueError("hidden_dims must be non-empty")
+
+        self.feature_norm_layer = nn.LayerNorm(input_dim) if feature_norm else None
+
+        hidden1, last_dim1 = build_mlp_hidden(input_dim, hidden_dims, activation, layer_norm)
+        out1 = nn.Linear(last_dim1, 1)
+        self.q1 = nn.Sequential(*hidden1, out1)
+
+        hidden2, last_dim2 = build_mlp_hidden(input_dim, hidden_dims, activation, layer_norm)
+        out2 = nn.Linear(last_dim2, 1)
+        self.q2 = nn.Sequential(*hidden2, out2)
+
+        hidden_gain = _get_activation_gain(activation)
+        _apply_orthogonal_init(self.q1, gain=hidden_gain)
+        _apply_orthogonal_init(self.q2, gain=hidden_gain)
+        _init_linear(out1, gain=float(output_gain))
+        _init_linear(out2, gain=float(output_gain))
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.feature_norm_layer is not None:
+            x = self.feature_norm_layer(x)
+        return self.q1(x).squeeze(-1), self.q2(x).squeeze(-1)
+
+    def q1_forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.feature_norm_layer is not None:
+            x = self.feature_norm_layer(x)
+        return self.q1(x).squeeze(-1)
+
+
 class QPLEXSIWeight(nn.Module):
     def __init__(
         self,

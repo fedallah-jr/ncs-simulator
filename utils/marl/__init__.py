@@ -20,13 +20,14 @@ from .common import (
     QLearnStepResult,
     qlearning_collect_transition,
 )
-from .learners import IQLLearner, VDNLearner, QMIXLearner, QPLEXLearner
+from .learners import IQLLearner, VDNLearner, QMIXLearner, QPLEXLearner, HASACLearner
 from .networks import (
     CentralValueMLP,
     MLPAgent,
     DuelingMLPAgent,
     QMixer,
     QPLEXMixer,
+    TwinQNetwork,
     VDNMixer,
     append_agent_id,
 )
@@ -39,6 +40,8 @@ from .args_builder import (
     add_qplex_args,
     build_happo_parser,
     build_happo_hyperparams,
+    build_hasac_parser,
+    build_hasac_hyperparams,
     build_mappo_parser,
 )
 from .checkpoint_utils import (
@@ -52,6 +55,9 @@ from .checkpoint_utils import (
     load_qlearning_training_state,
     save_mappo_training_state,
     load_mappo_training_state,
+    save_hasac_checkpoint,
+    save_hasac_training_state,
+    load_hasac_training_state,
     build_qlearning_hyperparams,
     build_mappo_hyperparams,
 )
@@ -66,15 +72,19 @@ __all__ = [
     "build_base_qlearning_parser",
     "build_happo_hyperparams",
     "build_happo_parser",
+    "build_hasac_hyperparams",
+    "build_hasac_parser",
     "build_mappo_hyperparams",
     "build_mappo_parser",
     "build_qlearning_hyperparams",
     "CentralValueMLP",
     "DuelingMLPAgent",
     "epsilon_by_step",
+    "HASACLearner",
     "IQLLearner",
     "load_happo_arch_args",
     "load_happo_training_state",
+    "load_hasac_training_state",
     "load_mappo_training_state",
     "load_qlearning_training_state",
     "MLPAgent",
@@ -90,6 +100,8 @@ __all__ = [
     "run_evaluation_vectorized",
     "save_happo_checkpoint",
     "save_happo_training_state",
+    "save_hasac_checkpoint",
+    "save_hasac_training_state",
     "save_mappo_checkpoint",
     "save_mappo_training_state",
     "save_qlearning_checkpoint",
@@ -98,6 +110,7 @@ __all__ = [
     "select_actions_batched",
     "select_device",
     "stack_obs",
+    "TwinQNetwork",
     "VDNLearner",
     "VDNMixer",
     "ValueNorm",

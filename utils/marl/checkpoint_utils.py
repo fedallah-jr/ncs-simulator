@@ -244,6 +244,72 @@ def load_mappo_training_state(
         "last_eval_step": int(state["last_eval_step"]),
     }
 
+def save_hasac_checkpoint(
+    path: Path, n_agents: int, obs_dim: int, n_actions: int, global_state_dim: int,
+    agent_hidden_dims: List[int], agent_activation: str,
+    critic_hidden_dims: List[int],
+    actors: List[torch.nn.Module], critic: torch.nn.Module,
+    obs_normalizer: Optional["RunningObsNormalizer"],
+    feature_norm: bool = False,
+    layer_norm: bool = False,
+) -> None:
+    ckpt: Dict[str, Any] = {
+        "algorithm": "hasac", "n_agents": n_agents, "obs_dim": obs_dim,
+        "n_actions": n_actions, "global_state_dim": global_state_dim,
+        "use_agent_id": False, "parameter_sharing": False,
+        "agent_hidden_dims": agent_hidden_dims, "agent_activation": agent_activation,
+        "feature_norm": feature_norm, "layer_norm": layer_norm,
+        "dueling": False, "stream_hidden_dim": None,
+        "critic_hidden_dims": critic_hidden_dims,
+        "agent_state_dicts": [actor.state_dict() for actor in actors],
+        "critic_state_dict": critic.state_dict(),
+    }
+    ckpt["obs_normalization"] = (
+        obs_normalizer.state_dict() if obs_normalizer is not None else {"enabled": False}
+    )
+    torch.save(ckpt, path)
+
+def save_hasac_training_state(
+    path: Path, learner: Any, buffer: Any, obs_normalizer: Any,
+    best_model_tracker: Any, global_step: int, episode: int,
+    last_eval_step: int, vector_step: int,
+    arch_args: Optional[Dict[str, Any]] = None,
+) -> None:
+    state: Dict[str, Any] = {
+        "learner": learner.state_dict(),
+        "buffer": buffer.state_dict(),
+        "obs_normalizer": obs_normalizer.state_dict() if obs_normalizer is not None else None,
+        "best_model_tracker": dict(best_model_tracker._best),
+        "global_step": global_step,
+        "episode": episode,
+        "last_eval_step": last_eval_step,
+        "vector_step": vector_step,
+    }
+    if arch_args is not None:
+        state["arch_args"] = arch_args
+    torch.save(state, path)
+
+def load_hasac_training_state(
+    path: Path, learner: Any, buffer: Any, obs_normalizer: Any,
+    best_model_tracker: Any,
+) -> Dict[str, Any]:
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    learner.load_state_dict(state["learner"])
+    buffer.load_state_dict(state["buffer"])
+    if state["obs_normalizer"] is not None and obs_normalizer is not None:
+        from utils.marl.obs_normalization import RunningObsNormalizer
+        restored = RunningObsNormalizer.from_state_dict(state["obs_normalizer"])
+        obs_normalizer.mean = restored.mean
+        obs_normalizer.m2 = restored.m2
+        obs_normalizer.count = restored.count
+    best_model_tracker._best = dict(state["best_model_tracker"])
+    return {
+        "global_step": int(state["global_step"]),
+        "episode": int(state["episode"]),
+        "last_eval_step": int(state["last_eval_step"]),
+        "vector_step": int(state["vector_step"]),
+    }
+
 def build_qlearning_hyperparams(
     algorithm: str, args: Any, n_agents: int, use_agent_id: bool,
     device: torch.device, mixer_params: Optional[Dict[str, Any]] = None,
