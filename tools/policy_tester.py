@@ -760,7 +760,7 @@ def _filter_rows(rows: List[Dict[str, Any]], fieldnames: Sequence[str]) -> List[
 
 
 def _strip_non_dynamics_config_fields(value: Any) -> Any:
-    """Remove agent-representation keys that do not change environment dynamics."""
+    """Remove non-dynamics keys and canonicalize numeric scalars for comparison."""
     if isinstance(value, dict):
         cleaned: Dict[str, Any] = {}
         for key, item in value.items():
@@ -770,6 +770,10 @@ def _strip_non_dynamics_config_fields(value: Any) -> Any:
         return cleaned
     if isinstance(value, list):
         return [_strip_non_dynamics_config_fields(item) for item in value]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return float(value)
     return value
 
 
@@ -1460,6 +1464,11 @@ def main() -> int:
         help="Evaluate only heuristic baselines (zero_wait, perfect_sync, perfect_sync_n2, always_send, never_send, random_50)",
     )
     parser.add_argument(
+        "--only-best",
+        action="store_true",
+        help="In batch mode (--models-root), evaluate only best_model checkpoints and skip best_train/latest",
+    )
+    parser.add_argument(
         "--test-replay",
         action="store_true",
         help="Test determinism by recording actions and comparing replay vs original policy",
@@ -1506,6 +1515,8 @@ def main() -> int:
 
     if args.test_replay and args.only_heuristics:
         raise ValueError("--test-replay cannot be used with --only-heuristics.")
+    if args.only_best and args.only_heuristics:
+        raise ValueError("--only-best cannot be used with --only-heuristics.")
 
     if args.only_heuristics:
         if args.models_root or args.policy or args.policy_type:
@@ -1523,6 +1534,8 @@ def main() -> int:
     else:
         if not args.config or not args.policy or not args.policy_type:
             raise ValueError("Single-policy evaluation requires --config, --policy, and --policy-type.")
+        if args.only_best:
+            raise ValueError("--only-best requires --models-root.")
         models_root = None
 
     if models_root is None:
@@ -1843,11 +1856,15 @@ def main() -> int:
     policy_types: List[str] = []
     for run in runs:
         specs: List[Tuple[str, PolicySpec]] = []
-        for checkpoint_name, model_path in (
-            ("best", run.best_model),
-            ("best_train", run.best_train_model),
-            ("latest", run.latest_model),
-        ):
+        checkpoints: List[Tuple[str, Optional[Path]]] = [("best", run.best_model)]
+        if not args.only_best:
+            checkpoints.extend(
+                (
+                    ("best_train", run.best_train_model),
+                    ("latest", run.latest_model),
+                )
+            )
+        for checkpoint_name, model_path in checkpoints:
             if model_path is None:
                 continue
             policy_type = _infer_policy_type(model_path)

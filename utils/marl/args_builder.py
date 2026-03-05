@@ -185,6 +185,8 @@ def build_hasac_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=1000)
     parser.add_argument("--start-learning", type=int, default=10_000)
     parser.add_argument("--train-interval", type=int, default=50)
+    parser.add_argument("--update-per-train", type=float, default=1.0,
+                        help="Ratio of update iterations to train interval (HARL semantics).")
     parser.add_argument("--learning-rate", type=float, default=5e-4,
                         help="Fallback LR for actor and critic if their specific LR is not set.")
     parser.add_argument("--actor-lr", type=float, default=None,
@@ -203,6 +205,16 @@ def build_hasac_parser(description: str) -> argparse.ArgumentParser:
                         help="Learning rate for auto-alpha.")
     parser.add_argument("--target-entropy", type=float, default=None,
                         help="Target entropy for auto-alpha (default: log(n_actions) * 0.98).")
+    parser.add_argument("--value-norm", action="store_true", dest="value_norm",
+                        help="Enable ValueNorm for HASAC critic targets.")
+    parser.add_argument("--no-value-norm", action="store_false", dest="value_norm")
+    parser.add_argument("--value-norm-beta", type=float, default=0.99999,
+                        help="EMA decay for ValueNorm statistics.")
+    parser.add_argument(
+        "--value-norm-per-element-update",
+        action="store_true",
+        help="Scale ValueNorm decay by batch element count (on-policy style).",
+    )
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--fixed-order", action="store_true",
                         help="Use fixed agent update order instead of random shuffle.")
@@ -215,8 +227,19 @@ def build_hasac_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[128, 128])
     parser.add_argument("--critic-hidden-dims", type=int, nargs="+", default=[128, 128])
     parser.add_argument("--activation", type=str, default="relu", choices=["relu", "tanh", "elu"])
-    parser.add_argument("--feature-norm", action="store_true",
-                        help="Apply LayerNorm to input features (first layer).")
+    feature_norm_group = parser.add_mutually_exclusive_group()
+    feature_norm_group.add_argument(
+        "--feature-norm",
+        action="store_true",
+        dest="feature_norm",
+        help="Apply LayerNorm to input features (first layer).",
+    )
+    feature_norm_group.add_argument(
+        "--no-feature-norm",
+        action="store_false",
+        dest="feature_norm",
+        help="Disable LayerNorm on input features.",
+    )
     parser.add_argument("--layer-norm", action="store_true",
                         help="Apply LayerNorm after each hidden layer.")
     obs_norm_group = parser.add_mutually_exclusive_group()
@@ -230,7 +253,13 @@ def build_hasac_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--n-eval-episodes", type=int, default=80)
     parser.add_argument("--n-eval-envs", type=int, default=8)
     _add_set_override_argument(parser)
-    parser.set_defaults(normalize_obs=True, auto_alpha=False, use_huber_loss=True)
+    parser.set_defaults(
+        normalize_obs=True,
+        auto_alpha=False,
+        use_huber_loss=True,
+        value_norm=True,
+        feature_norm=True,
+    )
     return parser
 
 
@@ -244,11 +273,15 @@ def build_hasac_hyperparams(
         "n_agents": n_agents, "n_envs": args.n_envs,
         "buffer_size": args.buffer_size, "batch_size": args.batch_size,
         "start_learning": args.start_learning, "train_interval": args.train_interval,
+        "update_per_train": args.update_per_train,
         "learning_rate": args.learning_rate,
         "actor_lr": actor_lr, "critic_lr": critic_lr,
         "gamma": args.gamma, "polyak": args.polyak,
         "alpha": args.alpha, "auto_alpha": args.auto_alpha,
         "alpha_lr": args.alpha_lr, "target_entropy": args.target_entropy,
+        "value_norm": args.value_norm,
+        "value_norm_beta": args.value_norm_beta,
+        "value_norm_per_element_update": args.value_norm_per_element_update,
         "max_grad_norm": args.max_grad_norm,
         "fixed_order": args.fixed_order,
         "use_huber_loss": args.use_huber_loss, "huber_delta": args.huber_delta,

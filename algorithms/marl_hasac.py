@@ -19,6 +19,7 @@ from utils.marl import (
     HASACLearner,
     MLPAgent,
     TwinQNetwork,
+    ValueNorm,
     build_hasac_parser,
     build_hasac_hyperparams,
     save_hasac_checkpoint,
@@ -96,6 +97,8 @@ def main() -> None:
         raise ValueError("n_envs must be positive")
     if args.train_interval <= 0:
         raise ValueError("train_interval must be positive")
+    if args.update_per_train <= 0:
+        raise ValueError("update_per_train must be positive")
 
     shared_reward_normalizer, _shared_reward_manager = setup_shared_reward_normalizer(
         cfg.get("reward", {}), run_dir
@@ -170,6 +173,16 @@ def main() -> None:
     torch_rng = torch.Generator(device="cpu")
     torch_rng.manual_seed(args.seed)
 
+    if args.value_norm:
+        value_normalizer = ValueNorm(
+            (1,),
+            device=device,
+            beta=float(args.value_norm_beta),
+            per_element_update=bool(args.value_norm_per_element_update),
+        )
+    else:
+        value_normalizer = None
+
     learner = HASACLearner(
         actors=actors,
         critic=critic,
@@ -184,6 +197,7 @@ def main() -> None:
         auto_alpha=args.auto_alpha,
         alpha_lr=args.alpha_lr,
         target_entropy=args.target_entropy,
+        value_normalizer=value_normalizer,
         grad_clip_norm=args.max_grad_norm,
         fixed_order=args.fixed_order,
         use_huber_loss=args.use_huber_loss,
@@ -216,7 +230,7 @@ def main() -> None:
         if not training_state_path.exists():
             raise FileNotFoundError(f"No training_state.pt found in {run_dir}")
         counters = load_hasac_training_state(
-            training_state_path, learner, buffer, obs_normalizer, best_model_tracker,
+            training_state_path, learner, buffer, value_normalizer, obs_normalizer, best_model_tracker,
         )
         global_step = counters["global_step"]
         episode = counters["episode"]
@@ -243,7 +257,7 @@ def main() -> None:
 
     def save_training_state() -> None:
         save_hasac_training_state(
-            run_dir / "training_state.pt", learner, buffer, obs_normalizer,
+            run_dir / "training_state.pt", learner, buffer, value_normalizer, obs_normalizer,
             best_model_tracker, global_step, episode, last_eval_step, vector_step,
         )
 
@@ -317,8 +331,10 @@ def main() -> None:
             )
 
             if len(buffer) >= args.start_learning and vector_step % args.train_interval == 0:
-                batch = buffer.sample(args.batch_size, obs_normalizer=obs_normalizer)
-                learner.update(batch)
+                n_updates = int(args.update_per_train * args.train_interval)
+                for _ in range(n_updates):
+                    batch = buffer.sample(args.batch_size, obs_normalizer=obs_normalizer)
+                    learner.update(batch)
 
             if global_step - last_eval_step >= args.eval_freq:
                 # For evaluation, wrap actors in a ModuleList so select_actions_batched works

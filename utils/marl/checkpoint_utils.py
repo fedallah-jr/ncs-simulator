@@ -270,7 +270,7 @@ def save_hasac_checkpoint(
     torch.save(ckpt, path)
 
 def save_hasac_training_state(
-    path: Path, learner: Any, buffer: Any, obs_normalizer: Any,
+    path: Path, learner: Any, buffer: Any, value_normalizer: Any, obs_normalizer: Any,
     best_model_tracker: Any, global_step: int, episode: int,
     last_eval_step: int, vector_step: int,
     arch_args: Optional[Dict[str, Any]] = None,
@@ -278,6 +278,7 @@ def save_hasac_training_state(
     state: Dict[str, Any] = {
         "learner": learner.state_dict(),
         "buffer": buffer.state_dict(),
+        "value_normalizer": value_normalizer.state_dict() if value_normalizer is not None else None,
         "obs_normalizer": obs_normalizer.state_dict() if obs_normalizer is not None else None,
         "best_model_tracker": dict(best_model_tracker._best),
         "global_step": global_step,
@@ -290,12 +291,14 @@ def save_hasac_training_state(
     torch.save(state, path)
 
 def load_hasac_training_state(
-    path: Path, learner: Any, buffer: Any, obs_normalizer: Any,
+    path: Path, learner: Any, buffer: Any, value_normalizer: Any, obs_normalizer: Any,
     best_model_tracker: Any,
 ) -> Dict[str, Any]:
     state = torch.load(path, map_location="cpu", weights_only=False)
     learner.load_state_dict(state["learner"])
     buffer.load_state_dict(state["buffer"])
+    if value_normalizer is not None and state.get("value_normalizer") is not None:
+        value_normalizer.load_state_dict(state["value_normalizer"])
     if state["obs_normalizer"] is not None and obs_normalizer is not None:
         from utils.marl.obs_normalization import RunningObsNormalizer
         restored = RunningObsNormalizer.from_state_dict(state["obs_normalizer"])
