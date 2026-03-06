@@ -207,6 +207,7 @@ def create_eval_async_vector_env(
     reward_override: Optional[Dict[str, Any]] = None,
     termination_override: Optional[Dict[str, Any]] = None,
     global_state_enabled: bool = False,
+    context: Optional[str] = None,
 ) -> AsyncVectorEnv:
     if n_eval_envs <= 0:
         raise ValueError("n_eval_envs must be positive")
@@ -239,6 +240,7 @@ def create_eval_async_vector_env(
     env = AsyncVectorEnv(
         env_fns,
         shared_memory=shared_memory,
+        context=context,
         autoreset_mode=AutoresetMode.SAME_STEP,
     )
     return env

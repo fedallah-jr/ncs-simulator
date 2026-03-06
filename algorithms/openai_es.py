@@ -727,6 +727,7 @@ def train(args):
     # 5. Logging Setup
     run_dir = prepare_run_directory("openai_es", args.config, args.output_root)
     (run_dir / "checkpoints").mkdir(exist_ok=True)
+    # JAX/TPU is already initialized in the main process; eval env workers must use spawn.
     eval_env = create_eval_async_vector_env(
         n_eval_envs=args.n_eval_envs,
         n_agents=n_agents,
@@ -735,6 +736,7 @@ def train(args):
         seed=args.seed,
         reward_override=eval_reward_override,
         termination_override=eval_termination_override,
+        context="spawn",
     )
     eval_device = torch.device("cpu")
 
