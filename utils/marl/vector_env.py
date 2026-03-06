@@ -231,8 +231,14 @@ def create_eval_async_vector_env(
             )
         )
 
+    shared_memory = True
+    shared_memory_flag = os.getenv("NCS_SHARED_MEMORY")
+    if shared_memory_flag is not None:
+        shared_memory = shared_memory_flag.strip().lower() not in {"0", "false", "no", "off"}
+
     env = AsyncVectorEnv(
         env_fns,
+        shared_memory=shared_memory,
         autoreset_mode=AutoresetMode.SAME_STEP,
     )
     return env

@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import gymnasium as gym
+import torch
 
 # Ensure project root is in path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +34,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from ncs_env.env import NCS_Env
 from utils.marl.args_builder import _add_set_override_argument
+from utils.marl.common import run_evaluation_vectorized_seeded
+from utils.marl.vector_env import create_eval_async_vector_env
 from utils.marl_training import load_config_with_overrides, resolve_training_eval_baseline
 from utils.reward_normalization import (
     configure_shared_running_normalizers,
@@ -258,119 +261,29 @@ def _evaluate_params_multi_episode(
     return float(np.mean(rewards)), obs_sum, obs_sumsq, obs_count
 
 
-def _evaluate_policy_fixed_seeds_local(
+def _make_vectorized_action_selector(
     *,
-    config_path: Optional[str],
-    episode_length: int,
-    n_agents: int,
-    obs_dim: int,
-    use_agent_id: bool,
-    flat_params: Optional[np.ndarray],
-    unravel_fn: Any,
+    params: Any,
     predict_fn: Any,
-    episode_seeds: List[int],
-    obs_state: Optional[Tuple[np.ndarray, np.ndarray, int]],
-    obs_norm_clip: float,
-    obs_norm_eps: float,
-    reward_override: Optional[Dict[str, Any]],
-    termination_override: Optional[Dict[str, Any]],
-    heuristic_policy_name: Optional[str] = None,
-    heuristic_deterministic: bool = True,
-    fixed_action: Optional[int] = None,
-    perfect_communication: Optional[bool] = None,
-) -> Tuple[float, float, List[float]]:
-    """Run fixed-seed evaluation for a learned policy or heuristic baseline."""
-    if fixed_action is not None and heuristic_policy_name is not None:
-        raise ValueError("fixed_action and heuristic_policy_name are mutually exclusive")
-    if flat_params is None and fixed_action is None and heuristic_policy_name is None:
-        raise ValueError("Need either flat_params, fixed_action, or heuristic_policy_name")
-    if not episode_seeds:
-        raise ValueError("episode_seeds must not be empty")
-
-    from tools.heuristic_policies import get_heuristic_policy
-
-    eval_env = NCS_Env(
-        n_agents=n_agents,
-        episode_length=episode_length,
-        config_path=config_path,
-        reward_override=reward_override,
-        termination_override=termination_override,
-    )
-    if perfect_communication is not None:
-        eval_env.perfect_communication = bool(perfect_communication)
-
-    params = None if flat_params is None else unravel_fn(flat_params)
+    n_agents: int,
+    use_agent_id: bool,
+) -> Any:
     agent_id_eye = np.eye(n_agents, dtype=np.float32) if use_agent_id else None
 
-    eval_obs_normalizer: Optional[RunningObsNormalizer] = None
-    if obs_state is not None:
-        clip_value = None if obs_norm_clip <= 0 else float(obs_norm_clip)
-        eval_obs_normalizer = RunningObsNormalizer.create(
-            obs_dim, clip=clip_value, eps=float(obs_norm_eps)
-        )
-        eval_obs_normalizer.set_state(*obs_state)
+    def _select_actions(obs: np.ndarray) -> np.ndarray:
+        obs_batch = np.asarray(obs, dtype=np.float32)
+        if obs_batch.ndim != 3 or obs_batch.shape[1] != n_agents:
+            raise ValueError("obs must have shape (n_envs, n_agents, obs_dim)")
+        flat_obs = obs_batch.reshape(obs_batch.shape[0] * n_agents, obs_batch.shape[-1])
+        if agent_id_eye is not None:
+            tiled_agent_ids = np.broadcast_to(
+                agent_id_eye, (obs_batch.shape[0], n_agents, n_agents)
+            ).reshape(obs_batch.shape[0] * n_agents, n_agents)
+            flat_obs = np.concatenate([flat_obs, tiled_agent_ids], axis=1)
+        flat_actions = np.asarray(predict_fn(params, flat_obs), dtype=np.int64)
+        return flat_actions.reshape(obs_batch.shape[0], n_agents)
 
-    rewards: List[float] = []
-    try:
-        for episode_seed in episode_seeds:
-            heuristic_policies: Optional[List[Any]] = None
-            if heuristic_policy_name is not None:
-                heuristic_policies = []
-                for agent_idx in range(n_agents):
-                    policy_seed = int(episode_seed) + agent_idx
-                    policy = get_heuristic_policy(
-                        heuristic_policy_name,
-                        n_agents=n_agents,
-                        seed=policy_seed,
-                        agent_index=agent_idx,
-                    )
-                    if hasattr(policy, "reset"):
-                        policy.reset()
-                    heuristic_policies.append(policy)
-
-            obs_dict, _ = eval_env.reset(seed=int(episode_seed))
-            total_reward = 0.0
-            done = False
-
-            while not done:
-                obs_batch = np.stack(
-                    [np.asarray(obs_dict[f"agent_{i}"], dtype=np.float32) for i in range(n_agents)],
-                    axis=0,
-                )
-                if eval_obs_normalizer is not None:
-                    obs_batch = eval_obs_normalizer.normalize(obs_batch, update=False)
-
-                if fixed_action is not None:
-                    actions = np.full((n_agents,), int(fixed_action), dtype=np.int64)
-                elif heuristic_policies is not None:
-                    actions = np.zeros((n_agents,), dtype=np.int64)
-                    for agent_idx, policy in enumerate(heuristic_policies):
-                        action, _ = policy.predict(
-                            obs_batch[agent_idx], deterministic=heuristic_deterministic
-                        )
-                        actions[agent_idx] = int(action)
-                else:
-                    if params is None:
-                        raise RuntimeError("params unexpectedly missing for learned-policy evaluation")
-                    policy_obs = obs_batch
-                    if agent_id_eye is not None:
-                        policy_obs = np.concatenate([policy_obs, agent_id_eye], axis=1)
-                    actions = np.asarray(predict_fn(params, policy_obs))
-
-                action_dict = {f"agent_{i}": int(actions[i]) for i in range(n_agents)}
-                obs_dict, step_rewards, terminated, truncated, _ = eval_env.step(action_dict)
-                total_reward += float(sum(step_rewards[f"agent_{i}"] for i in range(n_agents)))
-                done = any(
-                    terminated[f"agent_{i}"] or truncated[f"agent_{i}"]
-                    for i in range(n_agents)
-                )
-
-            rewards.append(total_reward)
-    finally:
-        eval_env.close()
-
-    rewards_array = np.asarray(rewards, dtype=np.float64)
-    return float(np.mean(rewards_array)), float(np.std(rewards_array)), rewards
+    return _select_actions
 
 
 def get_fitness_shaping_fn(method: str = "centered_rank"):
@@ -506,6 +419,12 @@ def train(args):
         raise ValueError("--bc-batch-size must be positive")
     if args.bc_init_std < 0.0:
         raise ValueError("--bc-init-std must be >= 0")
+    if args.eval_freq_generations <= 0:
+        raise ValueError("--eval-freq-generations must be positive")
+    if args.n_eval_episodes <= 0:
+        raise ValueError("--n-eval-episodes must be positive")
+    if args.n_eval_envs <= 0:
+        raise ValueError("--n-eval-envs must be positive")
     
     cfg, config_path_str, n_agents, use_agent_id, eval_reward_override, eval_termination_override, network_override, training_reward_override = (
         load_config_with_overrides(args.config, args.n_agents, not args.no_agent_id, args.set_overrides)
@@ -552,6 +471,10 @@ def train(args):
         f"(clip={args.obs_norm_clip}, eps={args.obs_norm_eps})"
     )
     print(f"Evaluation episodes per individual: {args.eval_episodes}")
+    print(
+        f"Model-selection eval: every {args.eval_freq_generations} generation(s), "
+        f"{args.n_eval_episodes} episodes over {args.n_eval_envs} envs"
+    )
     print(f"Fitness shaping: {args.fitness_shaping} (evosax built-in)")
     print(f"L2 weight decay: {args.weight_decay}")
     # Log hardware acceleration status
@@ -566,7 +489,7 @@ def train(args):
     else:
         print("⚠ Running on CPU only (no TPU/GPU detected)")
     print(f"Fitness evaluations will run on {args.n_workers} CPU workers in parallel")
-    model_selection_eval_episodes = 30
+    model_selection_eval_episodes = int(args.n_eval_episodes)
 
     # 2. Setup Flax Model & Initial Params
     master_rng = jax.random.PRNGKey(args.seed if args.seed is not None else 0)
@@ -804,6 +727,16 @@ def train(args):
     # 5. Logging Setup
     run_dir = prepare_run_directory("openai_es", args.config, args.output_root)
     (run_dir / "checkpoints").mkdir(exist_ok=True)
+    eval_env = create_eval_async_vector_env(
+        n_eval_envs=args.n_eval_envs,
+        n_agents=n_agents,
+        episode_length=args.episode_length,
+        config_path_str=config_path_str,
+        seed=args.seed,
+        reward_override=eval_reward_override,
+        termination_override=eval_termination_override,
+    )
+    eval_device = torch.device("cpu")
 
     def build_checkpoint_payload(flat_params: np.ndarray) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -940,72 +873,6 @@ def train(args):
             strategy_context["state"] = context_state
             best_strategy_state = strategy_context["state"]
             mean_flat_params = np.array(best_strategy_state.mean)
-            eval_rng, rng_model_selection_eval = jax.random.split(eval_rng)
-            model_selection_eval_seeds = [
-                int(jax.random.randint(
-                    jax.random.fold_in(rng_model_selection_eval, i),
-                    (), minval=0, maxval=2**31 - 1, dtype=jnp.int32
-                ))
-                for i in range(model_selection_eval_episodes)
-            ]
-
-            eval_obs_state = None
-            if obs_normalizer is not None:
-                eval_obs_state = (
-                    obs_normalizer.mean.copy(),
-                    obs_normalizer.m2.copy(),
-                    int(obs_normalizer.count),
-                )
-
-            fixed_eval_mean, fixed_eval_std, fixed_eval_rewards = _evaluate_policy_fixed_seeds_local(
-                config_path=config_path_str,
-                episode_length=args.episode_length,
-                n_agents=n_agents,
-                obs_dim=obs_dim,
-                use_agent_id=use_agent_id,
-                flat_params=mean_flat_params,
-                unravel_fn=unravel_fn,
-                predict_fn=eval_predict,
-                episode_seeds=model_selection_eval_seeds,
-                obs_state=eval_obs_state,
-                obs_norm_clip=args.obs_norm_clip,
-                obs_norm_eps=args.obs_norm_eps,
-                reward_override=eval_reward_override,
-                termination_override=eval_termination_override,
-            )
-
-            baseline_label = str(eval_baseline.get("label", "perfect_comm"))
-            baseline_policy = str(eval_baseline.get("heuristic_policy", "always_send"))
-            baseline_deterministic = bool(eval_baseline.get("deterministic", True))
-            baseline_perfect_comm = bool(eval_baseline.get("use_perfect_communication", False))
-            heuristic_name = None if baseline_policy == "always_send" else baseline_policy
-            baseline_fixed_action = 1 if baseline_policy == "always_send" else None
-            baseline_mean, baseline_std, baseline_rewards = _evaluate_policy_fixed_seeds_local(
-                config_path=config_path_str,
-                episode_length=args.episode_length,
-                n_agents=n_agents,
-                obs_dim=obs_dim,
-                use_agent_id=use_agent_id,
-                flat_params=None,
-                unravel_fn=unravel_fn,
-                predict_fn=eval_predict,
-                episode_seeds=model_selection_eval_seeds,
-                obs_state=eval_obs_state,
-                obs_norm_clip=args.obs_norm_clip,
-                obs_norm_eps=args.obs_norm_eps,
-                reward_override=eval_reward_override,
-                termination_override=eval_termination_override,
-                heuristic_policy_name=heuristic_name,
-                heuristic_deterministic=baseline_deterministic,
-                fixed_action=baseline_fixed_action,
-                perfect_communication=baseline_perfect_comm,
-            )
-            policy_arr = np.asarray(fixed_eval_rewards, dtype=np.float64)
-            baseline_arr = np.asarray(baseline_rewards, dtype=np.float64)
-            denom = np.maximum(np.abs(baseline_arr), 1e-8)
-            drop_ratios = (baseline_arr - policy_arr) / denom
-            mean_drop_ratio = float(np.mean(drop_ratios))
-            std_drop_ratio = float(np.std(drop_ratios))
 
             mean_fit = float(jnp.mean(fitness_array))
             max_fit = float(jnp.max(fitness_array))
@@ -1013,46 +880,123 @@ def train(args):
             std_fit = float(jnp.std(fitness_array))
             elapsed = time.time() - start_time
 
-            print(
-                f"Gen {gen}/{args.generations} | Mean: {mean_fit:.1f} | "
-                f"Max: {max_fit:.1f} | Min: {min_fit:.1f} | Std: {std_fit:.1f} | "
-                f"Eval({model_selection_eval_episodes} eps): {fixed_eval_mean:.1f} ± {fixed_eval_std:.1f} | "
-                f"Baseline({baseline_label}): {baseline_mean:.1f} ± {baseline_std:.1f} | "
-                f"Drop: {mean_drop_ratio:.6f} ± {std_drop_ratio:.6f} | "
-                f"Time: {elapsed:.1f}s"
+            run_model_selection_eval = (
+                gen % args.eval_freq_generations == 0 or gen == args.generations
             )
+            if run_model_selection_eval:
+                eval_rng, rng_model_selection_eval = jax.random.split(eval_rng)
+                model_selection_eval_seeds = [
+                    int(jax.random.randint(
+                        jax.random.fold_in(rng_model_selection_eval, i),
+                        (), minval=0, maxval=2**31 - 1, dtype=jnp.int32
+                    ))
+                    for i in range(model_selection_eval_episodes)
+                ]
+                policy_params = unravel_fn(mean_flat_params)
+                policy_action_selector = _make_vectorized_action_selector(
+                    params=policy_params,
+                    predict_fn=eval_predict,
+                    n_agents=n_agents,
+                    use_agent_id=use_agent_id,
+                )
+
+                fixed_eval_mean, fixed_eval_std, fixed_eval_rewards = run_evaluation_vectorized_seeded(
+                    eval_env=eval_env,
+                    agent=None,
+                    n_eval_envs=args.n_eval_envs,
+                    n_agents=n_agents,
+                    n_actions=action_dim,
+                    use_agent_id=use_agent_id,
+                    device=eval_device,
+                    episode_seeds=model_selection_eval_seeds,
+                    obs_normalizer=obs_normalizer,
+                    action_selector=policy_action_selector,
+                )
+
+                baseline_label = str(eval_baseline.get("label", "perfect_comm"))
+                baseline_policy = str(eval_baseline.get("heuristic_policy", "always_send"))
+                baseline_deterministic = bool(eval_baseline.get("deterministic", True))
+                baseline_perfect_comm = bool(eval_baseline.get("use_perfect_communication", False))
+                heuristic_name = None if baseline_policy == "always_send" else baseline_policy
+                baseline_fixed_action = 1 if baseline_policy == "always_send" else None
+
+                current_pc_states = eval_env.call("get_perfect_communication")
+                current_pc = bool(current_pc_states[0]) if current_pc_states else False
+                if baseline_perfect_comm != current_pc:
+                    eval_env.call("set_perfect_communication", baseline_perfect_comm)
+                try:
+                    baseline_mean, baseline_std, baseline_rewards = run_evaluation_vectorized_seeded(
+                        eval_env=eval_env,
+                        agent=None,
+                        n_eval_envs=args.n_eval_envs,
+                        n_agents=n_agents,
+                        n_actions=action_dim,
+                        use_agent_id=use_agent_id,
+                        device=eval_device,
+                        episode_seeds=model_selection_eval_seeds,
+                        obs_normalizer=obs_normalizer,
+                        heuristic_policy_name=heuristic_name,
+                        heuristic_deterministic=baseline_deterministic,
+                        fixed_action=baseline_fixed_action,
+                    )
+                finally:
+                    if baseline_perfect_comm != current_pc:
+                        eval_env.call("set_perfect_communication", current_pc)
+
+                policy_arr = np.asarray(fixed_eval_rewards, dtype=np.float64)
+                baseline_arr = np.asarray(baseline_rewards, dtype=np.float64)
+                denom = np.maximum(np.abs(baseline_arr), 1e-8)
+                drop_ratios = (baseline_arr - policy_arr) / denom
+                mean_drop_ratio = float(np.mean(drop_ratios))
+                std_drop_ratio = float(np.std(drop_ratios))
+
+                print(
+                    f"Gen {gen}/{args.generations} | Mean: {mean_fit:.1f} | "
+                    f"Max: {max_fit:.1f} | Min: {min_fit:.1f} | Std: {std_fit:.1f} | "
+                    f"Eval({model_selection_eval_episodes} eps): {fixed_eval_mean:.1f} ± {fixed_eval_std:.1f} | "
+                    f"Baseline({baseline_label}): {baseline_mean:.1f} ± {baseline_std:.1f} | "
+                    f"Drop: {mean_drop_ratio:.6f} ± {std_drop_ratio:.6f} | "
+                    f"Time: {elapsed:.1f}s"
+                )
+            else:
+                print(
+                    f"Gen {gen}/{args.generations} | Mean: {mean_fit:.1f} | "
+                    f"Max: {max_fit:.1f} | Min: {min_fit:.1f} | Std: {std_fit:.1f} | "
+                    f"Time: {elapsed:.1f}s"
+                )
 
             with rewards_file.open("a", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow([gen, mean_fit, max_fit, min_fit, std_fit, elapsed])
 
-            with eval_rewards_file.open("a", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow([gen, fixed_eval_mean, fixed_eval_std])
+            if run_model_selection_eval:
+                with eval_rewards_file.open("a", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([gen, fixed_eval_mean, fixed_eval_std])
 
-            with eval_drop_stats_file.open("a", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(
-                    [
-                        gen,
-                        baseline_label,
-                        int(baseline_perfect_comm),
-                        fixed_eval_mean,
-                        fixed_eval_std,
-                        baseline_mean,
-                        baseline_std,
-                        mean_drop_ratio,
-                        std_drop_ratio,
-                        len(drop_ratios),
-                    ]
-                )
+                with eval_drop_stats_file.open("a", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(
+                        [
+                            gen,
+                            baseline_label,
+                            int(baseline_perfect_comm),
+                            fixed_eval_mean,
+                            fixed_eval_std,
+                            baseline_mean,
+                            baseline_std,
+                            mean_drop_ratio,
+                            std_drop_ratio,
+                            len(drop_ratios),
+                        ]
+                    )
 
-            if mean_drop_ratio < best_drop_ratio_all_time:
-                best_drop_ratio_all_time = mean_drop_ratio
-                np.savez(
-                    run_dir / "best_model.npz",
-                    **build_checkpoint_payload(mean_flat_params),
-                )
+                if mean_drop_ratio < best_drop_ratio_all_time:
+                    best_drop_ratio_all_time = mean_drop_ratio
+                    np.savez(
+                        run_dir / "best_model.npz",
+                        **build_checkpoint_payload(mean_flat_params),
+                    )
 
             if max_fit > best_fitness_all_time:
                 best_fitness_all_time = max_fit
@@ -1078,6 +1022,7 @@ def train(args):
             else:
                 pool.terminate()
             pool.join()
+        eval_env.close()
         configure_shared_running_normalizers(None, None)
     
     # Save hyperparameters
@@ -1086,8 +1031,10 @@ def train(args):
         "popsize": args.popsize,
         "episode_length": args.episode_length,
         "eval_episodes": args.eval_episodes,
+        "eval_freq_generations": args.eval_freq_generations,
         "model_selection_eval_episodes": model_selection_eval_episodes,
         "model_selection_eval_seed_mode": "advancing_paired",
+        "n_eval_envs": args.n_eval_envs,
         "fitness_shaping": args.fitness_shaping,
         "hidden_dims": list(hidden_dims),
         "activation": activation,
@@ -1139,6 +1086,24 @@ def parse_args():
     parser.add_argument("--episode-length", type=int, default=250, help="Episode length.")
     parser.add_argument("--eval-episodes", type=int, default=3, 
                         help="Episodes per individual (anti-overfitting). Default: 3")
+    parser.add_argument(
+        "--eval-freq-generations",
+        type=int,
+        default=1,
+        help="Run model-selection evaluation every N generations (final generation always evaluates).",
+    )
+    parser.add_argument(
+        "--n-eval-episodes",
+        type=int,
+        default=80,
+        help="Number of paired fixed-seed episodes for model-selection evaluation.",
+    )
+    parser.add_argument(
+        "--n-eval-envs",
+        type=int,
+        default=8,
+        help="Number of parallel async environments used for model-selection evaluation.",
+    )
     parser.add_argument("--fitness-shaping", type=str, default="centered_rank",
                         choices=["centered_rank", "z_score", "normalize", "none"],
                         help="Fitness shaping (evosax built-in). Default: centered_rank")

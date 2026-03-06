@@ -6,7 +6,7 @@ This module contains shared functions used across IQL, VDN, and QMIX implementat
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -283,10 +283,13 @@ def run_evaluation_vectorized_seeded(
     heuristic_policy_name: Optional[str] = None,
     heuristic_deterministic: bool = True,
     fixed_action: Optional[int] = None,
+    action_selector: Optional[Callable[[np.ndarray], np.ndarray]] = None,
 ) -> Tuple[float, float, List[float]]:
     """Run vectorized evaluation on an explicit seed list (paired-seed friendly).
 
     Each seed corresponds to one complete episode reward in the returned list.
+    When ``action_selector`` is provided, it is used instead of ``agent`` for
+    learned-policy action selection.
     """
     if n_eval_envs <= 0:
         raise ValueError("n_eval_envs must be positive")
@@ -365,6 +368,13 @@ def run_evaluation_vectorized_seeded(
                             obs[env_idx, agent_idx], deterministic=heuristic_deterministic
                         )
                         actions[env_idx, agent_idx] = int(action)
+            elif action_selector is not None:
+                actions = np.asarray(action_selector(obs), dtype=np.int64)
+                if actions.shape != (n_eval_envs, n_agents):
+                    raise ValueError(
+                        "action_selector must return an array with shape "
+                        f"({n_eval_envs}, {n_agents})"
+                    )
             else:
                 actions = select_actions_batched(
                     agent=agent,
