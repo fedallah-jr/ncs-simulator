@@ -351,7 +351,9 @@ class TwinQNetwork(nn.Module):
         if not hidden_dims:
             raise ValueError("hidden_dims must be non-empty")
 
-        self.feature_norm_layer = nn.LayerNorm(input_dim) if feature_norm else None
+        # Keep the two Q-functions fully independent, including input normalization.
+        self.q1_feature_norm_layer = nn.LayerNorm(input_dim) if feature_norm else None
+        self.q2_feature_norm_layer = nn.LayerNorm(input_dim) if feature_norm else None
 
         hidden1, last_dim1 = build_mlp_hidden(input_dim, hidden_dims, activation, layer_norm)
         out1 = nn.Linear(last_dim1, 1)
@@ -368,14 +370,37 @@ class TwinQNetwork(nn.Module):
         _init_linear(out2, gain=float(output_gain))
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.feature_norm_layer is not None:
-            x = self.feature_norm_layer(x)
-        return self.q1(x).squeeze(-1), self.q2(x).squeeze(-1)
+        x1 = self.q1_feature_norm_layer(x) if self.q1_feature_norm_layer is not None else x
+        x2 = self.q2_feature_norm_layer(x) if self.q2_feature_norm_layer is not None else x
+        return self.q1(x1).squeeze(-1), self.q2(x2).squeeze(-1)
 
     def q1_forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.feature_norm_layer is not None:
-            x = self.feature_norm_layer(x)
+        if self.q1_feature_norm_layer is not None:
+            x = self.q1_feature_norm_layer(x)
         return self.q1(x).squeeze(-1)
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        """Load current checkpoints and older ones with a shared input LayerNorm."""
+        if self.q1_feature_norm_layer is not None and self.q2_feature_norm_layer is not None:
+            legacy_weight = state_dict.get("feature_norm_layer.weight")
+            legacy_bias = state_dict.get("feature_norm_layer.bias")
+            if legacy_weight is not None and legacy_bias is not None:
+                state_dict = dict(state_dict)
+                state_dict.pop("feature_norm_layer.weight", None)
+                state_dict.pop("feature_norm_layer.bias", None)
+                state_dict.setdefault(
+                    "q1_feature_norm_layer.weight", legacy_weight.clone()
+                )
+                state_dict.setdefault(
+                    "q1_feature_norm_layer.bias", legacy_bias.clone()
+                )
+                state_dict.setdefault(
+                    "q2_feature_norm_layer.weight", legacy_weight.clone()
+                )
+                state_dict.setdefault(
+                    "q2_feature_norm_layer.bias", legacy_bias.clone()
+                )
+        return super().load_state_dict(state_dict, strict=strict)
 
 
 class QPLEXSIWeight(nn.Module):

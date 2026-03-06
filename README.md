@@ -22,6 +22,7 @@ The configuration file is divided into sections; each key controls a specific as
   - `"absolute"` (default): Reward equals negative tracking error (`r_t = -e_t`).
   - `"estimation_error"`: Reward equals negative weighted L1 estimation error between true state and controller estimate (`r_t = -||Q (x - x_hat)||_1`).
   - `"lqr_cost"`: Reward equals negative LQR stage cost (`r_t = -(x_t^T Q x_t + u_t^T R u_t)`).
+  - `"lqr_cost_immediate_surrogate"`: Reward equals the negative immediate control-mismatch surrogate `r_t = -e_t^T K_t^T R K_t e_t`, where `e_t = x_t - x_hat_t`. This penalizes the extra control effort induced by estimation error at the current step only; unlike `kf_info_m_noise`, it does not include the future state-cost effect via `B^T S_{t+1} B`.
   - `"kf_info"`: Reward equals `r_t = -tr((M_t + S_t) P_t)` where `M_t = K_t^T (R + B^T S_{t+1} B) K_t` (certainty-equivalent LQG weighting).
   - `"kf_info_m"`: Reward equals `r_t = -tr(M_t P_t)` (control-weighted estimation uncertainty).
   - `"kf_info_m_noise"`: Reward equals `r_t = -e_t^T M_t e_t` where `e_t = x_t - x_hat_t` (control-weighted actual estimation error; uses realized error instead of covariance).

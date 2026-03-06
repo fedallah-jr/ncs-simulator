@@ -40,6 +40,7 @@ class RewardDefinition:
             "absolute",
             "estimation_error",
             "lqr_cost",
+            "lqr_cost_immediate_surrogate",
             "kf_info",
             "kf_info_s",
             "kf_info_m",
@@ -49,8 +50,8 @@ class RewardDefinition:
         }:
             raise ValueError(
                 "state_error_reward must be 'absolute', 'estimation_error', "
-                "'lqr_cost', 'kf_info', 'kf_info_s', 'kf_info_m', 'kf_info_m_noise', "
-                "'kf_q', or 'kf_q_noise'"
+                "'lqr_cost', 'lqr_cost_immediate_surrogate', 'kf_info', 'kf_info_s', "
+                "'kf_info_m', 'kf_info_m_noise', 'kf_q', or 'kf_q_noise'"
             )
         if float(self.no_normalization_scale) <= 0.0:
             raise ValueError("no_normalization_scale must be > 0")
@@ -398,6 +399,7 @@ class NCS_Env(gym.Env):
             "kf_info_gain_m": 0.0,
             "kf_info_gain_s": 0.0,
             "kf_info_gain_m_noise": 0.0,
+            "lqr_cost_immediate_surrogate": 0.0,
         }
         self.last_reward_components: Dict[str, Dict[str, float]] = {
             f"agent_{i}": dict(base_components)
@@ -408,6 +410,7 @@ class NCS_Env(gym.Env):
         self.last_kf_info_gains_m: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_kf_info_gains_s: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_kf_info_gains_m_noise: List[float] = [0.0 for _ in range(self.n_agents)]
+        self.last_lqr_cost_immediate_surrogate_gains: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_kf_q_gains: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_kf_q_noise_gains: List[float] = [0.0 for _ in range(self.n_agents)]
         self.last_termination_reasons: List[str] = []
@@ -474,6 +477,7 @@ class NCS_Env(gym.Env):
             self.last_kf_info_gains_m[i] = 0.0
             self.last_kf_info_gains_s[i] = 0.0
             self.last_kf_info_gains_m_noise[i] = 0.0
+            self.last_lqr_cost_immediate_surrogate_gains[i] = 0.0
 
         # Store prior for each controller at current state index
         # This enables delayed measurement handling in network mode
@@ -669,6 +673,11 @@ class NCS_Env(gym.Env):
                     self.last_kf_info_gains_m_noise[i] = -float(e @ self._get_kf_info_matrix(i) @ e)
                 else:
                     self.last_kf_q_noise_gains[i] = -float(e @ self.state_cost_matrix @ e)
+            elif mode == "lqr_cost_immediate_surrogate":
+                e = self.plants[i].get_state().reshape(-1) - self.controllers[i].x_hat
+                self.last_lqr_cost_immediate_surrogate_gains[i] = -float(
+                    e @ self._get_lqr_immediate_surrogate_matrix(i) @ e
+                )
             elif mode == "kf_q":
                 self.last_kf_q_gains[i] = -float(np.trace(self.state_cost_matrix @ covariance))
 
@@ -1170,6 +1179,15 @@ class NCS_Env(gym.Env):
             return info_entry[k]
         return info_entry
 
+    def _get_lqr_immediate_surrogate_matrix(self, agent_idx: int) -> np.ndarray:
+        gain_entry = self.K_list[agent_idx]
+        if isinstance(gain_entry, list):
+            k = min(self.controllers[agent_idx].time_step, len(gain_entry) - 1)
+            gain = gain_entry[k]
+        else:
+            gain = gain_entry
+        return gain.T @ self.lqr_R @ gain
+
     def _get_kf_state_cost_matrix(self, agent_idx: int) -> np.ndarray:
         state_entry = self.S_list[agent_idx]
         if isinstance(state_entry, list):
@@ -1205,6 +1223,8 @@ class NCS_Env(gym.Env):
             return self.last_kf_info_gains[agent_idx]
         if mode == "kf_info_m_noise":
             return self.last_kf_info_gains_m_noise[agent_idx]
+        if mode == "lqr_cost_immediate_surrogate":
+            return self.last_lqr_cost_immediate_surrogate_gains[agent_idx]
         if mode == "kf_q":
             return self.last_kf_q_gains[agent_idx]
         if mode == "kf_q_noise":
@@ -1224,7 +1244,13 @@ class NCS_Env(gym.Env):
             return self._compute_estimation_error(agent_idx, state)
         if self.reward_definition.mode == "lqr_cost":
             return float(self.last_lqr_costs[agent_idx])
-        if self.reward_definition.mode in {"kf_info", "kf_info_s", "kf_info_m", "kf_info_m_noise"}:
+        if self.reward_definition.mode in {
+            "lqr_cost_immediate_surrogate",
+            "kf_info",
+            "kf_info_s",
+            "kf_info_m",
+            "kf_info_m_noise",
+        }:
             return 0.0
         return self._compute_state_error(state)
 
@@ -1330,7 +1356,15 @@ class NCS_Env(gym.Env):
             error_reward = -curr_error
         elif definition.mode == "lqr_cost":
             error_reward = -curr_error
-        elif definition.mode in {"kf_info", "kf_info_s", "kf_info_m", "kf_info_m_noise", "kf_q", "kf_q_noise"}:
+        elif definition.mode in {
+            "lqr_cost_immediate_surrogate",
+            "kf_info",
+            "kf_info_s",
+            "kf_info_m",
+            "kf_info_m_noise",
+            "kf_q",
+            "kf_q_noise",
+        }:
             error_reward = float(info_gain)
         else:
             raise ValueError(f"Unsupported reward mode: {definition.mode}")
@@ -1348,6 +1382,8 @@ class NCS_Env(gym.Env):
         }
         if definition.mode == "lqr_cost":
             components["lqr_cost"] = float(curr_error)
+        elif definition.mode == "lqr_cost_immediate_surrogate":
+            components["lqr_cost_immediate_surrogate"] = float(-error_reward)
         return components
 
     def _get_observations(self) -> Dict[str, np.ndarray]:
