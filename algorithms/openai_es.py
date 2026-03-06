@@ -566,10 +566,11 @@ def train(args):
     else:
         print("⚠ Running on CPU only (no TPU/GPU detected)")
     print(f"Fitness evaluations will run on {args.n_workers} CPU workers in parallel")
-    fixed_eval_seeds: List[int] = list(range(30))
+    model_selection_eval_episodes = 30
 
     # 2. Setup Flax Model & Initial Params
     master_rng = jax.random.PRNGKey(args.seed if args.seed is not None else 0)
+    master_rng, eval_rng = jax.random.split(master_rng)
     model = create_policy_net(
         action_dim,
         hidden_dims=hidden_dims,
@@ -939,6 +940,14 @@ def train(args):
             strategy_context["state"] = context_state
             best_strategy_state = strategy_context["state"]
             mean_flat_params = np.array(best_strategy_state.mean)
+            eval_rng, rng_model_selection_eval = jax.random.split(eval_rng)
+            model_selection_eval_seeds = [
+                int(jax.random.randint(
+                    jax.random.fold_in(rng_model_selection_eval, i),
+                    (), minval=0, maxval=2**31 - 1, dtype=jnp.int32
+                ))
+                for i in range(model_selection_eval_episodes)
+            ]
 
             eval_obs_state = None
             if obs_normalizer is not None:
@@ -957,7 +966,7 @@ def train(args):
                 flat_params=mean_flat_params,
                 unravel_fn=unravel_fn,
                 predict_fn=eval_predict,
-                episode_seeds=fixed_eval_seeds,
+                episode_seeds=model_selection_eval_seeds,
                 obs_state=eval_obs_state,
                 obs_norm_clip=args.obs_norm_clip,
                 obs_norm_eps=args.obs_norm_eps,
@@ -980,7 +989,7 @@ def train(args):
                 flat_params=None,
                 unravel_fn=unravel_fn,
                 predict_fn=eval_predict,
-                episode_seeds=fixed_eval_seeds,
+                episode_seeds=model_selection_eval_seeds,
                 obs_state=eval_obs_state,
                 obs_norm_clip=args.obs_norm_clip,
                 obs_norm_eps=args.obs_norm_eps,
@@ -1007,7 +1016,7 @@ def train(args):
             print(
                 f"Gen {gen}/{args.generations} | Mean: {mean_fit:.1f} | "
                 f"Max: {max_fit:.1f} | Min: {min_fit:.1f} | Std: {std_fit:.1f} | "
-                f"Eval(0-29): {fixed_eval_mean:.1f} ± {fixed_eval_std:.1f} | "
+                f"Eval({model_selection_eval_episodes} eps): {fixed_eval_mean:.1f} ± {fixed_eval_std:.1f} | "
                 f"Baseline({baseline_label}): {baseline_mean:.1f} ± {baseline_std:.1f} | "
                 f"Drop: {mean_drop_ratio:.6f} ± {std_drop_ratio:.6f} | "
                 f"Time: {elapsed:.1f}s"
@@ -1077,7 +1086,8 @@ def train(args):
         "popsize": args.popsize,
         "episode_length": args.episode_length,
         "eval_episodes": args.eval_episodes,
-        "eval_best_fixed_seeds": fixed_eval_seeds,
+        "model_selection_eval_episodes": model_selection_eval_episodes,
+        "model_selection_eval_seed_mode": "advancing_paired",
         "fitness_shaping": args.fitness_shaping,
         "hidden_dims": list(hidden_dims),
         "activation": activation,
