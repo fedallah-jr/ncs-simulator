@@ -6,6 +6,7 @@ This directory contains tools for analyzing and visualizing policies in the Netw
 
 - **`visualize_policy.py`**: Main visualization tool for plotting policy state evolution
 - **`heuristic_policies.py`**: Collection of simple baseline policies
+- **`benchmark_local_estimation_gap.py`**: Compare environment-step runtime with the optional local estimation-gap observation disabled vs enabled
 - **`__init__.py`**: Package initialization
 
 ## Visualization Tool
@@ -19,6 +20,17 @@ The `visualize_policy.py` script allows you to visualize how policies control th
 - **Animated videos** showing state evolution in real-time (optional)
 
 ### Basic Usage
+
+#### Benchmark Local Estimation-Gap Overhead
+
+```bash
+python -m tools.benchmark_local_estimation_gap \
+    --config configs/marl_absolute_plants.json \
+    --steps 5000 \
+    --warmup-steps 1000 \
+    --repeats 3 \
+    --policy always_send
+```
 
 #### Visualize a Heuristic Policy (Multi-Agent)
 

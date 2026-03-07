@@ -65,8 +65,9 @@ When `perfect_communication=true`, the whole communication logic is bypassed dir
 - `state_history_window`: Number of past states appended to the observation. If omitted, it defaults to `history_window`.
 - `throughput_window`: Sliding window in steps used to estimate recent channel throughput in kbps. It can be a single integer such as `50` or an array such as `[200, 100, 10, 5]` to compute multiple throughput values at different time scales.
 - `quantization_step`: Step size for quantizing plant state before it appears in observations. Set to `0` or omit it to disable quantization.
+- `include_local_estimation_gap`: When `true`, append a per-agent local estimation-gap vector of size `state_dim`. It is computed as `x_hat_sensor_local - x_hat_controller_local`, where the sensor-local tracker updates on every local measurement and the shadow controller tracker updates only after the matching app ACK is observed. This is disabled by default.
 
-Observations are laid out as `[current_state, current_throughput(s), prev_states..., prev_statuses..., prev_throughputs...]`, where each "prev" block holds `history_window` entries except `prev_states`, which uses `state_history_window`. `current_state` is the quantized plant state.
+Observations are laid out as `[current_state, local_estimation_gap?, current_throughput(s), prev_states..., prev_statuses..., prev_throughputs...]`, where `local_estimation_gap?` appears only when `include_local_estimation_gap=true`. Each "prev" block holds `history_window` entries except `prev_states`, which uses `state_history_window`. `current_state` is the quantized plant state.
 
 `history_window` and `state_history_window` are separate on purpose. Past state vectors are much more expensive in observation size than past status or throughput scalars, so you may want longer network/status history without also appending as many previous state vectors.
 
@@ -97,6 +98,8 @@ Note: `tx_buffer_bytes` applies only to data packets. MAC ACKs and app ACKs are 
 
 - `use_true_state_control`: When `true`, controllers compute `u = -K x` using the true plant state instead of the Kalman estimate `x_hat`. The Kalman filter still runs, but control no longer depends on it.
 - `measurement_noise_cov`: Global covariance matrix for additive sensor measurement noise `z = x + v`, where `v ~ N(0, R)`. The same noisy measurement appears in the agent observation and is transmitted to the controller when `action=1`. The Kalman filter uses this same matrix as `R`, so a zero matrix gives perfect measurements. Individual heterogeneous plants can override this with `system.heterogeneous_plants[i].measurement_noise_cov`.
+
+When `observation.include_local_estimation_gap=true`, the sensor-local trackers use the sensor's best local reconstruction of the controller path. If `use_true_state_control=true`, that reconstruction is still approximate because the sensor does not directly observe the controller's true-state control input.
 
 ### `training_evaluation`
 

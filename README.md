@@ -2,15 +2,6 @@
 
 This project models multiple physical plants that share a single IEEE 802.15.4-style channel. Sensors decide each timestep whether to transmit their state, controllers run a Kalman-filtered LQR policy, and a CSMA/CA-inspired medium access layer arbitrates the shared network. The simulation behaviour is configured with the json files from the configs directory.
 
-## Configuration
-
-Input configuration files live under [`configs/`](configs/). Detailed config documentation now lives in [`configs/README.md`](configs/README.md), including:
-
-- input config sections and field semantics
-- notes on observation history fields such as `history_window` vs `state_history_window`
-- the available config files in this repo
-- the saved run `config.json` format written under `outputs/`
-
 ## Algorithms
 
 Learning-based baselines live under `algorithms/`:
@@ -82,7 +73,7 @@ Policy testing lives in `tools/policy_tester.py` and evaluates a target policy a
 - Example (heuristics only): `python -m tools.policy_tester --config configs/marl_absolute_plants.json --only-heuristics --num-seeds 50`
   - Evaluates heuristic baselines (`zero_wait`, `perfect_sync`, `always_send`, `never_send`, `random_50`) plus a perfect communication baseline (`always_send` with `network.perfect_communication=true`).
   - `perfect_sync` supports aliases `perfect_sync_n2`, `perfect_sync_n3`, ... (equivalently `perfect_sync_2`, `perfect_sync_3`, ...) to enforce extra idle spacing.
-  - Useful for establishing baseline performance metrics before training.
+- Useful for establishing baseline performance metrics before training.
 
 ## Configuration
 

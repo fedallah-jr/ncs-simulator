@@ -13,6 +13,7 @@ from gymnasium import spaces
 
 from .controller import (
     Controller,
+    KalmanStateTracker,
     compute_discrete_lqr_solution,
     compute_finite_horizon_lqr_solution,
 )
@@ -155,7 +156,9 @@ class NCS_Env(gym.Env):
         self.throughput_windows = [tp_window] if isinstance(tp_window, int) else list(tp_window)
         self.n_throughput_windows = len(self.throughput_windows)
         self.quantization_step = observation_cfg.get("quantization_step", 0.05)
-        self.include_uncertainty = bool(observation_cfg.get("include_uncertainty", False))
+        self.include_local_estimation_gap = bool(
+            observation_cfg.get("include_local_estimation_gap", False)
+        )
 
         # Create a local RNG instance for this environment
         self.np_random, _ = gym.utils.seeding.np_random(seed)
@@ -167,7 +170,7 @@ class NCS_Env(gym.Env):
 
         obs_dim = (
             self.state_dim  # current state
-            + (self.state_dim if self.include_uncertainty else 0)  # diag(P) uncertainty
+            + (self.state_dim if self.include_local_estimation_gap else 0)  # local estimation gap
             + self.n_throughput_windows  # current throughputs (one per window)
             + self.state_history_window * self.state_dim  # previous states
             + self.history_window  # previous statuses
@@ -301,19 +304,35 @@ class NCS_Env(gym.Env):
                     initial_covariance=self.initial_estimate_cov,
                 )
             )
-
-        if self.include_uncertainty:
-            self._agent_P_init_tables: List[List[np.ndarray]] = []
-            self._agent_P_open_tables: List[List[np.ndarray]] = []
+        if self.include_local_estimation_gap:
+            self.local_sensor_trackers: List[KalmanStateTracker] = []
+            self.local_shadow_controllers: List[Controller] = []
             for i in range(self.n_agents):
-                A_i, _, W_i = agent_matrices[i]
-                P_init = [self.initial_estimate_cov.copy()]
-                P_open = [np.zeros_like(W_i)]
-                for _ in range(self.episode_length + 1):
-                    P_init.append(A_i @ P_init[-1] @ A_i.T + W_i)
-                    P_open.append(A_i @ P_open[-1] @ A_i.T + W_i)
-                self._agent_P_init_tables.append(P_init)
-                self._agent_P_open_tables.append(P_open)
+                initial_estimate = np.zeros(self.state_dim)
+                self.local_sensor_trackers.append(
+                    KalmanStateTracker(
+                        agent_matrices[i][0],
+                        agent_matrices[i][1],
+                        initial_estimate,
+                        process_noise_cov=agent_matrices[i][2],
+                        measurement_noise_cov=self.agent_measurement_noise_covs[i],
+                        initial_covariance=self.initial_estimate_cov,
+                    )
+                )
+                self.local_shadow_controllers.append(
+                    Controller(
+                        agent_matrices[i][0],
+                        agent_matrices[i][1],
+                        self.K_list[i],
+                        initial_estimate,
+                        process_noise_cov=agent_matrices[i][2],
+                        measurement_noise_cov=self.agent_measurement_noise_covs[i],
+                        initial_covariance=self.initial_estimate_cov,
+                    )
+                )
+        else:
+            self.local_sensor_trackers = []
+            self.local_shadow_controllers = []
 
         network_cfg = self._net_cfg
         self.perfect_communication = bool(network_cfg.get("perfect_communication", False))
@@ -359,6 +378,9 @@ class NCS_Env(gym.Env):
             self.state_history.append(state_hist)
 
         self.pending_transmissions: List[Dict[int, Dict[str, int]]] = [
+            {} for _ in range(self.n_agents)
+        ]
+        self.local_sent_measurements: List[Dict[int, np.ndarray]] = [
             {} for _ in range(self.n_agents)
         ]
         self._last_cleanup_step = 0  # Track when we last cleaned up pending transmissions
@@ -417,8 +439,34 @@ class NCS_Env(gym.Env):
         self.last_termination_agents: List[int] = []
         self.last_bad_termination = False
         self.last_dropped_data_packets: List[Dict[str, Any]] = []
-        if self.include_uncertainty:
-            self._agent_last_confirmed_step: List[int] = [-1] * self.n_agents
+
+    def _initialize_local_estimation_gap_after_reset(self) -> None:
+        if not self.include_local_estimation_gap:
+            return
+        initial_estimate = np.zeros(self.state_dim)
+        for tracker in self.local_sensor_trackers:
+            tracker.reset(initial_estimate)
+        for controller in self.local_shadow_controllers:
+            controller.reset(initial_estimate)
+        for i in range(self.n_agents):
+            self.local_sensor_trackers[i].update(self.last_sensor_measurements[i])
+
+    def _apply_local_shadow_ack(
+        self,
+        sensor_id: int,
+        measurement_timestamp: int,
+    ) -> bool:
+        if not self.include_local_estimation_gap:
+            return False
+        if sensor_id < 0 or sensor_id >= self.n_agents:
+            return False
+        measurement = self.local_sent_measurements[sensor_id].pop(measurement_timestamp, None)
+        if measurement is None:
+            return False
+        return self.local_shadow_controllers[sensor_id].delayed_update(
+            measurement,
+            measurement_timestamp,
+        )
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None):
         """Reset environment to initial state."""
@@ -446,6 +494,7 @@ class NCS_Env(gym.Env):
         self.network.reset()
         self._initialize_tracking_structures()
         self._update_sensor_measurements()
+        self._initialize_local_estimation_gap_after_reset()
         self._reset_running_returns()
         self.last_network_tick_trace = None
         for idx in range(self.n_agents):
@@ -483,6 +532,9 @@ class NCS_Env(gym.Env):
         # This enables delayed measurement handling in network mode
         for i in range(self.n_agents):
             self.controllers[i].store_prior(state_index)
+        if self.include_local_estimation_gap:
+            for i in range(self.n_agents):
+                self.local_shadow_controllers[i].store_prior(state_index)
 
         # Kalman filter measurement update (conditionally, based on packet delivery)
         # Note: predict() is called AFTER plant update to maintain correct timing
@@ -497,9 +549,9 @@ class NCS_Env(gym.Env):
                     self.net_tx_acks[i] += 1
                     measurement = self.last_sensor_measurements[i]
                     self.controllers[i].update(measurement)
+                    if self.include_local_estimation_gap:
+                        self.local_shadow_controllers[i].update(measurement)
                     self.last_measurements[i] = measurement
-                    if self.include_uncertainty:
-                        self._agent_last_confirmed_step[i] = state_index
                     self._record_decision(i, status=1)
                     # Use state_index for consistency (though _log_successful_comm
                     # returns early for perfect_communication anyway)
@@ -548,10 +600,16 @@ class NCS_Env(gym.Env):
                     entry = self._record_decision(i, status=2)
                     entry["send_timestamp"] = measurement_timestamp
                     self.pending_transmissions[i][measurement_timestamp] = entry
+                    if self.include_local_estimation_gap:
+                        self.local_sent_measurements[i][measurement_timestamp] = np.asarray(
+                            measurement,
+                            dtype=float,
+                        ).copy()
                 else:
                     self._record_decision(i, status=0)
             # Run the micro-slot network for this environment step
             pending_delivered_packets: List[Any] = []
+            pending_delivered_app_acks: List[Dict[str, int]] = []
             slots_to_run = self.network.slots_per_step
             for _ in range(slots_to_run):
                 network_result = self.network.run_slot()
@@ -566,16 +624,12 @@ class NCS_Env(gym.Env):
                         continue
                     sensor_id = int(sensor_id)
                     measurement_timestamp = int(measurement_timestamp)
-                    if 0 <= sensor_id < self.n_agents:
-                        self.net_tx_acks[sensor_id] += 1
-                        self._record_observed_goodput(sensor_id, measurement_timestamp)
-                        if self.include_uncertainty:
-                            if measurement_timestamp > self._agent_last_confirmed_step[sensor_id]:
-                                self._agent_last_confirmed_step[sensor_id] = measurement_timestamp
-                    entry = self.pending_transmissions[sensor_id].pop(measurement_timestamp, None)
-                    if entry is not None:
-                        entry["status"] = 1
-                        self._log_successful_comm(sensor_id, measurement_timestamp, self.timestep)
+                    pending_delivered_app_acks.append(
+                        {
+                            "sensor_id": sensor_id,
+                            "measurement_timestamp": measurement_timestamp,
+                        }
+                    )
 
                 # Transport layer cannot detect dropped packets - they remain as status=2
                 # (waiting for ACK that will never arrive)
@@ -650,6 +704,28 @@ class NCS_Env(gym.Env):
                         existing_age = delivered_message_ages.get(controller_id)
                         if existing_age is None or age_steps < existing_age:
                             delivered_message_ages[controller_id] = age_steps
+            if pending_delivered_app_acks:
+                pending_delivered_app_acks.sort(
+                    key=lambda ack: (int(ack["sensor_id"]), int(ack["measurement_timestamp"]))
+                )
+                for app_ack in pending_delivered_app_acks:
+                    sensor_id = int(app_ack["sensor_id"])
+                    measurement_timestamp = int(app_ack["measurement_timestamp"])
+                    if 0 <= sensor_id < self.n_agents:
+                        self.net_tx_acks[sensor_id] += 1
+                        self._record_observed_goodput(sensor_id, measurement_timestamp)
+                        self._apply_local_shadow_ack(sensor_id, measurement_timestamp)
+                        entry = self.pending_transmissions[sensor_id].pop(
+                            measurement_timestamp,
+                            None,
+                        )
+                        if entry is not None:
+                            entry["status"] = 1
+                            self._log_successful_comm(
+                                sensor_id,
+                                measurement_timestamp,
+                                self.timestep,
+                            )
             if trace_this_tick:
                 self.last_network_tick_trace = self.network.finish_tick_trace()
 
@@ -685,7 +761,12 @@ class NCS_Env(gym.Env):
         lqr_costs = None
         if self.track_lqr_cost or self.reward_definition.mode == "lqr_cost":
             lqr_costs = [0.0 for _ in range(self.n_agents)]
+        local_controls: Optional[List[np.ndarray]] = None
+        if self.include_local_estimation_gap:
+            local_controls = []
         for i in range(self.n_agents):
+            if self.include_local_estimation_gap:
+                local_controls.append(self.local_shadow_controllers[i].compute_control())
             if self.use_true_state_control:
                 x = np.asarray(self.plants[i].get_state(), dtype=float).reshape(-1)
                 u = self.controllers[i].compute_control_from_state(x)
@@ -705,6 +786,10 @@ class NCS_Env(gym.Env):
         # Prepares x_hat[k|k-1] for the next timestep's measurement update
         for i in range(self.n_agents):
             self.controllers[i].predict()
+        if self.include_local_estimation_gap and local_controls is not None:
+            for i in range(self.n_agents):
+                self.local_shadow_controllers[i].predict()
+                self.local_sensor_trackers[i].predict(local_controls[i])
 
         rewards = {}
         termination_triggered = False
@@ -808,6 +893,9 @@ class NCS_Env(gym.Env):
         # Get observations AFTER plant update (Gym step contract)
         # step() returns the resulting state s[k+1] after action a[k] is applied
         self._update_sensor_measurements()
+        if self.include_local_estimation_gap:
+            for i in range(self.n_agents):
+                self.local_sensor_trackers[i].update(self.last_sensor_measurements[i])
         observations = self._get_observations()
         infos = self._get_info()
         return observations, rewards, terminated, truncated, infos
@@ -845,6 +933,7 @@ class NCS_Env(gym.Env):
             ]
             for ts in stale_timestamps:
                 self.pending_transmissions[agent_idx].pop(ts, None)
+                self.local_sent_measurements[agent_idx].pop(ts, None)
 
     def _sample_initial_state(self, rng: Optional[np.random.Generator] = None) -> np.ndarray:
         """
@@ -1417,15 +1506,12 @@ class NCS_Env(gym.Env):
             cursor = 0
             obs_values[cursor : cursor + self.state_dim] = quantized_state
             cursor += self.state_dim
-            if self.include_uncertainty:
-                last_conf = self._agent_last_confirmed_step[i]
-                if last_conf < 0:
-                    k = self.timestep
-                    P_agent = self._agent_P_init_tables[i][min(k, self.episode_length)]
-                else:
-                    k = self.timestep - 1 - last_conf
-                    P_agent = self._agent_P_open_tables[i][min(k, self.episode_length)]
-                obs_values[cursor : cursor + self.state_dim] = np.diag(P_agent).astype(np.float32)
+            if self.include_local_estimation_gap:
+                local_gap = (
+                    self.local_sensor_trackers[i].x_hat
+                    - self.local_shadow_controllers[i].x_hat
+                )
+                obs_values[cursor : cursor + self.state_dim] = local_gap.astype(np.float32)
                 cursor += self.state_dim
             obs_values[cursor : cursor + self.n_throughput_windows] = throughputs
             cursor += self.n_throughput_windows

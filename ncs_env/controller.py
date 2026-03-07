@@ -197,6 +197,54 @@ def compute_finite_horizon_lqr_gains(
     return gains
 
 
+class KalmanStateTracker:
+    """Lightweight Kalman filter wrapper for local state tracking."""
+
+    def __init__(
+        self,
+        A: np.ndarray,
+        B: np.ndarray,
+        initial_estimate: np.ndarray,
+        process_noise_cov: np.ndarray,
+        measurement_noise_cov: Optional[np.ndarray] = None,
+        initial_covariance: Optional[np.ndarray] = None,
+    ):
+        state_dim = A.shape[0]
+        self.initial_covariance = (
+            np.eye(state_dim) if initial_covariance is None else initial_covariance.copy()
+        )
+
+        self.kf = KalmanFilter(dim_x=state_dim, dim_z=state_dim)
+        self.kf.F = A.copy()
+        self.kf.B = B.copy()
+        self.kf.H = np.eye(state_dim)
+        self.kf.Q = process_noise_cov.copy()
+        if measurement_noise_cov is None:
+            self.kf.R = np.zeros((state_dim, state_dim))
+        else:
+            self.kf.R = measurement_noise_cov.copy()
+        self.kf.x = initial_estimate.copy().reshape(-1, 1)
+        self.kf.P = self.initial_covariance.copy()
+
+    @property
+    def x_hat(self) -> np.ndarray:
+        return self.kf.x.flatten()
+
+    @property
+    def P(self) -> np.ndarray:
+        return self.kf.P
+
+    def predict(self, control: np.ndarray) -> None:
+        self.kf.predict(u=np.asarray(control, dtype=float).reshape(-1, 1))
+
+    def update(self, measurement: np.ndarray) -> None:
+        self.kf.update(np.asarray(measurement, dtype=float).reshape(-1, 1))
+
+    def reset(self, initial_estimate: np.ndarray) -> None:
+        self.kf.x = np.asarray(initial_estimate, dtype=float).reshape(-1, 1)
+        self.kf.P = self.initial_covariance.copy()
+
+
 class Controller:
     """
     Remote controller with Kalman-filtered state estimation and LQR control.
