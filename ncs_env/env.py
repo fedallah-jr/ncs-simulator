@@ -170,7 +170,9 @@ class NCS_Env(gym.Env):
 
         obs_dim = (
             self.state_dim  # current state
-            + (self.state_dim if self.include_local_estimation_gap else 0)  # local estimation gap
+            + (
+                2 * self.state_dim if self.include_local_estimation_gap else 0
+            )  # local estimation gap + sensor covariance diagonal
             + self.n_throughput_windows  # current throughputs (one per window)
             + self.state_history_window * self.state_dim  # previous states
             + self.history_window  # previous statuses
@@ -440,7 +442,7 @@ class NCS_Env(gym.Env):
         self.last_bad_termination = False
         self.last_dropped_data_packets: List[Dict[str, Any]] = []
 
-    def _initialize_local_estimation_gap_after_reset(self) -> None:
+    def _initialize_local_observer_features_after_reset(self) -> None:
         if not self.include_local_estimation_gap:
             return
         initial_estimate = np.zeros(self.state_dim)
@@ -494,7 +496,7 @@ class NCS_Env(gym.Env):
         self.network.reset()
         self._initialize_tracking_structures()
         self._update_sensor_measurements()
-        self._initialize_local_estimation_gap_after_reset()
+        self._initialize_local_observer_features_after_reset()
         self._reset_running_returns()
         self.last_network_tick_trace = None
         for idx in range(self.n_agents):
@@ -1512,6 +1514,11 @@ class NCS_Env(gym.Env):
                     - self.local_shadow_controllers[i].x_hat
                 )
                 obs_values[cursor : cursor + self.state_dim] = local_gap.astype(np.float32)
+                cursor += self.state_dim
+                sensor_cov_diag = np.maximum(np.diag(self.local_sensor_trackers[i].P), 0.0)
+                obs_values[cursor : cursor + self.state_dim] = sensor_cov_diag.astype(
+                    np.float32
+                )
                 cursor += self.state_dim
             obs_values[cursor : cursor + self.n_throughput_windows] = throughputs
             cursor += self.n_throughput_windows
