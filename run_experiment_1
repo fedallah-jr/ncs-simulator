@@ -98,7 +98,8 @@ run_one "algorithms.marl_iql" "iql" "iql_doubleq" \
   --no-normalize-obs \
   --feature-norm \
   --layer-norm \
-  --set reward.normalize=false
+  --set reward.normalize=false \
+  --set observation.include_local_estimation_gap=true
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then
