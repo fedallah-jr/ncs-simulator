@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # MARL experiment batch 1: IQL double Q on heterogeneous plants.
-# Single-stage training with kf_info_m_noise + reward normalization.
+# Single-stage training with kf_info_m_noise, reward normalization on.
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
