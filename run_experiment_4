@@ -93,9 +93,7 @@ run_one() {
 run_one "algorithms.marl_mappo" "mappo" "mappo_team_reward" \
   --no-normalize-obs \
   --feature-norm \
-  --layer-norm \
-  --set reward.normalize=false \
-  --set observation.include_local_estimation_gap=true
+  --layer-norm
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then

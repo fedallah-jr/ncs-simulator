@@ -95,9 +95,7 @@ run_one "algorithms.marl_hasac" "hasac" "hasac" \
   --no-normalize-obs \
   --feature-norm \
   --layer-norm \
-  --value-norm \
-  --set reward.normalize=false \
-  --set observation.include_local_estimation_gap=true
+  --value-norm
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then

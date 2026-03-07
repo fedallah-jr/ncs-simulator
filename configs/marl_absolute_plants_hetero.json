@@ -30,7 +30,7 @@
     "R": [[0.02]]
   },
   "reward": {
-    "state_error_reward": "lqr_cost",
+    "state_error_reward": "lqr_cost_immediate_surrogate",
     "comm_penalty_alpha": 0.0,
     "comm_throughput_floor": 0.0,
     "normalize": false,
@@ -38,7 +38,7 @@
     "reward_clip_max": 10,
     "reward_clip_min": -50, 
     "evaluation": {
-      "state_error_reward": "lqr_cost",
+      "state_error_reward": "lqr_cost_immediate_surrogate",
       "comm_penalty_alpha": 0.0,
       "simple_comm_penalty_alpha": 0.0,
       "normalize": false
@@ -56,7 +56,8 @@
     "history_window": 10,
     "state_history_window": 10,
     "throughput_window": [2, 3, 5, 10, 15],
-    "quantization_step": 0
+    "quantization_step": 0,
+    "include_local_estimation_gap": true
   },
   "network": {
     "data_rate_kbps": 100,
