@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # MARL experiment batch 3: VDN double Q on heterogeneous plants.
-# Single-stage training with kf_info_m_noise, reward normalization on.
+# Single-stage training with kf_info_m_noise, reward normalization off.
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${PROJECT_ROOT}"
@@ -99,7 +99,7 @@ run_one "algorithms.marl_vdn" "vdn" "vdn_doubleq" \
   --feature-norm \
   --layer-norm \
   --set reward.state_error_reward=kf_info_m_noise \
-  --set reward.normalize=true
+  --set reward.normalize=false
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then
