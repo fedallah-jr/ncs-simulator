@@ -50,23 +50,6 @@ All MARL algorithms (IQL, VDN, QMIX, QPLEX, MAPPO, HAPPO) support observation no
 - `--obs-norm-clip`: Clip normalized observations to +/- this value (<=0 disables).
 - `--obs-norm-eps`: Epsilon for observation normalization.
 
-## Behavioral Cloning (Actor-Only)
-
-Generate an actor-only behavioral cloning dataset from a heuristic policy:
-```bash
-python -m tools.generate_bc_dataset --config configs/marl_absolute_plants.json \
-  --episodes 50 --episode-length 250 --output outputs/bc_zero_wait.npz
-```
-
-Warm-start OpenAI-ES from the dataset:
-```bash
-python -m algorithms.openai_es --config configs/marl_absolute_plants.json \
-  --bc-dataset outputs/bc_zero_wait.npz --bc-epochs 10 --generations 1000
-```
-
-Note: the current dataset stores only observations and actions. We plan to extend
-behavioral cloning to include critic and Q-function targets in a future update.
-
 CLI flags let you change environment parameters. Use `--output-root` (defaults to `outputs/`) to control where training artifacts land. Each run calls `utils.run_utils.prepare_run_directory(...)`, which creates a sequentially numbered folder for the algorithm (e.g., `iql_0`, `iql_1`, `vdn_0`, etc.). All training details are preserved in the saved config file. That directory always contains:
 
 - **Model Checkpoints:**
@@ -75,8 +58,6 @@ CLI flags let you change environment parameters. Use `--output-root` (defaults t
 - `training_rewards.csv`: A simple CSV table tracking performance. For OpenAI-ES it logs `[generation, mean_reward, max_reward, time]`.
 - `evaluation_drop_stats.csv`: Training-time baseline comparison stats per eval step: baseline policy, policy/baseline mean/std rewards, and drop-ratio mean/std used for `best_model.pt` selection.
 - **`config.json`**, which combines the effective environment configuration used by the run (including CLI `--set` overrides, when provided) with a `training_run` section containing the algorithm name, timestamp, source config path, and all hyperparameters from the run. 
-
-Available input config files are documented in [`configs/README.md`](configs/README.md).
 
 ## Experiment Scripts
 
@@ -102,3 +83,12 @@ Policy testing lives in `tools/policy_tester.py` and evaluates a target policy a
   - Evaluates heuristic baselines (`zero_wait`, `perfect_sync`, `always_send`, `never_send`, `random_50`) plus a perfect communication baseline (`always_send` with `network.perfect_communication=true`).
   - `perfect_sync` supports aliases `perfect_sync_n2`, `perfect_sync_n3`, ... (equivalently `perfect_sync_2`, `perfect_sync_3`, ...) to enforce extra idle spacing.
   - Useful for establishing baseline performance metrics before training.
+
+## Configuration
+
+Input configuration files live under [`configs/`](configs/). Detailed config documentation now lives in [`configs/README.md`](configs/README.md), including:
+
+- input config sections and field semantics
+- notes on observation history fields such as `history_window` vs `state_history_window`
+- the available config files in this repo
+- the saved run `config.json` format written under `outputs/`

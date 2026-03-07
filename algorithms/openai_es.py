@@ -41,7 +41,6 @@ from utils.reward_normalization import (
     configure_shared_running_normalizers,
     reset_shared_running_normalizers,
 )
-from utils.bc import BCPretrainConfig, JaxActorBCAdapter, load_bc_dataset, pretrain_actor
 from utils.marl.obs_normalization import RunningObsNormalizer
 from utils.run_utils import prepare_run_directory, save_config_with_hyperparameters
 
@@ -409,16 +408,6 @@ def train(args):
     import optax
     from evosax.algorithms.distribution_based import Open_ES
     
-    if args.init_checkpoint is not None and args.bc_dataset is not None:
-        raise ValueError("--init-checkpoint and --bc-dataset are mutually exclusive")
-    if args.bc_epochs > 0 and args.bc_dataset is None:
-        raise ValueError("--bc-epochs requires --bc-dataset")
-    if args.bc_dataset is not None and args.bc_epochs <= 0:
-        raise ValueError("--bc-dataset requires --bc-epochs > 0")
-    if args.bc_batch_size <= 0:
-        raise ValueError("--bc-batch-size must be positive")
-    if args.bc_init_std < 0.0:
-        raise ValueError("--bc-init-std must be >= 0")
     if args.eval_freq_generations <= 0:
         raise ValueError("--eval-freq-generations must be positive")
     if args.n_eval_episodes <= 0:
@@ -442,7 +431,7 @@ def train(args):
     action_dim = dummy_env.action_space["agent_0"].n
     dummy_env.close()
     input_dim = obs_dim + (n_agents if use_agent_id else 0)
-    # obs_normalizer is initialized later - either from BC dataset or fresh
+    # obs_normalizer may be restored from a checkpoint or created fresh
     obs_normalizer: Optional[RunningObsNormalizer] = None
 
     # Determine architecture (may be overridden by compatible checkpoints)
@@ -512,16 +501,13 @@ def train(args):
     def eval_predict(params, obs):
         return jnp.argmax(model.apply(params, obs), axis=1)
 
-    bc_lr: Optional[float] = None
     pretrained_params: Optional[Any] = None
-    pretrained_flat: Optional[np.ndarray] = None
 
     # Load .pt checkpoint weights (architecture was already overridden above)
     if _pt_state_dict is not None:
         pretrained_params = _pt_state_dict_to_flax(
             _pt_state_dict, params_template, hidden_dims,
         )
-        pretrained_flat = np.array(flatten_util.ravel_pytree(pretrained_params)[0])
         if args.normalize_obs and _pt_obs_norm_state and _pt_obs_norm_state.get("enabled", False):
             clip_value = None if args.obs_norm_clip <= 0 else float(args.obs_norm_clip)
             obs_normalizer = RunningObsNormalizer.from_state_dict(_pt_obs_norm_state)
@@ -529,74 +515,15 @@ def train(args):
             obs_normalizer.eps = float(args.obs_norm_eps)
         print(f"[PT] Initialized {num_params} params from {args.init_checkpoint}")
 
-    bc_dataset = None
-    if args.bc_dataset is not None:
-        bc_dataset = load_bc_dataset(args.bc_dataset)
-        if bc_dataset.num_steps <= 0:
-            raise ValueError("BC dataset is empty.")
-        if bc_dataset.obs.shape[2] != obs_dim:
-            raise ValueError(
-                f"BC obs_dim {bc_dataset.obs.shape[2]} does not match env obs_dim {obs_dim}."
-            )
-        if bc_dataset.n_agents != n_agents:
-            raise ValueError(
-                f"BC dataset n_agents {bc_dataset.n_agents} does not match env n_agents {n_agents}."
-            )
-        meta_n_agents = bc_dataset.metadata.get("n_agents")
-        if meta_n_agents is not None and int(meta_n_agents) != n_agents:
-            raise ValueError(
-                f"BC dataset n_agents {meta_n_agents} does not match env n_agents {n_agents}."
-            )
-        meta_use_agent_id = bc_dataset.metadata.get("use_agent_id")
-        if meta_use_agent_id is not None and bool(meta_use_agent_id) != use_agent_id:
-            raise ValueError(
-                f"BC dataset use_agent_id {meta_use_agent_id} does not match {use_agent_id}."
-            )
-        min_action = int(bc_dataset.actions.min())
-        max_action = int(bc_dataset.actions.max())
-        if min_action < 0 or max_action >= action_dim:
-            raise ValueError("BC dataset actions are outside the valid action range.")
-
-        # Initialize obs normalizer from BC dataset if normalization is enabled
-        if args.normalize_obs:
-            clip_value = None if args.obs_norm_clip <= 0 else float(args.obs_norm_clip)
-            obs_normalizer = bc_dataset.compute_obs_normalizer(
-                clip=clip_value, eps=float(args.obs_norm_eps)
-            )
-            print(
-                f"[BC] Initialized obs normalizer from dataset "
-                f"(count={obs_normalizer.count}, mean_norm={np.linalg.norm(obs_normalizer.mean):.4f})"
-            )
-
-        bc_lr = float(args.learning_rate) if args.bc_lr is None else float(args.bc_lr)
-        bc_config = BCPretrainConfig(
-            epochs=int(args.bc_epochs),
-            batch_size=int(args.bc_batch_size),
-            learning_rate=bc_lr,
-            use_agent_id=use_agent_id,
-            n_agents=n_agents,
-            obs_normalizer=obs_normalizer,
-        )
-        bc_rng = np.random.default_rng(args.seed)
-        bc_adapter = JaxActorBCAdapter(
-            model.apply,
-            n_agents=n_agents,
-            use_agent_id=use_agent_id,
-        )
-        bc_result = pretrain_actor(bc_adapter, params_template, bc_dataset, bc_config, bc_rng)
-        pretrained_params = bc_result.params
-        pretrained_flat = np.array(flatten_util.ravel_pytree(pretrained_params)[0])
-        print(f"[BC] Pretrained actor with avg loss {bc_result.metrics.get('loss', 0.0):.6f}")
-
     # Load from .npz checkpoint if provided
     if args.init_checkpoint is not None and args.init_checkpoint.suffix == ".npz":
         ckpt = np.load(args.init_checkpoint, allow_pickle=False)
-        pretrained_flat = np.asarray(ckpt["flat_params"])
-        if pretrained_flat.shape[0] != num_params:
+        checkpoint_flat = np.asarray(ckpt["flat_params"])
+        if checkpoint_flat.shape[0] != num_params:
             raise ValueError(
-                f"Checkpoint has {pretrained_flat.shape[0]} params, model expects {num_params}"
+                f"Checkpoint has {checkpoint_flat.shape[0]} params, model expects {num_params}"
             )
-        pretrained_params = unravel_fn(pretrained_flat)
+        pretrained_params = unravel_fn(checkpoint_flat)
         if args.normalize_obs and "obs_norm_mean" in ckpt:
             clip_value = None if args.obs_norm_clip <= 0 else float(args.obs_norm_clip)
             obs_normalizer = RunningObsNormalizer(
@@ -608,7 +535,7 @@ def train(args):
             )
         print(f"[Checkpoint] Loaded from {args.init_checkpoint} ({num_params} params)")
 
-    # Create fresh obs normalizer if not initialized from BC dataset
+    # Create fresh obs normalizer if not initialized from a checkpoint
     if obs_normalizer is None and args.normalize_obs:
         clip_value = None if args.obs_norm_clip <= 0 else float(args.obs_norm_clip)
         obs_normalizer = RunningObsNormalizer.create(
@@ -631,18 +558,12 @@ def train(args):
     optimizer = optax.adam(learning_rate=lrate_schedule)
     fitness_shaping_fn = get_fitness_shaping_fn(args.fitness_shaping)
 
-    def build_strategy_context(init_key: Any, param_key: Any) -> Dict[str, Any]:
+    def build_strategy_context(init_key: Any) -> Dict[str, Any]:
         """Construct an independent Open_ES strategy with its own initialization."""
         if pretrained_params is None:
             initial_params = params_template
         else:
-            if args.bc_init_std > 0.0:
-                if pretrained_flat is None:
-                    raise RuntimeError("Pretrained flat params missing.")
-                noise = jax.random.normal(param_key, shape=pretrained_flat.shape) * args.bc_init_std
-                initial_params = unravel_fn(pretrained_flat + noise)
-            else:
-                initial_params = pretrained_params
+            initial_params = pretrained_params
         strategy = Open_ES(
             population_size=args.popsize,
             solution=initial_params,
@@ -670,8 +591,8 @@ def train(args):
             "tell_step": tell_step,
         }
 
-    master_rng, init_key, param_key, strategy_rng = jax.random.split(master_rng, 4)
-    strategy_context = build_strategy_context(init_key, param_key)
+    master_rng, init_key, strategy_rng = jax.random.split(master_rng, 3)
+    strategy_context = build_strategy_context(init_key)
 
     # 4. Setup Parallel Workers
     pool = None
@@ -762,17 +683,6 @@ def train(args):
                 }
             )
         return payload
-
-    if pretrained_flat is not None:
-        bc_payload = build_checkpoint_payload(pretrained_flat)
-        bc_payload.update(
-            {
-                "bc_epochs": args.bc_epochs,
-                "bc_batch_size": args.bc_batch_size,
-                "bc_lr": bc_lr,
-            }
-        )
-        np.savez(run_dir / "bc_pretrain.npz", **bc_payload)
 
     rewards_file = run_dir / "training_rewards.csv"
     with rewards_file.open("w", newline="", encoding="utf-8") as f:
@@ -1053,11 +963,6 @@ def train(args):
         "n_agents": n_agents,
         "use_agent_id": use_agent_id,
         "checkpoint_freq": args.checkpoint_freq,
-        "bc_dataset": str(args.bc_dataset) if args.bc_dataset is not None else None,
-        "bc_epochs": args.bc_epochs,
-        "bc_batch_size": args.bc_batch_size,
-        "bc_lr": bc_lr,
-        "bc_init_std": args.bc_init_std,
         "init_checkpoint": str(args.init_checkpoint) if args.init_checkpoint is not None else None,
     }
     save_config_with_hyperparameters(
@@ -1153,36 +1058,6 @@ def parse_args():
         type=Path,
         default=None,
         help="Path to .npz checkpoint to initialize from (must contain flat_params).",
-    )
-    parser.add_argument(
-        "--bc-dataset",
-        type=Path,
-        default=None,
-        help="Path to behavioral cloning dataset (.npz).",
-    )
-    parser.add_argument(
-        "--bc-epochs",
-        type=int,
-        default=0,
-        help="Number of BC epochs for actor pretraining (0 disables).",
-    )
-    parser.add_argument(
-        "--bc-batch-size",
-        type=int,
-        default=1024,
-        help="Mini-batch size for BC pretraining.",
-    )
-    parser.add_argument(
-        "--bc-lr",
-        type=float,
-        default=None,
-        help="BC learning rate (defaults to --learning-rate).",
-    )
-    parser.add_argument(
-        "--bc-init-std",
-        type=float,
-        default=0.0,
-        help="Std dev of Gaussian noise added to BC init params.",
     )
     parser.add_argument("--n-workers", type=int, default=multiprocessing.cpu_count(), help="Workers.")
     parser.add_argument("--checkpoint-freq", type=int, default=5, help="Checkpoint frequency.")
