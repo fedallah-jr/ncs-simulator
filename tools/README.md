@@ -79,9 +79,9 @@ python -m tools.visualize_policy \
 ```bash
 python -m tools.visualize_policy \
     --config configs/marl_mixed_plants.json \
-    --policies always_send threshold_1.0 \
+    --policies always_send never_send \
     --policy-types heuristic heuristic \
-    --labels "Always Send" "Threshold 1.0" \
+    --labels "Always Send" "Never Send" \
     --episode-length 300 \
     --generate-video \
     --video-speedup 2 \
@@ -183,16 +183,6 @@ python -m tools.visualize_policy --list-heuristics
 - **`random_50`**: Transmit with 50% probability
 - **`random_75`**: Transmit with 75% probability
 
-#### Threshold-Based Policies
-
-- **`threshold_0.5`**: Transmit when state magnitude ||x|| > 0.5
-- **`threshold_1.0`**: Transmit when state magnitude ||x|| > 1.0
-- **`threshold_2.0`**: Transmit when state magnitude ||x|| > 2.0
-
-#### Adaptive Policies
-
-- **`adaptive`**: Adaptive threshold based on state magnitude and channel throughput
-
 ### Using Heuristic Policies in Code
 
 ```python
@@ -233,39 +223,28 @@ python -m tools.visualize_policy \
     --episode-length 300
 ```
 
-### Example 2: Compare Threshold Policies
+### Example 2: Evaluate Trained MARL vs Baselines
 
 ```bash
 python -m tools.visualize_policy \
     --config configs/marl_mixed_plants.json \
-    --policies threshold_0.5 threshold_1.0 threshold_2.0 always_send \
-    --policy-types heuristic heuristic heuristic heuristic \
-    --labels "Threshold 0.5" "Threshold 1.0" "Threshold 2.0" "Always Send" \
-    --episode-length 300
-```
-
-### Example 3: Evaluate Trained MARL vs Baselines
-
-```bash
-python -m tools.visualize_policy \
-    --config configs/marl_mixed_plants.json \
-    --policies outputs/latest_model.pt always_send adaptive \
+    --policies outputs/latest_model.pt always_send zero_wait \
     --policy-types marl_torch heuristic heuristic \
-    --labels "Trained MARL" "Always Send" "Adaptive" \
+    --labels "Trained MARL" "Always Send" "Zero Wait" \
     --episode-length 500 \
     --output-prefix "marl_comparison"
 ```
 
-### Example 4: Custom Output Directory
+### Example 3: Custom Output Directory
 
 ```bash
 python -m tools.visualize_policy \
     --config configs/marl_mixed_plants.json \
-    --policy threshold_1.0 \
+    --policy zero_wait \
     --policy-type heuristic \
     --episode-length 1000 \
     --output-dir results/visualizations \
-    --output-prefix "low_noise_threshold"
+    --output-prefix "zero_wait_baseline"
 ```
 
 ### Example 5: Generate Animation Video

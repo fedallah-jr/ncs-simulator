@@ -32,7 +32,13 @@ else
   exit 1
 fi
 
-config_path="${CONFIG_PATH:-configs/marl_absolute_plants_hetero.json}"
+if [[ -n "${CONFIG_PATH:-}" ]]; then
+  config_path="${CONFIG_PATH}"
+elif [[ "${CONFIG:-hetero}" == "homo" ]]; then
+  config_path="configs/marl_absolute_plants.json"
+else
+  config_path="configs/marl_absolute_plants_hetero.json"
+fi
 if [[ ! -f "${config_path}" ]]; then
   echo "Config not found: ${config_path}" >&2
   exit 1

@@ -151,80 +151,6 @@ class RandomSendPolicy(BaseHeuristicPolicy):
             return int(self.rng.rand() < self.prob), None
 
 
-class ThresholdPolicy(BaseHeuristicPolicy):
-    """Policy that sends when state magnitude exceeds a threshold."""
-
-    def __init__(self, threshold: float = 1.0, n_agents: int = 1) -> None:
-        """
-        Initialize threshold policy.
-
-        Args:
-            threshold: State magnitude threshold for sending
-            n_agents: Number of agents in the system
-        """
-        super().__init__(n_agents)
-        self.threshold = threshold
-
-    def predict(self, observation: np.ndarray, deterministic: bool = True) -> Tuple[int, None]:
-        """
-        Send if state magnitude exceeds threshold.
-
-        The state is extracted from the beginning of the observation vector.
-
-        Args:
-            observation: Current observation (first elements are current state)
-            deterministic: Whether to use deterministic policy (unused)
-
-        Returns:
-            action: 1 if ||state|| > threshold, else 0
-            state: None
-        """
-        # Extract current state (first 2 elements by default)
-        state_dim = 2
-        current_state = observation[:state_dim]
-        state_magnitude = np.linalg.norm(current_state)
-        return (1 if state_magnitude > self.threshold else 0), None
-
-
-class AdaptiveThresholdPolicy(BaseHeuristicPolicy):
-    """Policy that adapts sending frequency based on state magnitude and recent throughput."""
-
-    def __init__(self, base_threshold: float = 1.0, throughput_weight: float = 0.1, n_agents: int = 1) -> None:
-        """
-        Initialize adaptive threshold policy.
-
-        Args:
-            base_threshold: Base state magnitude threshold
-            throughput_weight: Weight for throughput in threshold adaptation
-            n_agents: Number of agents in the system
-        """
-        super().__init__(n_agents)
-        self.base_threshold = base_threshold
-        self.throughput_weight = throughput_weight
-
-    def predict(self, observation: np.ndarray, deterministic: bool = True) -> Tuple[int, None]:
-        """
-        Send based on adaptive threshold considering state and throughput.
-
-        Args:
-            observation: Current observation [state, throughput, history...]
-            deterministic: Whether to use deterministic policy (unused)
-
-        Returns:
-            action: 1 if state magnitude exceeds adaptive threshold, else 0
-            state: None
-        """
-        # Extract current state and throughput
-        state_dim = 2
-        current_state = observation[:state_dim]
-        current_throughput = observation[state_dim]
-
-        # Compute state magnitude and adaptive threshold
-        state_magnitude = np.linalg.norm(current_state)
-        adaptive_threshold = self.base_threshold + self.throughput_weight * current_throughput
-
-        return (1 if state_magnitude > adaptive_threshold else 0), None
-
 
 class ZeroWaitPolicy(BaseHeuristicPolicy):
     """Policy that waits for ACK before sending again (transport layer)."""
@@ -319,7 +245,7 @@ class PerfectSyncPolicy(BaseHeuristicPolicy):
             state: None
         """
         cycle_len = self.n_agents * self.slot_spacing_multiplier
-        agent_slot = (self.n_agents - 1 - self.agent_index) * self.slot_spacing_multiplier
+        agent_slot = (self.agent_index) * self.slot_spacing_multiplier
         action = 1 if (self.timestep % cycle_len) == agent_slot else 0
         self.timestep += 1
         return action, None
@@ -357,12 +283,6 @@ HEURISTIC_POLICIES = {
     'random_33': lambda n_agents=1, seed=None: RandomSendPolicy(prob=0.33, n_agents=n_agents, seed=seed),
     'random_50': lambda n_agents=1, seed=None: RandomSendPolicy(prob=0.5, n_agents=n_agents, seed=seed),
     'random_75': lambda n_agents=1, seed=None: RandomSendPolicy(prob=0.75, n_agents=n_agents, seed=seed),
-    'threshold_1.0': lambda n_agents=1: ThresholdPolicy(threshold=1.0, n_agents=n_agents),
-    'threshold_2.0': lambda n_agents=1: ThresholdPolicy(threshold=2.0, n_agents=n_agents),
-    'threshold_0.5': lambda n_agents=1: ThresholdPolicy(threshold=0.5, n_agents=n_agents),
-    'adaptive': lambda n_agents=1: AdaptiveThresholdPolicy(
-        base_threshold=1.0, throughput_weight=0.1, n_agents=n_agents
-    ),
     'zero_wait': lambda n_agents=1: ZeroWaitPolicy(n_agents=n_agents),
 }
 
