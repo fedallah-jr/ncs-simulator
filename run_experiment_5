@@ -42,6 +42,7 @@ if [[ ! -f "${config_path}" ]]; then
   echo "Config not found: ${config_path}" >&2
   exit 1
 fi
+echo "Using config: ${config_path}"
 
 next_run_dir() {
   local algo="$1"
