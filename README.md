@@ -52,7 +52,7 @@ CLI flags let you change environment parameters. Use `--output-root` (defaults t
 
 ## Experiment Scripts
 
-Experiment batches live in the root `run_experiment_*` scripts. Each script writes to a timestamped `outputs/exp_*` folder and renames the per-run directories to match the experiment settings. You can override common knobs via environment variables: `SEED`, `OUTPUT_ROOT`, `TOTAL_TIMESTEPS`, `EPS_DECAY_STEPS`. The current `run_experiment_{1,2,3}` scripts also pin `--batch-size 512` and `--learning-rate 2.5e-5` (half the MARL default).
+Experiment batches live in the root `run_experiment_*` scripts. Each script writes to a timestamped `outputs/exp_*` folder and renames the per-run directories to match the experiment settings. All experiment scripts default to 15M timesteps. You can override common knobs via environment variables: `SEED`, `OUTPUT_ROOT`, `TOTAL_TIMESTEPS`, `EPS_DECAY_STEPS`. The current `run_experiment_{1,2,3}` scripts also pin `--batch-size 512` and `--learning-rate 2.5e-5` (half the MARL default).
 
 ## Visualization
 
