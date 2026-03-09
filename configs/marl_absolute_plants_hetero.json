@@ -56,8 +56,7 @@
     "history_window": 10,
     "state_history_window": 10,
     "throughput_window": [2, 3, 5, 10, 15],
-    "quantization_step": 0,
-    "include_local_estimation_gap": true
+    "quantization_step": 0
   },
   "network": {
     "data_rate_kbps": 100,

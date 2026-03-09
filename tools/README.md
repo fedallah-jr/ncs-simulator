@@ -6,7 +6,7 @@ This directory contains tools for analyzing and visualizing policies in the Netw
 
 - **`visualize_policy.py`**: Main visualization tool for plotting policy state evolution
 - **`heuristic_policies.py`**: Collection of simple baseline policies
-- **`benchmark_local_estimation_gap.py`**: Compare environment-step runtime with the optional local estimation-gap observation disabled vs enabled
+- **`benchmark_local_estimation_gap.py`**: Benchmark environment-step runtime with the always-on local estimation-gap observation features
 - **`__init__.py`**: Package initialization
 
 ## Visualization Tool
@@ -169,7 +169,7 @@ python -m tools.visualize_policy --list-heuristics
 - **`never_send`**: Never transmit measurements
 - **`zero_wait`**: Transmit only when the previous packet is ACKed or dropped (no overlapping sends)
 - **`perfect_sync`**: Strictly synchronized round-robin sending (one sender per timestep)
-- **`value_of_update_<threshold>`**: Send when the control-aware VoU score `e_predicted^T M_t e_predicted` exceeds the given threshold. Requires `observation.include_local_estimation_gap=true`.
+- **`value_of_update_<threshold>`**: Send when the control-aware VoU score `e_predicted^T M_t e_predicted` exceeds the given threshold.
 
 #### Periodic Policies
 

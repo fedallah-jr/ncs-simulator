@@ -259,21 +259,20 @@ def extract_predicted_local_gap(
     """
     Extract the predicted remote-estimation gap from the observation vector.
 
-    The environment appends this block immediately after the quantized local
-    measurement when ``include_local_estimation_gap`` is enabled:
+    The environment appends a local sensor KF estimate block immediately after
+    the quantized local measurement, and the gap block directly after that:
 
         e_predicted = x_hat_sensor_local - x_hat_controller_shadow
     """
     obs = np.asarray(observation, dtype=float).ravel()
     if state_dim <= 0:
         raise ValueError("state_dim must be positive")
-    min_obs_dim = 2 * int(state_dim)
+    min_obs_dim = 3 * int(state_dim)
     if obs.size < min_obs_dim:
         raise ValueError(
-            "Observation is too short to contain the local estimation-gap block. "
-            "Enable observation.include_local_estimation_gap in the environment config."
+            "Observation is too short to contain the local estimation-gap block."
         )
-    return obs[state_dim:min_obs_dim]
+    return obs[2 * state_dim : min_obs_dim]
 
 
 def compute_value_of_update_score(
@@ -346,10 +345,6 @@ class ValueOfUpdatePolicy(BaseHeuristicPolicy):
             raise ValueError(
                 "ValueOfUpdatePolicy requires a live environment instance so it can "
                 "reuse the environment's time-varying control weight M_t."
-            )
-        if not getattr(env, "include_local_estimation_gap", False):
-            raise ValueError(
-                "ValueOfUpdatePolicy requires observation.include_local_estimation_gap=true."
             )
         if not hasattr(env, "_get_kf_info_matrix"):
             raise ValueError(
