@@ -251,6 +251,129 @@ class PerfectSyncPolicy(BaseHeuristicPolicy):
         return action, None
 
 
+def extract_predicted_local_gap(
+    observation: np.ndarray,
+    *,
+    state_dim: int,
+) -> np.ndarray:
+    """
+    Extract the predicted remote-estimation gap from the observation vector.
+
+    The environment appends this block immediately after the quantized local
+    measurement when ``include_local_estimation_gap`` is enabled:
+
+        e_predicted = x_hat_sensor_local - x_hat_controller_shadow
+    """
+    obs = np.asarray(observation, dtype=float).ravel()
+    if state_dim <= 0:
+        raise ValueError("state_dim must be positive")
+    min_obs_dim = 2 * int(state_dim)
+    if obs.size < min_obs_dim:
+        raise ValueError(
+            "Observation is too short to contain the local estimation-gap block. "
+            "Enable observation.include_local_estimation_gap in the environment config."
+        )
+    return obs[state_dim:min_obs_dim]
+
+
+def compute_value_of_update_score(
+    observation: np.ndarray,
+    *,
+    weight_matrix: np.ndarray,
+    state_dim: int,
+) -> float:
+    """
+    Compute the quadratic value-of-update score ``e_predicted^T M e_predicted``.
+
+    ``weight_matrix`` is typically the control-aware information matrix ``M_t``
+    used by the environment's Kalman/LQR reward shaping.
+    """
+    predicted_gap = extract_predicted_local_gap(observation, state_dim=state_dim)
+    weight = np.asarray(weight_matrix, dtype=float)
+    if weight.shape != (state_dim, state_dim):
+        raise ValueError(
+            "weight_matrix must have shape "
+            f"({state_dim}, {state_dim}), got {weight.shape}"
+        )
+    return float(predicted_gap @ weight @ predicted_gap)
+
+
+def value_of_update_decision(
+    observation: np.ndarray,
+    *,
+    threshold: float,
+    weight_matrix: np.ndarray,
+    state_dim: int,
+) -> Tuple[int, float]:
+    """
+    Apply a threshold decision rule to the value-of-update score.
+
+    Returns:
+        action: ``1`` if the update value exceeds the threshold, else ``0``.
+        score: The computed quadratic value-of-update score.
+    """
+    score = compute_value_of_update_score(
+        observation,
+        weight_matrix=weight_matrix,
+        state_dim=state_dim,
+    )
+    return int(score > float(threshold)), score
+
+
+class ValueOfUpdatePolicy(BaseHeuristicPolicy):
+    """
+    Threshold policy based on the control-aware value of update.
+
+    At each step, this policy computes
+
+        score_t = e_predicted,t^T M_t e_predicted,t
+
+    and transmits iff ``score_t > threshold``.
+    """
+
+    def __init__(
+        self,
+        threshold: float,
+        *,
+        n_agents: int = 1,
+        agent_index: int = 0,
+        env: Optional[Any] = None,
+    ) -> None:
+        super().__init__(n_agents=n_agents)
+        if agent_index < 0 or agent_index >= self.n_agents:
+            raise ValueError("agent_index must be in [0, n_agents)")
+        if env is None:
+            raise ValueError(
+                "ValueOfUpdatePolicy requires a live environment instance so it can "
+                "reuse the environment's time-varying control weight M_t."
+            )
+        if not getattr(env, "include_local_estimation_gap", False):
+            raise ValueError(
+                "ValueOfUpdatePolicy requires observation.include_local_estimation_gap=true."
+            )
+        if not hasattr(env, "_get_kf_info_matrix"):
+            raise ValueError(
+                "Environment does not expose the control-aware information matrix helper."
+            )
+        self.threshold = float(threshold)
+        self.agent_index = int(agent_index)
+        self.env = env
+        self.state_dim = int(getattr(env, "state_dim"))
+
+    def predict(self, observation: np.ndarray, deterministic: bool = True) -> Tuple[int, Any]:
+        weight_matrix = np.asarray(
+            self.env._get_kf_info_matrix(self.agent_index),
+            dtype=float,
+        )
+        action, score = value_of_update_decision(
+            observation,
+            threshold=self.threshold,
+            weight_matrix=weight_matrix,
+            state_dim=self.state_dim,
+        )
+        return action, {"value_of_update_score": score}
+
+
 def _parse_perfect_sync_multiplier(policy_name: str) -> Optional[int]:
     """
     Parse perfect-sync policy names.
@@ -266,6 +389,25 @@ def _parse_perfect_sync_multiplier(policy_name: str) -> Optional[int]:
     if match is None:
         return None
     return int(match.group(1))
+
+
+def _parse_value_of_update_threshold(policy_name: str) -> Optional[float]:
+    """
+    Parse value-of-update policy names.
+
+    Supported names:
+    - value_of_update_0.1
+    - value_of_update_threshold_1e-3
+    - vou_0.1
+    """
+    float_pattern = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+    match = re.fullmatch(
+        rf"(?:value_of_update|vou)(?:_(?:threshold|theta|t))?_({float_pattern})",
+        policy_name,
+    )
+    if match is None:
+        return None
+    return float(match.group(1))
 
 
 # Dictionary for easy policy lookup
@@ -292,6 +434,7 @@ def get_heuristic_policy(
     n_agents: int = 1,
     seed: Optional[int] = None,
     agent_index: int = 0,
+    env: Optional[Any] = None,
 ) -> BaseHeuristicPolicy:
     """
     Get a heuristic policy by name.
@@ -301,6 +444,8 @@ def get_heuristic_policy(
         n_agents: Number of agents in the system
         seed: Random seed for stochastic policies
         agent_index: Agent index for coordinated multi-agent heuristics
+        env: Optional live environment instance for policies that need access
+            to time-varying control weights or environment metadata
 
     Returns:
         Policy instance
@@ -318,11 +463,22 @@ def get_heuristic_policy(
             slot_spacing_multiplier=sync_multiplier,
         )
 
+    vou_threshold = _parse_value_of_update_threshold(policy_name)
+    if vou_threshold is not None:
+        return ValueOfUpdatePolicy(
+            vou_threshold,
+            n_agents=n_agents,
+            agent_index=agent_index,
+            env=env,
+        )
+
     if policy_name not in HEURISTIC_POLICIES:
         available = ', '.join(sorted(HEURISTIC_POLICIES.keys()))
         raise ValueError(
             f"Unknown policy '{policy_name}'. Available policies: {available}. "
-            "Pattern aliases: perfect_sync_n<k>, perfect_sync_<k>."
+            "Pattern aliases: perfect_sync_n<k>, perfect_sync_<k>, "
+            "value_of_update_<threshold>, value_of_update_threshold_<threshold>, "
+            "vou_<threshold>."
         )
 
     policy_factory = HEURISTIC_POLICIES[policy_name]

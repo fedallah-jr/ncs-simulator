@@ -65,6 +65,35 @@ from tools._common import (
     add_set_override_argument,
 )
 
+# Modes where the reward metric comes from kf_info_gain (stored as negative,
+# negated here so the plot shows a positive "cost" / "uncertainty" quantity).
+_INFO_GAIN_MODES: Dict[str, str] = {
+    "kf_info_m_noise": r"$e^\top M e$",
+    "kf_info_m": r"$\mathrm{tr}(M P)$",
+    "kf_info_s": r"$\mathrm{tr}(S P)$",
+    "kf_info": r"$\mathrm{tr}((M{+}S) P)$",
+    "lqr_cost_immediate_surrogate": r"$e^\top M_{\mathrm{surr}} e$",
+    "kf_q": r"$\mathrm{tr}(Q P)$",
+    "kf_q_noise": r"$e^\top Q e$",
+}
+
+# Modes where the reward metric comes from curr_error (already positive).
+_ERROR_MODES: Dict[str, str] = {
+    "absolute": r"$\|x\|$",
+    "lqr_cost": r"LQR cost",
+    "estimation_error": r"Estimation error",
+}
+
+
+def _reward_metric_info(mode: str):
+    """Return (component_key, negate, label) for the given reward mode."""
+    if mode in _INFO_GAIN_MODES:
+        return "kf_info_gain", True, _INFO_GAIN_MODES[mode]
+    if mode in _ERROR_MODES:
+        return "curr_error", False, _ERROR_MODES[mode]
+    # Fallback: try kf_info_gain
+    return "kf_info_gain", True, mode
+
 
 def run_episode_multi_agent(
     env: NCS_Env,
@@ -93,12 +122,15 @@ def run_episode_multi_agent(
         trace_start=trace_start,
     )
 
+    reward_mode = str(env.reward_definition.mode)
+    metric_component_key, metric_negate, reward_metric_label = _reward_metric_info(reward_mode)
+
     states = np.zeros((episode_length + 1, n_agents, state_dim), dtype=np.float32)
     estimates = np.zeros((episode_length + 1, n_agents, state_dim), dtype=np.float32)
     estimate_covariances = np.zeros((episode_length + 1, n_agents, state_dim, state_dim), dtype=np.float32)
     actions = np.zeros((episode_length, n_agents), dtype=np.int64)
     drop_delay_steps = np.full((episode_length, n_agents), np.nan, dtype=np.float32)
-    kf_info_m_noise = np.full((episode_length, n_agents), np.nan, dtype=np.float32)
+    reward_metric = np.full((episode_length, n_agents), np.nan, dtype=np.float32)
     rewards = np.zeros((episode_length, n_agents), dtype=np.float32)
     state_errors = np.zeros((episode_length + 1, n_agents), dtype=np.float32)
     throughputs = np.zeros(episode_length + 1, dtype=np.float32)
@@ -137,13 +169,12 @@ def run_episode_multi_agent(
                 agent_components = reward_components.get(f"agent_{i}", {})
                 if not isinstance(agent_components, dict):
                     continue
-                metric_value = agent_components.get("kf_info_gain_m_noise", np.nan)
+                metric_value = agent_components.get(metric_component_key, np.nan)
                 try:
-                    # Environment stores kf_info_m_noise as -e^T M e.
-                    # Visualization panel uses tr(M e e^T) = e^T M e.
-                    kf_info_m_noise[t, i] = -float(metric_value)
+                    raw = float(metric_value)
+                    reward_metric[t, i] = -raw if metric_negate else raw
                 except (TypeError, ValueError):
-                    kf_info_m_noise[t, i] = np.nan
+                    reward_metric[t, i] = np.nan
 
         states[t + 1] = np.asarray(info.get("states", states[t + 1]), dtype=np.float32)
         estimates[t + 1] = np.asarray(info.get("estimates", estimates[t + 1]), dtype=np.float32)
@@ -176,7 +207,7 @@ def run_episode_multi_agent(
             estimate_covariances = estimate_covariances[: end + 1]
             actions = actions[:end]
             drop_delay_steps = drop_delay_steps[:end]
-            kf_info_m_noise = kf_info_m_noise[:end]
+            reward_metric = reward_metric[:end]
             rewards = rewards[:end]
             state_errors = state_errors[: end + 1]
             throughputs = throughputs[: end + 1]
@@ -189,7 +220,9 @@ def run_episode_multi_agent(
         "estimate_covariances": estimate_covariances,
         "actions": actions,
         "drop_delay_steps": drop_delay_steps,
-        "kf_info_m_noise": kf_info_m_noise,
+        "reward_metric": reward_metric,
+        "reward_mode": reward_mode,
+        "reward_metric_label": reward_metric_label,
         "rewards": rewards,
         "state_errors": state_errors,
         "throughput_kbps": throughputs,
@@ -372,15 +405,16 @@ def plot_marl_action_raster(
     actions = np.asarray(traj["actions"], dtype=np.int64)
     n_steps, n_agents = actions.shape
 
-    # Get drop-delay map and tr(M e e^T) uncertainty metric.
+    # Get drop-delay map and reward metric.
     drop_delay_steps = np.asarray(
         traj.get("drop_delay_steps", np.full(actions.shape, np.nan, dtype=np.float32)),
         dtype=np.float32,
     )
-    kf_info_m_noise = np.asarray(
-        traj.get("kf_info_m_noise", np.full(actions.shape, np.nan, dtype=np.float32)),
+    reward_metric = np.asarray(
+        traj.get("reward_metric", np.full(actions.shape, np.nan, dtype=np.float32)),
         dtype=np.float32,
     )
+    reward_metric_label = str(traj.get("reward_metric_label", "Reward metric"))
 
     # Create figure with 2 subplots:
     # 1) Drop outcomes with drop-delay coloring
@@ -453,7 +487,7 @@ def plot_marl_action_raster(
     )
     ax1.grid(False)
 
-    # Plot 2: tr(M e e^T) growth as row-wise line plots (one row per agent)
+    # Plot 2: reward metric growth as row-wise line plots (one row per agent)
     ax2 = axes[1]
     ax2.set_facecolor("white")
     agent_colors = plt.cm.tab10(np.linspace(0, 1, max(n_agents, 1)))
@@ -462,7 +496,7 @@ def plot_marl_action_raster(
     row_tops = np.arange(n_agents, dtype=np.float64) + (1.0 - row_pad)
     row_centers = 0.5 * (row_bottoms + row_tops)
 
-    metric_matrix = np.where(np.isfinite(kf_info_m_noise), kf_info_m_noise, np.nan)
+    metric_matrix = np.where(np.isfinite(reward_metric), reward_metric, np.nan)
     global_scale_low = float("nan")
     global_scale_high = float("nan")
     peak_values = np.full((n_agents,), np.nan, dtype=np.float64)
@@ -471,7 +505,7 @@ def plot_marl_action_raster(
         ax2.text(
             0.5,
             0.5,
-            "No finite tr(M e e^T) values",
+            f"No finite {reward_metric_label} values",
             transform=ax2.transAxes,
             ha="center",
             va="center",
@@ -547,7 +581,7 @@ def plot_marl_action_raster(
     ax2.set_yticks(row_centers)
     ax2.set_yticklabels([f"agent_{i}" for i in range(n_agents)])
     ax2.tick_params(axis="both", labelsize=10)
-    ax2.set_title(r"$\mathrm{tr}(M e e^\top)$" + f" - {label}", fontsize=15, fontweight="bold")
+    ax2.set_title(f"{reward_metric_label} - {label}", fontsize=15, fontweight="bold")
     ax2.invert_yaxis()
 
     # Right-side labels: one global scale (shared by all rows) + per-agent peak reports.
@@ -591,8 +625,8 @@ def plot_marl_action_raster(
         if np.isfinite(peak_values[i]):
             peak_report_parts.append(f"agent_{i}: {peak_values[i]:.6g} @ t={int(peak_timesteps[i])}")
     if peak_report_parts:
-        print(f"  Peaks tr(M e e^T): {', '.join(peak_report_parts)}")
-    print(f"✓ Saved coordination raster with drops and tr(M e e^T) uncertainty to {save_path}")
+        print(f"  Peaks {reward_metric_label}: {', '.join(peak_report_parts)}")
+    print(f"✓ Saved coordination raster with drops and {reward_metric_label} to {save_path}")
 
 
 def plot_marl_state_space_2d(
@@ -828,8 +862,10 @@ def plot_marl_two_policy_comparison(
 
     policy_colors = ["#1f77b4", "#d62728"]
     metric_per_policy: List[np.ndarray] = []
+    # Use the reward metric label from the first trajectory (both share the same env).
+    metric_label = str(trajectories[0].get("reward_metric_label", r"$\mathrm{tr}(M e e^\top)$"))
     for traj in trajectories:
-        metric_full = np.asarray(traj.get("kf_info_m_noise", []), dtype=np.float32)
+        metric_full = np.asarray(traj.get("reward_metric", []), dtype=np.float32)
         if metric_full.ndim != 2:
             metric_full = np.full((common_steps, 1), np.nan, dtype=np.float32)
         metric_per_policy.append(metric_full[:common_steps])
@@ -867,16 +903,16 @@ def plot_marl_two_policy_comparison(
         ax_bottom_early,
         0,
         split_t,
-        rf"$\mathrm{{tr}}(M e e^\top)$ Early Window (t=0..{split_t - 1})",
+        f"{metric_label} Early Window (t=0..{split_t - 1})",
     )
     _plot_metric_window(
         ax_bottom_late,
         split_t,
         common_steps,
-        rf"$\mathrm{{tr}}(M e e^\top)$ Late Window (t={split_t}..{common_steps - 1})",
+        f"{metric_label} Late Window (t={split_t}..{common_steps - 1})",
     )
 
-    ax_bottom_early.set_ylabel(r"$\mathrm{tr}(M e e^\top)$", fontsize=12)
+    ax_bottom_early.set_ylabel(metric_label, fontsize=12)
     ax_bottom_early.legend(fontsize=9, loc="upper right")
     ax_bottom_late.legend(fontsize=9, loc="upper right")
 
@@ -889,7 +925,7 @@ def plot_marl_two_policy_comparison(
 
 def estimate_two_policy_split_timestep(
     trajectories: List[Dict[str, np.ndarray]],
-    metric_key: str = "kf_info_m_noise",
+    metric_key: str = "reward_metric",
 ) -> int:
     """Estimate the transient/end split time from metric scale decay.
 
@@ -1313,6 +1349,9 @@ def main():
         print("\nPattern aliases:")
         print("  - perfect_sync_n<K> (example: perfect_sync_n2)")
         print("  - perfect_sync_<K>  (example: perfect_sync_2)")
+        print("  - value_of_update_<threshold> (example: value_of_update_0.05)")
+        print("  - value_of_update_threshold_<threshold> (example: value_of_update_threshold_1e-3)")
+        print("  - vou_<threshold> (example: vou_0.05)")
         print()
         return
 
@@ -1534,7 +1573,7 @@ def main():
             trajectories,
             policy_labels[:2],
             two_policy_plot_path,
-            title="Two-Policy Comparison (Drops + tr(M e e^T))",
+            title=f"Two-Policy Comparison (Drops + {trajectories[0].get('reward_metric_label', 'metric')})",
             split_t=split_t,
         )
 

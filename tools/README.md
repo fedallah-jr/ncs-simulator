@@ -169,6 +169,7 @@ python -m tools.visualize_policy --list-heuristics
 - **`never_send`**: Never transmit measurements
 - **`zero_wait`**: Transmit only when the previous packet is ACKed or dropped (no overlapping sends)
 - **`perfect_sync`**: Strictly synchronized round-robin sending (one sender per timestep)
+- **`value_of_update_<threshold>`**: Send when the control-aware VoU score `e_predicted^T M_t e_predicted` exceeds the given threshold. Requires `observation.include_local_estimation_gap=true`.
 
 #### Periodic Policies
 
@@ -176,6 +177,7 @@ python -m tools.visualize_policy --list-heuristics
 - **`send_every_5`**: Transmit every 5 timesteps
 - **`send_every_10`**: Transmit every 10 timesteps
 - **`perfect_sync_nK`** or **`perfect_sync_K`**: Synchronized round-robin with spacing multiplier `K` (each agent sends every `K * n_agents` timesteps)
+- **`value_of_update_threshold_<threshold>`** or **`vou_<threshold>`**: Aliases for the same VoU threshold policy
 
 #### Stochastic Policies
 

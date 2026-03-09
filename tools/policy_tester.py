@@ -616,6 +616,7 @@ def _load_policy(
             n_agents=getattr(env, "n_agents", 1),
             seed=seed,
             deterministic=deterministic,
+            env=env,
         )
     if policy_type in {"es", "openai_es"}:
         return load_es_policy(spec.policy_path, env)

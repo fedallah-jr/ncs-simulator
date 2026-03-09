@@ -50,10 +50,12 @@ class MultiAgentHeuristicPolicy:
         seed: Optional[int],
         *,
         deterministic: bool = False,
+        env: Optional[NCS_Env] = None,
     ) -> None:
         self.policy_name = policy_name
         self.n_agents = int(n_agents)
         self.deterministic = bool(deterministic)
+        self.env = env
         self._policies = []
         for idx in range(self.n_agents):
             agent_seed = None if seed is None else int(seed) + idx
@@ -63,6 +65,7 @@ class MultiAgentHeuristicPolicy:
                     n_agents=self.n_agents,
                     seed=agent_seed,
                     agent_index=idx,
+                    env=self.env,
                 )
             )
 
@@ -343,6 +346,7 @@ def load_multi_agent_policy(
             n_agents=n_agents,
             seed=seed,
             deterministic=deterministic,
+            env=env,
         )
     raise ValueError(
         "Multi-agent visualization supports only 'marl_torch', 'es', and 'heuristic' policies."
