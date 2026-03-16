@@ -722,6 +722,49 @@ def plot_marl_comparison_summary(
     print(f"✓ Saved MARL summary plot to {save_path}")
 
 
+def _resolve_two_policy_layout(
+    trajectories: List[Dict[str, np.ndarray]],
+    split_t: Optional[int] = None,
+) -> tuple[int, int, int]:
+    if len(trajectories) != 2:
+        raise ValueError("Two-policy comparison requires exactly two trajectories")
+
+    horizons: List[int] = []
+    agent_counts: List[int] = []
+    for traj in trajectories:
+        actions_shape = np.asarray(traj["actions"], dtype=np.int64).shape
+        if len(actions_shape) != 2 or actions_shape[0] <= 0:
+            raise ValueError("Each trajectory must contain non-empty actions with shape (timesteps, n_agents)")
+        horizons.append(int(actions_shape[0]))
+        agent_counts.append(int(actions_shape[1]))
+
+    if len(set(agent_counts)) != 1:
+        raise ValueError("Two-policy comparison requires both trajectories to have the same number of agents")
+
+    common_steps = min(horizons)
+    if common_steps <= 1:
+        raise ValueError("Need at least 2 timesteps for two-policy comparison")
+
+    if split_t is None:
+        split_t = estimate_two_policy_split_timestep(trajectories)
+    split_t = int(np.clip(int(split_t), 1, common_steps - 1))
+    return common_steps, agent_counts[0], split_t
+
+
+def _extract_two_policy_metrics(
+    trajectories: List[Dict[str, np.ndarray]],
+    common_steps: int,
+) -> tuple[List[np.ndarray], str]:
+    metric_per_policy: List[np.ndarray] = []
+    metric_label = str(trajectories[0].get("reward_metric_label", r"$\mathrm{tr}(M e e^\top)$"))
+    for traj in trajectories:
+        metric_full = np.asarray(traj.get("reward_metric", []), dtype=np.float32)
+        if metric_full.ndim != 2:
+            metric_full = np.full((common_steps, 1), np.nan, dtype=np.float32)
+        metric_per_policy.append(metric_full[:common_steps])
+    return metric_per_policy, metric_label
+
+
 def plot_marl_two_policy_comparison(
     trajectories: List[Dict[str, np.ndarray]],
     labels: List[str],
@@ -732,19 +775,7 @@ def plot_marl_two_policy_comparison(
     if len(trajectories) != 2 or len(labels) != 2:
         raise ValueError("plot_marl_two_policy_comparison requires exactly two trajectories and two labels")
 
-    horizons = []
-    for traj in trajectories:
-        actions_shape = np.asarray(traj["actions"], dtype=np.int64).shape
-        if len(actions_shape) != 2 or actions_shape[0] <= 0:
-            raise ValueError("Each trajectory must contain non-empty actions with shape (timesteps, n_agents)")
-        horizons.append(int(actions_shape[0]))
-    common_steps = min(horizons)
-    if common_steps <= 1:
-        raise ValueError("Need at least 2 timesteps for two-policy comparison")
-
-    if split_t is None:
-        split_t = estimate_two_policy_split_timestep(trajectories)
-    split_t = int(np.clip(int(split_t), 1, common_steps - 1))
+    common_steps, _, split_t = _resolve_two_policy_layout(trajectories, split_t)
 
     fig = plt.figure(figsize=(18, 11))
     fig.patch.set_facecolor("white")
@@ -861,14 +892,7 @@ def plot_marl_two_policy_comparison(
     )
 
     policy_colors = ["#1f77b4", "#d62728"]
-    metric_per_policy: List[np.ndarray] = []
-    # Use the reward metric label from the first trajectory (both share the same env).
-    metric_label = str(trajectories[0].get("reward_metric_label", r"$\mathrm{tr}(M e e^\top)$"))
-    for traj in trajectories:
-        metric_full = np.asarray(traj.get("reward_metric", []), dtype=np.float32)
-        if metric_full.ndim != 2:
-            metric_full = np.full((common_steps, 1), np.nan, dtype=np.float32)
-        metric_per_policy.append(metric_full[:common_steps])
+    metric_per_policy, metric_label = _extract_two_policy_metrics(trajectories, common_steps)
 
     def _plot_metric_window(ax: Axes, t0: int, t1: int, subtitle: str) -> None:
         for idx, (metric, label) in enumerate(zip(metric_per_policy, labels)):
@@ -921,6 +945,140 @@ def plot_marl_two_policy_comparison(
     plt.savefig(str(save_path), dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"✓ Saved two-policy comparison plot to {save_path} (split: t={split_t})")
+
+
+def plot_marl_two_policy_per_agent_metric(
+    trajectories: List[Dict[str, np.ndarray]],
+    labels: List[str],
+    save_path: Path,
+    title: str = "Two-Policy Per-Agent Metric Comparison",
+    split_t: Optional[int] = None,
+) -> None:
+    if len(trajectories) != 2 or len(labels) != 2:
+        raise ValueError("plot_marl_two_policy_per_agent_metric requires exactly two trajectories and two labels")
+
+    common_steps, n_agents, split_t = _resolve_two_policy_layout(trajectories, split_t)
+    metric_per_policy, metric_label = _extract_two_policy_metrics(trajectories, common_steps)
+    policy_colors = ["#1f77b4", "#d62728"]
+
+    fig_height = max(6.5, 2.35 * n_agents)
+    fig, axes = plt.subplots(
+        n_agents,
+        2,
+        figsize=(18, fig_height),
+        sharex="col",
+        squeeze=False,
+    )
+    fig.patch.set_facecolor("white")
+
+    def _plot_agent_window(ax: Axes, agent_idx: int, t0: int, t1: int, subtitle: str) -> None:
+        if agent_idx == 0:
+            ax.set_title(subtitle, fontsize=12, fontweight="bold")
+
+        window_has_data = False
+        for idx, (metric, label) in enumerate(zip(metric_per_policy, labels)):
+            if t1 <= t0 or metric.shape[0] < t1 or metric.shape[1] <= agent_idx:
+                continue
+            window_metric = metric[t0:t1, agent_idx]
+            if window_metric.size == 0 or np.all(np.isnan(window_metric)):
+                continue
+
+            x = np.arange(t0, t1, dtype=np.int64)
+            valid = np.isfinite(window_metric)
+            integrate_fn = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+            if np.count_nonzero(valid) >= 2:
+                auc = float(integrate_fn(window_metric[valid], x=x[valid]))
+            elif np.count_nonzero(valid) == 1:
+                auc = float(window_metric[valid][0])
+            else:
+                auc = float("nan")
+
+            color = policy_colors[idx % len(policy_colors)]
+            auc_str = f"{auc:.4g}" if np.isfinite(auc) else "nan"
+            ax.plot(
+                x,
+                window_metric,
+                color=color,
+                linewidth=2.2,
+                label=f"{label} (AUC={auc_str})",
+            )
+            window_has_data = True
+
+        if not window_has_data:
+            ax.text(
+                0.5,
+                0.5,
+                f"No finite {metric_label}",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+                fontsize=9,
+                color="#444444",
+            )
+
+        ax.grid(True, alpha=0.25)
+        ax.set_xlim(t0 - 0.5, t1 - 0.5)
+        handles, legend_labels = ax.get_legend_handles_labels()
+        if handles and legend_labels:
+            ax.legend(fontsize=8, loc="upper right")
+
+    for agent_idx in range(n_agents):
+        finite_values: List[np.ndarray] = []
+        for metric in metric_per_policy:
+            if metric.shape[1] <= agent_idx:
+                continue
+            finite = metric[:common_steps, agent_idx]
+            finite = finite[np.isfinite(finite)]
+            if finite.size > 0:
+                finite_values.append(finite)
+
+        row_limits = None
+        if finite_values:
+            agent_values = np.concatenate(finite_values)
+            y_min = float(np.min(agent_values))
+            y_max = float(np.max(agent_values))
+            y_span = y_max - y_min
+            if y_span <= 0.0:
+                pad = max(1e-6, 0.08 * max(abs(y_max), 1.0))
+            else:
+                pad = 0.08 * y_span
+            row_limits = (y_min - pad, y_max + pad)
+
+        ax_early = axes[agent_idx, 0]
+        ax_late = axes[agent_idx, 1]
+        ax_early.set_facecolor("white")
+        ax_late.set_facecolor("white")
+
+        _plot_agent_window(
+            ax_early,
+            agent_idx,
+            0,
+            split_t,
+            f"{metric_label} Early Window (t=0..{split_t - 1})",
+        )
+        _plot_agent_window(
+            ax_late,
+            agent_idx,
+            split_t,
+            common_steps,
+            f"{metric_label} Late Window (t={split_t}..{common_steps - 1})",
+        )
+
+        if row_limits is not None:
+            ax_early.set_ylim(*row_limits)
+            ax_late.set_ylim(*row_limits)
+
+        ax_early.set_ylabel(f"agent_{agent_idx}", fontsize=11)
+        if agent_idx == n_agents - 1:
+            ax_early.set_xlabel("Timestep", fontsize=11)
+            ax_late.set_xlabel("Timestep", fontsize=11)
+
+    fig.text(0.018, 0.5, metric_label, va="center", rotation="vertical", fontsize=12)
+    fig.suptitle(f"{title}  |  auto split t={split_t}", fontsize=16, fontweight="bold", y=0.995)
+    fig.subplots_adjust(left=0.07, right=0.985, bottom=0.06, top=0.94, hspace=0.34, wspace=0.14)
+    plt.savefig(str(save_path), dpi=400, bbox_inches="tight")
+    plt.close(fig)
+    print(f"✓ Saved per-agent two-policy {metric_label} plot to {save_path} (split: t={split_t})")
 
 
 def estimate_two_policy_split_timestep(
@@ -1574,6 +1732,14 @@ def main():
             policy_labels[:2],
             two_policy_plot_path,
             title=f"Two-Policy Comparison (Drops + {trajectories[0].get('reward_metric_label', 'metric')})",
+            split_t=split_t,
+        )
+        per_agent_metric_plot_path = output_dir / f"{output_prefix}_two_policy_per_agent_metric.png"
+        plot_marl_two_policy_per_agent_metric(
+            trajectories,
+            policy_labels[:2],
+            per_agent_metric_plot_path,
+            title=f"Two-Policy Per-Agent {trajectories[0].get('reward_metric_label', 'Metric')}",
             split_t=split_t,
         )
 
