@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from gymnasium.vector import AsyncVectorEnv
 
-from utils.marl.networks import MLPAgent, DuelingMLPAgent, append_agent_id
+from utils.marl.networks import MLPAgent, DuelingMLPAgent, DialMLPAgent, DRU, append_agent_id, route_messages
 from utils.marl.obs_normalization import RunningObsNormalizer
 from utils.marl.vector_env import stack_vector_obs
 
@@ -522,4 +522,159 @@ def qlearning_collect_transition(
         terminated=terminated_any,
         done_reset=done_reset,
         infos=infos,
+    )
+
+
+# ---------------------------------------------------------------------------
+# DIAL-specific collection utilities
+# ---------------------------------------------------------------------------
+
+class DialStepResult(NamedTuple):
+    obs: np.ndarray
+    epsilon: float
+    actions: np.ndarray
+    next_obs_raw: np.ndarray
+    rewards_arr: np.ndarray
+    terminated: np.ndarray
+    done_reset: np.ndarray
+    infos: Dict[str, Any]
+    msg_logits: np.ndarray  # (n_envs, n_agents, comm_dim)
+
+
+@torch.no_grad()
+def select_actions_dial_batched(
+    agent: DialMLPAgent,
+    obs: np.ndarray,
+    recv_msg: np.ndarray,
+    n_envs: int,
+    n_agents: int,
+    n_actions: int,
+    epsilon: float,
+    rng: np.random.Generator,
+    device: torch.device,
+    use_agent_id: bool,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Select actions and produce message logits for DIAL agents.
+
+    Returns (actions, msg_logits_np).
+    Epsilon-greedy on actions only.
+    """
+    obs_t = torch.as_tensor(obs, device=device, dtype=torch.float32)
+    if use_agent_id:
+        obs_t = append_agent_id(obs_t, n_agents)
+
+    recv_msg_t = torch.as_tensor(recv_msg, device=device, dtype=torch.float32)
+    inp = torch.cat([obs_t, recv_msg_t], dim=-1)
+
+    q_values, msg_logits = agent(inp.reshape(n_envs * n_agents, -1))
+    q_values = q_values.view(n_envs, n_agents, n_actions)
+    msg_logits = msg_logits.view(n_envs, n_agents, -1)
+
+    greedy = q_values.argmax(dim=-1).cpu().numpy().astype(np.int64)
+    actions = greedy.copy()
+    explore_mask = rng.random((n_envs, n_agents)) < float(epsilon)
+    if np.any(explore_mask):
+        random_actions = rng.integers(
+            0, n_actions, size=int(explore_mask.sum()), endpoint=False, dtype=np.int64
+        )
+        actions[explore_mask] = random_actions
+
+    return actions, msg_logits.cpu().numpy()
+
+
+def dial_collect_transition(
+    *,
+    env: Any,
+    agent: DialMLPAgent,
+    obs_raw: np.ndarray,
+    obs_normalizer: Optional[RunningObsNormalizer],
+    global_step: int,
+    epsilon_start: float,
+    epsilon_end: float,
+    epsilon_decay_steps: int,
+    n_envs: int,
+    n_agents: int,
+    n_actions: int,
+    use_agent_id: bool,
+    rng: np.random.Generator,
+    device: torch.device,
+    prev_msg_logits: np.ndarray,
+    dru: DRU,
+    accumulator: Any,
+    buffer: Any,
+    comm_dim: int,
+) -> DialStepResult:
+    """Collect a single vectorized DIAL transition.
+
+    Updates prev_msg_logits in-place and adds chunks to buffer via accumulator.
+    """
+    if obs_normalizer is not None:
+        obs = obs_normalizer.normalize(obs_raw, update=True)
+    else:
+        obs = obs_raw
+
+    eps = epsilon_by_step(global_step, epsilon_start, epsilon_end, epsilon_decay_steps)
+
+    # DRU on previous message logits → recv messages
+    msg_logits_t = torch.as_tensor(prev_msg_logits, device=device, dtype=torch.float32)
+    msg_post_dru = dru(msg_logits_t, train_mode=True)
+    recv_msg = route_messages(msg_post_dru, n_agents).cpu().numpy()
+
+    actions, new_msg_logits = select_actions_dial_batched(
+        agent=agent, obs=obs, recv_msg=recv_msg,
+        n_envs=n_envs, n_agents=n_agents, n_actions=n_actions,
+        epsilon=eps, rng=rng, device=device, use_agent_id=use_agent_id,
+    )
+
+    action_dict = {f"agent_{i}": actions[:, i] for i in range(n_agents)}
+    next_obs_dict, rewards_arr, terminated, truncated, infos = env.step(action_dict)
+    next_obs_raw = stack_vector_obs(next_obs_dict, n_agents)
+
+    terminated_any = np.asarray(terminated, dtype=np.bool_)
+    truncated_any = np.asarray(truncated, dtype=np.bool_)
+    done_reset = np.logical_or(terminated_any, truncated_any)
+
+    # Patch autoreset final obs
+    next_obs_for_buffer, _ = patch_autoreset_final_obs(
+        next_obs_raw, infos, done_reset, n_agents,
+    )
+
+    # Build transitions and accumulate chunks
+    rewards_np = np.asarray(rewards_arr, dtype=np.float32)
+    # Convert to shared team reward (same reward for all agents)
+    team_rewards = rewards_np.sum(axis=1, keepdims=True)
+    rewards_team = np.repeat(team_rewards, n_agents, axis=1).astype(np.float32)
+    for e in range(n_envs):
+        transition = {
+            "obs": obs_raw[e],
+            "actions": actions[e],
+            "rewards": rewards_team[e],
+            "next_obs": next_obs_for_buffer[e],
+            "done": float(terminated_any[e]),
+            "reset": bool(done_reset[e]),
+            "recv_msg": recv_msg[e],
+            "states": obs_raw[e].reshape(-1),
+            "next_states": next_obs_for_buffer[e].reshape(-1),
+        }
+        chunk = accumulator.add(e, transition)
+        if chunk is not None:
+            buffer.add(chunk)
+
+    # Update prev_msg_logits
+    prev_msg_logits[:] = new_msg_logits
+    # Reset message state for envs that reset
+    for e in range(n_envs):
+        if done_reset[e]:
+            prev_msg_logits[e] = 0.0
+
+    return DialStepResult(
+        obs=obs,
+        epsilon=eps,
+        actions=actions,
+        next_obs_raw=next_obs_raw,
+        rewards_arr=rewards_np,
+        terminated=terminated_any,
+        done_reset=done_reset,
+        infos=infos,
+        msg_logits=new_msg_logits,
     )

@@ -308,12 +308,27 @@ def load_es_policy(model_path: str, env: NCS_Env):
 
 
 def load_marl_torch_multi_agent_policy(model_path: str, env: NCS_Env):
-    from utils.marl.torch_policy import MARLTorchMultiAgentPolicy, load_marl_torch_agents_from_checkpoint
+    import torch
 
-    try:
-        import torch
-    except ImportError as e:
-        raise ImportError("torch is required to load MARL torch checkpoints") from e
+    # Check if this is a DIAL checkpoint
+    ckpt = torch.load(str(model_path), map_location="cpu")
+    if isinstance(ckpt, dict) and ckpt.get("dial", False):
+        from utils.marl.torch_policy import MARLDialTorchPolicy, load_dial_agents_from_checkpoint
+        from utils.marl.networks import DRU
+
+        agent, meta, comm_dim, dru_sigma = load_dial_agents_from_checkpoint(Path(model_path))
+        if int(getattr(env, "n_agents", 0)) != meta.n_agents:
+            raise ValueError(
+                f"Env n_agents={getattr(env, 'n_agents', None)} does not match checkpoint n_agents={meta.n_agents}. "
+                "Ensure the config and checkpoint describe the same agent count."
+            )
+        env_obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
+        if env_obs_dim != meta.obs_dim:
+            raise ValueError(f"Env obs_dim={env_obs_dim} does not match checkpoint obs_dim={meta.obs_dim}")
+        dru = DRU(sigma=dru_sigma)
+        return MARLDialTorchPolicy(agent, meta, dru, comm_dim, device=torch.device("cpu"))
+
+    from utils.marl.torch_policy import MARLTorchMultiAgentPolicy, load_marl_torch_agents_from_checkpoint
 
     agent_or_agents, meta = load_marl_torch_agents_from_checkpoint(Path(model_path))
     if int(getattr(env, "n_agents", 0)) != meta.n_agents:

@@ -242,6 +242,111 @@ class CentralValueMLP(nn.Module):
         return self.net(obs)
 
 
+class DRU(nn.Module):
+    """Discretize/Regularize Unit for DIAL communication.
+
+    During training: noisy sigmoid regularization.
+    During evaluation: hard binary discretization.
+    """
+
+    def __init__(self, sigma: float = 2.0) -> None:
+        super().__init__()
+        self.sigma = float(sigma)
+
+    def forward(self, msg_logits: torch.Tensor, train_mode: bool = True) -> torch.Tensor:
+        if train_mode:
+            return torch.sigmoid(msg_logits + torch.randn_like(msg_logits) * self.sigma)
+        else:
+            return (msg_logits > 0.0).float()
+
+
+def route_messages(msg_post_dru: torch.Tensor, n_agents: int) -> torch.Tensor:
+    """Route messages all-to-all with self-slot zeroed.
+
+    Args:
+        msg_post_dru: (batch, n_agents, comm_dim)
+    Returns:
+        recv_msgs: (batch, n_agents, n_agents * comm_dim)
+    """
+    B, N, C = msg_post_dru.shape
+    expanded = msg_post_dru.unsqueeze(1).expand(B, N, N, C).clone()
+    idx = torch.arange(N, device=msg_post_dru.device)
+    expanded[:, idx, idx, :] = 0.0
+    return expanded.reshape(B, N, N * C)
+
+
+class DialMLPAgent(nn.Module):
+    """DIAL agent with shared trunk, action Q-head, and communication head.
+
+    forward returns (q_values, msg_logits).
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        n_actions: int,
+        comm_dim: int,
+        hidden_dims: Sequence[int] = (128, 128),
+        activation: str = "relu",
+        feature_norm: bool = False,
+        layer_norm: bool = False,
+        output_gain: float = 1.0,
+        dueling: bool = False,
+        stream_hidden_dim: int = 64,
+    ) -> None:
+        super().__init__()
+        if input_dim <= 0 or n_actions <= 0 or comm_dim <= 0:
+            raise ValueError("input_dim, n_actions, and comm_dim must be positive")
+        if not hidden_dims:
+            raise ValueError("hidden_dims must be non-empty")
+
+        self.dueling = dueling
+        self.feature_norm_layer = nn.LayerNorm(input_dim) if feature_norm else None
+
+        self.features, last_dim = build_mlp_hidden(input_dim, hidden_dims, activation, layer_norm)
+
+        if dueling:
+            act = _get_activation(activation)
+            self.value_stream = nn.Sequential(
+                nn.Linear(last_dim, stream_hidden_dim),
+                act,
+                nn.Linear(stream_hidden_dim, 1),
+            )
+            self.advantage_stream = nn.Sequential(
+                nn.Linear(last_dim, stream_hidden_dim),
+                _get_activation(activation),
+                nn.Linear(stream_hidden_dim, n_actions),
+            )
+        else:
+            self.action_head = nn.Linear(last_dim, n_actions)
+
+        self.comm_head = nn.Linear(last_dim, comm_dim)
+
+        hidden_gain = _get_activation_gain(activation)
+        _apply_orthogonal_init(self, gain=hidden_gain)
+        if dueling:
+            _init_linear(self.value_stream[-1], gain=float(output_gain))
+            _init_linear(self.advantage_stream[-1], gain=float(output_gain))
+        else:
+            _init_linear(self.action_head, gain=float(output_gain))
+        _init_linear(self.comm_head, gain=float(output_gain))
+
+    def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.feature_norm_layer is not None:
+            obs = self.feature_norm_layer(obs)
+        features = self.features(obs)
+
+        if self.dueling:
+            value = self.value_stream(features)
+            advantage = self.advantage_stream(features)
+            q_values = value + (advantage - advantage.mean(dim=-1, keepdim=True))
+        else:
+            q_values = self.action_head(features)
+
+        msg_logits = self.comm_head(features)
+        return q_values, msg_logits
+
+
 class VDNMixer(nn.Module):
     def __init__(self) -> None:
         super().__init__()
