@@ -12,6 +12,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-15000000}"
 N_ENVS="${N_ENVS:-20}"
+EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-$((TOTAL_TIMESTEPS * 60 / 100))}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_root="${OUTPUT_ROOT}/exp_7_iql_dial_online_${timestamp}_seed${SEED}"
@@ -100,6 +101,7 @@ run_one() {
 # IQL-DIAL online: no experience replay (paper-aligned default)
 run_one "algorithms.marl_iql_dial" "iql_dial_online" "iql_dial_online" \
   --dial-mode online \
+  --epsilon-decay-steps "${EPS_DECAY_STEPS}" \
   --no-normalize-obs \
   --feature-norm \
   --layer-norm

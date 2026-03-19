@@ -207,9 +207,9 @@ def _evaluate_and_log_dial(
     eval_writer.writerow([global_step, f"{mean_eval_reward:.4f}", f"{std_eval_reward:.4f}"])
     eval_f.flush()
 
-    is_best = best_model_tracker.update("eval_reward", mean_eval_reward, mode="max")
-    if is_best:
-        save_checkpoint(run_dir / "best_model.pt")
+    is_best = best_model_tracker.update(
+        "eval_reward", mean_eval_reward, run_dir / "best_model.pt", save_checkpoint,
+    )
 
     delta = mean_eval_reward - mean_baseline_reward
     sign = "+" if delta >= 0 else ""
