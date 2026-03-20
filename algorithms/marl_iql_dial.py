@@ -51,6 +51,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dial-mode", choices=["online", "replay"], default="online",
                         help="'online' = no replay buffer (paper-aligned); 'replay' = experience replay")
+    parser.set_defaults(batch_size=2000)
     parser.add_argument("--comm-dim", type=int, default=1, help="Message dimension per agent")
     parser.add_argument("--dru-sigma", type=float, default=2.0, help="DRU noise std")
     parser.add_argument("--seq-len", type=int, default=2, help="Sequence chunk length (minimum 2)")
@@ -204,20 +205,45 @@ def _evaluate_and_log_dial(
     else:
         win_rate = 0.0
 
-    eval_writer.writerow([global_step, f"{mean_eval_reward:.4f}", f"{std_eval_reward:.4f}"])
+    denom = np.maximum(np.abs(baseline_arr[:n_matched]), 1e-8)
+    drop_ratios = (baseline_arr[:n_matched] - policy_arr[:n_matched]) / denom
+    mean_drop_ratio = float(np.mean(drop_ratios)) if n_matched > 0 else 0.0
+    std_drop_ratio = float(np.std(drop_ratios)) if n_matched > 0 else 0.0
+
+    drop_csv_path = run_dir / "evaluation_drop_stats.csv"
+    write_drop_header = (not drop_csv_path.exists()) or drop_csv_path.stat().st_size == 0
+    with drop_csv_path.open("a", newline="", encoding="utf-8") as drop_f:
+        drop_writer = csv.writer(drop_f)
+        if write_drop_header:
+            drop_writer.writerow([
+                "step", "baseline_policy", "baseline_perfect_communication",
+                "policy_mean_reward", "policy_std_reward",
+                "baseline_mean_reward", "baseline_std_reward",
+                "drop_ratio_mean", "drop_ratio_std", "num_episodes",
+            ])
+        drop_writer.writerow([
+            global_step, baseline_label, int(baseline_perfect_comm),
+            mean_eval_reward, std_eval_reward,
+            mean_baseline_reward, std_baseline_reward,
+            mean_drop_ratio, std_drop_ratio, n_matched,
+        ])
+        drop_f.flush()
+
+    eval_writer.writerow([global_step, mean_eval_reward, std_eval_reward])
     eval_f.flush()
 
-    is_best = best_model_tracker.update(
-        "eval_reward", mean_eval_reward, run_dir / "best_model.pt", save_checkpoint,
+    best_model_tracker.update(
+        "eval_drop_ratio", -mean_drop_ratio, run_dir / "best_model.pt", save_checkpoint,
     )
 
-    delta = mean_eval_reward - mean_baseline_reward
-    sign = "+" if delta >= 0 else ""
-    baseline_tag = f"vs {baseline_label}"
+    algo_tag = "IQL-DIAL"
     print(
-        f"[IQL-DIAL] step={global_step:,}  eval={mean_eval_reward:.2f}±{std_eval_reward:.2f}  "
-        f"{baseline_tag}={mean_baseline_reward:.2f}  Δ={sign}{delta:.2f}  "
-        f"win={win_rate:.0%}{'  ★ best' if is_best else ''}"
+        f"[{algo_tag}] Eval at step {global_step}: "
+        f"mean_reward={mean_eval_reward:.3f} std={std_eval_reward:.3f} | "
+        f"baseline={baseline_label} "
+        f"mean={mean_baseline_reward:.3f} std={std_baseline_reward:.3f} | "
+        f"drop_ratio_mean={mean_drop_ratio:.6f} drop_ratio_std={std_drop_ratio:.6f} | "
+        f"win={win_rate:.0%}"
     )
     agent.train()
 

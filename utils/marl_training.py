@@ -425,6 +425,7 @@ def evaluate_and_log(
 
     policy_arr = np.asarray(policy_rewards, dtype=np.float64)
     baseline_arr = np.asarray(baseline_rewards, dtype=np.float64)
+    win_rate = float(np.mean(policy_arr >= baseline_arr)) if len(policy_arr) > 0 else 0.0
     denom = np.maximum(np.abs(baseline_arr), 1e-8)
     drop_ratios = (baseline_arr - policy_arr) / denom
     mean_drop_ratio = float(np.mean(drop_ratios))
@@ -477,7 +478,8 @@ def evaluate_and_log(
         f"mean_reward={mean_eval_reward:.3f} std={std_eval_reward:.3f} | "
         f"baseline={baseline_label} "
         f"mean={mean_baseline_reward:.3f} std={std_baseline_reward:.3f} | "
-        f"drop_ratio_mean={mean_drop_ratio:.6f} drop_ratio_std={std_drop_ratio:.6f}"
+        f"drop_ratio_mean={mean_drop_ratio:.6f} drop_ratio_std={std_drop_ratio:.6f} | "
+        f"win={win_rate:.0%}"
     )
 
 
