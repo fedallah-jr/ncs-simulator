@@ -444,6 +444,7 @@ class DialSequenceBatch:
     actions: torch.Tensor        # (batch, seq_len, n_agents)        int64
     rewards: torch.Tensor        # (batch, seq_len, n_agents)        float32
     dones: torch.Tensor          # (batch, seq_len)                  float32
+    loss_mask: torch.Tensor      # (batch, seq_len)                  float32
     next_obs: torch.Tensor       # (batch, n_agents, obs_dim)        bootstrap obs
     init_recv_msg: torch.Tensor  # (batch, n_agents, n_agents*comm_dim)
     states: torch.Tensor         # (batch, seq_len, state_dim)
@@ -454,8 +455,12 @@ class DialChunkAccumulator:
     """Form overlapping length-``seq_len`` chunks from streaming transitions.
 
     For an episode of length T this produces T - seq_len + 1 chunks using a
-    sliding window.  Each chunk contains ``seq_len`` consecutive transitions
+    sliding window. Each chunk contains ``seq_len`` consecutive transitions
     and the ``recv_msg`` from the first transition serves as ``init_recv_msg``.
+    To avoid training the same transition repeatedly across overlapping chunks,
+    each emitted chunk carries a ``loss_mask``: the first chunk in an episode
+    trains all of its timesteps, while later chunks train only their newest
+    timestep.
 
     Episode boundaries are detected via the ``"reset"`` key on each transition
     (``terminated | truncated``), which covers both termination and truncation.
@@ -470,6 +475,7 @@ class DialChunkAccumulator:
         self.seq_len = int(seq_len)
         # Per-env sliding window of recent transitions (max length seq_len - 1)
         self._windows: List[List[dict]] = [[] for _ in range(self.n_envs)]
+        self._has_emitted_chunk: List[bool] = [False for _ in range(self.n_envs)]
 
     @staticmethod
     def _is_episode_end(transition: dict) -> bool:
@@ -483,6 +489,7 @@ class DialChunkAccumulator:
         # If the previous transition ended the episode, clear the window
         if win and self._is_episode_end(win[-1]):
             win.clear()
+            self._has_emitted_chunk[env_idx] = False
 
         win.append(transition)
 
@@ -492,14 +499,22 @@ class DialChunkAccumulator:
             # can start from here
             if self._is_episode_end(transition):
                 win.clear()
+                self._has_emitted_chunk[env_idx] = False
             return None
 
         # We have exactly seq_len transitions — form the chunk
+        loss_mask = np.zeros((self.seq_len,), dtype=np.float32)
+        if self._has_emitted_chunk[env_idx]:
+            loss_mask[-1] = 1.0
+        else:
+            loss_mask[:] = 1.0
+            self._has_emitted_chunk[env_idx] = True
         chunk = {
             "obs": np.stack([w["obs"] for w in win], axis=0),
             "actions": np.stack([w["actions"] for w in win], axis=0),
             "rewards": np.stack([w["rewards"] for w in win], axis=0),
             "dones": np.array([w["done"] for w in win], dtype=np.float32),
+            "loss_mask": loss_mask,
             "next_obs": win[-1]["next_obs"],
             "init_recv_msg": win[0]["recv_msg"],
             "states": np.stack([w["states"] for w in win], axis=0),
@@ -512,6 +527,7 @@ class DialChunkAccumulator:
         # If the last transition ended the episode, clear entirely
         if self._is_episode_end(transition):
             win.clear()
+            self._has_emitted_chunk[env_idx] = False
 
         return chunk
 
@@ -524,143 +540,24 @@ class DialChunkAccumulator:
                     {k: v.copy() if isinstance(v, np.ndarray) else v for k, v in t.items()}
                 )
             serialized_windows.append(serialized_win)
-        return {"windows": serialized_windows, "seq_len": self.seq_len}
+        return {
+            "windows": serialized_windows,
+            "seq_len": self.seq_len,
+            "has_emitted_chunk": list(self._has_emitted_chunk),
+        }
 
     def load_state_dict(self, d: dict) -> None:
         for i, win_data in enumerate(d["windows"]):
             self._windows[i] = win_data
-
-
-class DialSequenceBuffer:
-    """Circular buffer storing pre-formed DIAL sequence chunks."""
-
-    def __init__(
-        self,
-        capacity: int,
-        seq_len: int,
-        n_agents: int,
-        obs_dim: int,
-        comm_dim: int,
-        device: torch.device,
-        state_dim: Optional[int] = None,
-        rng: Optional[np.random.Generator] = None,
-    ) -> None:
-        if capacity <= 0:
-            raise ValueError("capacity must be positive")
-        self.capacity = int(capacity)
-        self.seq_len = int(seq_len)
-        self.n_agents = int(n_agents)
-        self.obs_dim = int(obs_dim)
-        self.comm_dim = int(comm_dim)
-        self.state_dim = int(state_dim) if state_dim is not None else self.n_agents * self.obs_dim
-        self._state_dim_from_obs = self.state_dim == self.n_agents * self.obs_dim
-        self.device = device
-        self.rng = rng if rng is not None else np.random.default_rng()
-
-        self._ptr = 0
-        self._size = 0
-
-        self._obs = np.zeros((capacity, seq_len, n_agents, obs_dim), dtype=np.float32)
-        self._actions = np.zeros((capacity, seq_len, n_agents), dtype=np.int64)
-        self._rewards = np.zeros((capacity, seq_len, n_agents), dtype=np.float32)
-        self._dones = np.zeros((capacity, seq_len), dtype=np.float32)
-        self._next_obs = np.zeros((capacity, n_agents, obs_dim), dtype=np.float32)
-        self._init_recv_msg = np.zeros((capacity, n_agents, n_agents * comm_dim), dtype=np.float32)
-        self._states = np.zeros((capacity, seq_len, self.state_dim), dtype=np.float32)
-        self._next_states = np.zeros((capacity, self.state_dim), dtype=np.float32)
-
-    def __len__(self) -> int:
-        return self._size
-
-    def add(self, chunk: dict) -> None:
-        idx = self._ptr
-        self._obs[idx] = chunk["obs"]
-        self._actions[idx] = chunk["actions"]
-        self._rewards[idx] = chunk["rewards"]
-        self._dones[idx] = chunk["dones"]
-        self._next_obs[idx] = chunk["next_obs"]
-        self._init_recv_msg[idx] = chunk["init_recv_msg"]
-        if "states" in chunk:
-            self._states[idx] = chunk["states"]
+        flags = d.get("has_emitted_chunk")
+        if flags is None:
+            self._has_emitted_chunk = [False for _ in range(self.n_envs)]
         else:
-            self._states[idx] = chunk["obs"].reshape(self.seq_len, -1)
-        if "next_states" in chunk:
-            self._next_states[idx] = chunk["next_states"]
-        else:
-            self._next_states[idx] = chunk["next_obs"].reshape(-1)
-        self._ptr = (self._ptr + 1) % self.capacity
-        self._size = min(self._size + 1, self.capacity)
-
-    def sample(self, batch_size: int, *, obs_normalizer: Optional[RunningObsNormalizer] = None) -> DialSequenceBatch:
-        if self._size == 0:
-            raise RuntimeError("Cannot sample from an empty buffer")
-        indices = self.rng.integers(0, self._size, size=int(batch_size), endpoint=False)
-        obs = self._obs[indices].copy()
-        next_obs = self._next_obs[indices].copy()
-        if obs_normalizer is not None:
-            B, S, N, D = obs.shape
-            obs_flat = obs.reshape(B * S * N, D)
-            obs_flat = obs_normalizer.normalize(obs_flat, update=False)
-            obs = obs_flat.reshape(B, S, N, D)
-            next_obs_flat = next_obs.reshape(B * N, D)
-            next_obs_flat = obs_normalizer.normalize(next_obs_flat, update=False)
-            next_obs = next_obs_flat.reshape(B, N, D)
-            if self._state_dim_from_obs:
-                states = obs.reshape(B, S, -1)
-                next_states = next_obs.reshape(B, -1)
-            else:
-                states = self._states[indices]
-                next_states = self._next_states[indices]
-        else:
-            states = self._states[indices]
-            next_states = self._next_states[indices]
-
-        return DialSequenceBatch(
-            obs=torch.as_tensor(obs, device=self.device, dtype=torch.float32),
-            actions=torch.as_tensor(self._actions[indices], device=self.device, dtype=torch.long),
-            rewards=torch.as_tensor(self._rewards[indices], device=self.device, dtype=torch.float32),
-            dones=torch.as_tensor(self._dones[indices], device=self.device, dtype=torch.float32),
-            next_obs=torch.as_tensor(next_obs, device=self.device, dtype=torch.float32),
-            init_recv_msg=torch.as_tensor(self._init_recv_msg[indices], device=self.device, dtype=torch.float32),
-            states=torch.as_tensor(states, device=self.device, dtype=torch.float32),
-            next_states=torch.as_tensor(next_states, device=self.device, dtype=torch.float32),
-        )
-
-    def state_dict(self) -> dict:
-        n = self._size
-        return {
-            "obs": self._obs[:n].copy(),
-            "actions": self._actions[:n].copy(),
-            "rewards": self._rewards[:n].copy(),
-            "dones": self._dones[:n].copy(),
-            "next_obs": self._next_obs[:n].copy(),
-            "init_recv_msg": self._init_recv_msg[:n].copy(),
-            "states": self._states[:n].copy(),
-            "next_states": self._next_states[:n].copy(),
-            "_ptr": self._ptr,
-            "_size": self._size,
-        }
-
-    def load_state_dict(self, d: dict) -> None:
-        n = int(d["_size"])
-        self._obs[:n] = d["obs"][:n]
-        self._actions[:n] = d["actions"][:n]
-        self._rewards[:n] = d["rewards"][:n]
-        self._dones[:n] = d["dones"][:n]
-        self._next_obs[:n] = d["next_obs"][:n]
-        self._init_recv_msg[:n] = d["init_recv_msg"][:n]
-        self._states[:n] = d["states"][:n]
-        self._next_states[:n] = d["next_states"][:n]
-        self._ptr = int(d["_ptr"])
-        self._size = n
+            self._has_emitted_chunk = [bool(v) for v in flags]
 
 
 class OnlineBatchCollector:
-    """Collects DIAL chunks for immediate on-policy training (no replay).
-
-    Duck-types the ``DialSequenceBuffer.add`` interface so it can be passed
-    directly to ``dial_collect_transition`` as the ``buffer`` argument.
-    """
+    """Collect DIAL chunks for online updates."""
 
     def __init__(self, device: torch.device, obs_normalizer_uses_obs_states: bool = True) -> None:
         self._chunks: List[dict] = []
@@ -682,6 +579,10 @@ class OnlineBatchCollector:
         actions = np.stack([c["actions"] for c in self._chunks])
         rewards = np.stack([c["rewards"] for c in self._chunks])
         dones = np.stack([c["dones"] for c in self._chunks])
+        loss_mask = np.stack([
+            c.get("loss_mask", np.ones((c["dones"].shape[0],), dtype=np.float32))
+            for c in self._chunks
+        ])
         init_recv_msg = np.stack([c["init_recv_msg"] for c in self._chunks])
         states = np.stack([c["states"] for c in self._chunks])
         next_states = np.stack([c["next_states"] for c in self._chunks])
@@ -700,6 +601,7 @@ class OnlineBatchCollector:
             actions=torch.as_tensor(actions, device=self.device, dtype=torch.long),
             rewards=torch.as_tensor(rewards, device=self.device, dtype=torch.float32),
             dones=torch.as_tensor(dones, device=self.device, dtype=torch.float32),
+            loss_mask=torch.as_tensor(loss_mask, device=self.device, dtype=torch.float32),
             next_obs=torch.as_tensor(next_obs, device=self.device, dtype=torch.float32),
             init_recv_msg=torch.as_tensor(init_recv_msg, device=self.device, dtype=torch.float32),
             states=torch.as_tensor(states, device=self.device, dtype=torch.float32),

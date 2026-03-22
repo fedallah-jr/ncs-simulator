@@ -7,7 +7,7 @@ This package provides shared components used by executable training scripts unde
 
 from __future__ import annotations
 
-from .buffer import MARLReplayBuffer, MARLBatch, DialSequenceBatch, DialSequenceBuffer, DialChunkAccumulator, OnlineBatchCollector
+from .buffer import MARLReplayBuffer, MARLBatch, DialSequenceBatch, DialChunkAccumulator, OnlineBatchCollector
 from .common import (
     select_device,
     epsilon_by_step,
@@ -75,7 +75,6 @@ __all__ = [
     "MARLBatch",
     "MARLReplayBuffer",
     "DialSequenceBatch",
-    "DialSequenceBuffer",
     "DialChunkAccumulator",
     "QLearnStepResult",
     "DialStepResult",

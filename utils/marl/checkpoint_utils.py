@@ -344,7 +344,6 @@ def save_dial_training_state(
     path: Path, learner: Any, buffer: Any, accumulator: Any,
     obs_normalizer: Any, best_model_tracker: Any,
     global_step: int, episode: int, last_eval_step: int, vector_step: int,
-    dial_mode: str = "replay",
 ) -> None:
     state: Dict[str, Any] = {
         "learner": learner.state_dict(),
@@ -356,7 +355,6 @@ def save_dial_training_state(
         "episode": episode,
         "last_eval_step": last_eval_step,
         "vector_step": vector_step,
-        "dial_mode": dial_mode,
     }
     torch.save(state, path)
 
@@ -366,6 +364,8 @@ def load_dial_training_state(
     obs_normalizer: Any, best_model_tracker: Any,
 ) -> Dict[str, Any]:
     state = torch.load(path, map_location="cpu", weights_only=False)
+    if state.get("dial_mode") not in (None, "online"):
+        raise ValueError("Replay-mode DIAL training states are no longer supported")
     learner.load_state_dict(state["learner"])
     buffer.load_state_dict(state["buffer"])
     if "accumulator" in state:

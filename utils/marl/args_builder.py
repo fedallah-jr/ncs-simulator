@@ -16,7 +16,11 @@ def _add_set_override_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def build_base_qlearning_parser(description: str) -> argparse.ArgumentParser:
+def build_base_qlearning_parser(
+    description: str,
+    *,
+    include_replay_buffer_args: bool = True,
+) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--output-root", type=Path, default=Path("outputs"))
@@ -26,10 +30,11 @@ def build_base_qlearning_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--episode-length", type=int, default=250)
     parser.add_argument("--total-timesteps", type=int, default=200_000)
     parser.add_argument("--n-envs", type=int, default=1)
-    parser.add_argument("--buffer-size", type=int, default=200_000)
     parser.add_argument("--batch-size", type=int, default=2048)
-    parser.add_argument("--start-learning", type=int, default=1_000)
-    parser.add_argument("--train-interval", type=int, default=1)
+    if include_replay_buffer_args:
+        parser.add_argument("--buffer-size", type=int, default=200_000)
+        parser.add_argument("--start-learning", type=int, default=1_000)
+        parser.add_argument("--train-interval", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=5e-4)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--target-update-interval", type=int, default=500)

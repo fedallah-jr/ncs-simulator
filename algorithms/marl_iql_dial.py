@@ -14,7 +14,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from utils.marl import (
-    DialSequenceBuffer,
     OnlineBatchCollector,
     IQLDIALLearner,
     DialMLPAgent,
@@ -26,7 +25,6 @@ from utils.marl import (
     load_dial_training_state,
     build_qlearning_hyperparams,
     dial_collect_transition,
-    patch_autoreset_final_obs,
 )
 from utils.marl.buffer import DialChunkAccumulator
 from utils.marl.common import run_evaluation_vectorized_seeded, epsilon_by_step
@@ -47,12 +45,11 @@ from utils.run_utils import prepare_run_directory, save_config_with_hyperparamet
 
 def parse_args() -> argparse.Namespace:
     parser = build_base_qlearning_parser(
-        description="Train IQL-DIAL (shared MLP + differentiable communication) on multi-agent NCS env."
+        description="Train IQL-DIAL (shared MLP + differentiable communication) on multi-agent NCS env.",
+        include_replay_buffer_args=False,
     )
-    parser.add_argument("--dial-mode", choices=["online", "replay"], default="online",
-                        help="'online' = no replay buffer (paper-aligned); 'replay' = experience replay")
     parser.set_defaults(batch_size=2000)
-    parser.add_argument("--comm-dim", type=int, default=1, help="Message dimension per agent")
+    parser.add_argument("--comm-dim", type=int, default=4, help="Message dimension per agent")
     parser.add_argument("--dru-sigma", type=float, default=2.0, help="DRU noise std")
     parser.add_argument("--seq-len", type=int, default=2, help="Sequence chunk length (minimum 2)")
     return parser.parse_args()
@@ -261,8 +258,7 @@ def main() -> None:
     )
     eval_baseline = resolve_training_eval_baseline(cfg, n_agents)
 
-    online_mode = args.dial_mode == "online"
-    algo_label = "iql_dial_online" if online_mode else "iql_dial_replay"
+    algo_label = "iql_dial"
 
     resuming = args.resume is not None
     if resuming:
@@ -341,18 +337,7 @@ def main() -> None:
         optimizer_type=args.optimizer,
     )
 
-    if online_mode:
-        buffer = OnlineBatchCollector(device=device)
-    else:
-        buffer = DialSequenceBuffer(
-            capacity=args.buffer_size,
-            seq_len=args.seq_len,
-            n_agents=n_agents,
-            obs_dim=obs_dim,
-            comm_dim=comm_dim,
-            device=device,
-            rng=rng,
-        )
+    buffer = OnlineBatchCollector(device=device)
 
     accumulator = DialChunkAccumulator(n_envs=args.n_envs, seq_len=args.seq_len)
     prev_msg_logits = np.zeros((args.n_envs, n_agents, comm_dim), dtype=np.float32)
@@ -405,7 +390,7 @@ def main() -> None:
         save_dial_training_state(
             run_dir / "training_state.pt", learner, buffer, accumulator,
             obs_normalizer, best_model_tracker, global_step, episode,
-            last_eval_step, vector_step, dial_mode=args.dial_mode,
+            last_eval_step, vector_step,
         )
 
     csv_mode = "a" if resuming else "w"
@@ -448,17 +433,14 @@ def main() -> None:
                 train_writer=train_writer, train_f=train_f,
                 best_model_tracker=best_model_tracker, run_dir=run_dir,
                 save_checkpoint=save_checkpoint, log_interval=args.log_interval,
-                algo_name="IQL-DIAL-online" if online_mode else "IQL-DIAL-replay",
+                algo_name="IQL-DIAL",
                 extra_csv_values=step.epsilon,
                 extra_log_str=f" eps={step.epsilon:.3f}",
             )
 
-            if online_mode:
-                if len(buffer) >= args.batch_size:
-                    batch = buffer.pop_batch(obs_normalizer=obs_normalizer)
-                    learner.update(batch)
-            elif len(buffer) >= args.start_learning and vector_step % args.train_interval == 0:
-                batch = buffer.sample(args.batch_size, obs_normalizer=obs_normalizer)
+            if len(buffer) >= args.batch_size:
+                batch = buffer.pop_batch(obs_normalizer=obs_normalizer)
+                assert batch is not None
                 learner.update(batch)
 
             if global_step - last_eval_step >= args.eval_freq:
@@ -493,7 +475,6 @@ def main() -> None:
         "comm_dim": comm_dim,
         "dru_sigma": args.dru_sigma,
         "seq_len": args.seq_len,
-        "dial_mode": args.dial_mode,
     })
     save_config_with_hyperparameters(
         run_dir,

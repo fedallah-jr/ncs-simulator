@@ -10,6 +10,9 @@ Learning-based baselines live under `algorithms/`:
   - Uses `system.n_agents` from the config and appends a one-hot agent id for parameter sharing when `n_agents > 1`.
   - Observation normalization matches MARL flags: `--no-normalize-obs`, `--obs-norm-clip`, `--obs-norm-eps`.
 - IQL (multi-agent, PyTorch): `python -m algorithms.marl_iql --config configs/marl_absolute_plants.json --total-timesteps 200000`
+- IQL-DIAL (multi-agent, PyTorch, online-only): `python -m algorithms.marl_iql_dial --config configs/marl_absolute_plants.json --total-timesteps 200000`
+  - Uses a shared MLP with differentiable communication and sequence unrolling (`--seq-len`, minimum `2`).
+  - Communication-specific knobs: `--comm-dim` and `--dru-sigma`.
 - VDN (multi-agent, PyTorch): `python -m algorithms.marl_vdn --config configs/marl_absolute_plants.json --total-timesteps 200000`
 - QMIX (multi-agent, PyTorch): `python -m algorithms.marl_qmix --config configs/marl_absolute_plants.json --total-timesteps 200000`
 - QPLEX (multi-agent, PyTorch, Q-attention mixer): `python -m algorithms.marl_qplex --config configs/marl_absolute_plants.json --total-timesteps 200000`
@@ -29,14 +32,14 @@ Learning-based baselines live under `algorithms/`:
   - `--popart`: Use PopArt value normalization instead of the default EMA-based ValueNorm.
   - PopArt EMA decay can be tuned with `--popart-beta` (default `0.999`).
 
-All MARL Q-learning algorithms (IQL, VDN, QMIX, QPLEX) support these architectural enhancements:
+All MARL Q-learning algorithms (IQL, IQL-DIAL, VDN, QMIX, QPLEX) support these architectural enhancements:
 - `--double-q`: Enable Double DQN (use online network to select actions, target network to evaluate).
 - `--dueling`: Enable Dueling DQN architecture (separate value and advantage streams).
 - `--stream-hidden-dim`: Hidden dimension for dueling streams (default: 64).
 
 Example with all enhancements: `python -m algorithms.marl_qmix --config configs/marl_absolute_plants.json --dueling --double-q --total-timesteps 200000`
 
-All MARL algorithms (IQL, VDN, QMIX, QPLEX, MAPPO, HAPPO) support observation normalization (enabled by default):
+All MARL algorithms (IQL, IQL-DIAL, VDN, QMIX, QPLEX, MAPPO, HAPPO) support observation normalization (enabled by default):
 - `--no-normalize-obs`: Disable running mean/std normalization on per-agent observations.
 - `--obs-norm-clip`: Clip normalized observations to +/- this value (<=0 disables).
 - `--obs-norm-eps`: Epsilon for observation normalization.

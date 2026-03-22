@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MARL experiment batch 7: IQL-DIAL online (no experience replay, paper-aligned)
+# MARL experiment batch 7: IQL-DIAL (online-only, paper-aligned)
 # Single-stage training with config-defined reward, reward normalization off.
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,7 +15,7 @@ N_ENVS="${N_ENVS:-8}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-$((TOTAL_TIMESTEPS * 60 / 100))}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/exp_7_iql_dial_online_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/exp_7_iql_dial_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -98,9 +98,8 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
-# IQL-DIAL online: no experience replay (paper-aligned default)
-run_one "algorithms.marl_iql_dial" "iql_dial_online" "iql_dial_online" \
-  --dial-mode online \
+# IQL-DIAL: online-only (paper-aligned)
+run_one "algorithms.marl_iql_dial" "iql_dial" "iql_dial" \
   --epsilon-decay-steps "${EPS_DECAY_STEPS}" \
   --no-normalize-obs \
   --feature-norm \

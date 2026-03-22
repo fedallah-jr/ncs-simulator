@@ -512,7 +512,6 @@ class IQLDIALLearner:
         # ===== ONLINE UNROLL (with gradients) =====
         recv = batch.init_recv_msg  # (B, N, N*C)
         online_q = []
-        online_msg = []
         for t in range(seq_len):
             obs_t = _maybe_append_id(batch.obs[:, t], N, self.use_agent_id)
             inp = torch.cat([obs_t, recv], dim=-1)
@@ -520,7 +519,6 @@ class IQLDIALLearner:
             q_t = q_t.view(B, N, self.n_actions)
             m_t = m_t.view(B, N, self.comm_dim)
             online_q.append(q_t)
-            online_msg.append(m_t)
             if t < seq_len - 1:
                 recv = route_messages(self.dru(m_t, train_mode=True), N)
 
@@ -528,6 +526,7 @@ class IQLDIALLearner:
         with torch.no_grad():
             recv_tgt = batch.init_recv_msg
             target_q = []
+            selector_q = [] if self.double_q else None
             for t in range(seq_len):
                 obs_t = _maybe_append_id(batch.obs[:, t], N, self.use_agent_id)
                 inp = torch.cat([obs_t, recv_tgt], dim=-1)
@@ -535,6 +534,9 @@ class IQLDIALLearner:
                 q_t_tgt = q_t_tgt.view(B, N, self.n_actions)
                 m_t_tgt = m_t_tgt.view(B, N, self.comm_dim)
                 target_q.append(q_t_tgt)
+                if self.double_q:
+                    q_t_sel, _ = self.agent(inp.reshape(B * N, -1))
+                    selector_q.append(q_t_sel.view(B, N, self.n_actions))
                 recv_tgt = route_messages(self.dru(m_t_tgt, train_mode=True), N)
             # recv_tgt now = messages from target at step seq_len
 
@@ -544,9 +546,11 @@ class IQLDIALLearner:
             q_boot_tgt, _ = self.target_agent(inp_boot.reshape(B * N, -1))
             q_boot_tgt = q_boot_tgt.view(B, N, self.n_actions)
 
-            # Double-Q: online action selection for bootstrap
-            q_boot_online, _ = self.agent(inp_boot.reshape(B * N, -1))
-            q_boot_online = q_boot_online.view(B, N, self.n_actions)
+            q_boot_selector = None
+            if self.double_q:
+                # Double-Q must select and evaluate on the same communication-conditioned input.
+                q_boot_selector, _ = self.agent(inp_boot.reshape(B * N, -1))
+                q_boot_selector = q_boot_selector.view(B, N, self.n_actions)
 
             # Compute TD targets
             targets = []
@@ -554,13 +558,15 @@ class IQLDIALLearner:
                 if t < seq_len - 1:
                     next_q_tgt = target_q[t + 1]
                     if self.double_q:
-                        a_star = online_q[t + 1].detach().argmax(-1, keepdim=True)
+                        assert selector_q is not None
+                        a_star = selector_q[t + 1].argmax(-1, keepdim=True)
                     else:
                         a_star = next_q_tgt.argmax(-1, keepdim=True)
                     bootstrap_val = next_q_tgt.gather(-1, a_star).squeeze(-1)
                 else:
                     if self.double_q:
-                        a_star = q_boot_online.argmax(-1, keepdim=True)
+                        assert q_boot_selector is not None
+                        a_star = q_boot_selector.argmax(-1, keepdim=True)
                     else:
                         a_star = q_boot_tgt.argmax(-1, keepdim=True)
                     bootstrap_val = q_boot_tgt.gather(-1, a_star).squeeze(-1)
@@ -571,10 +577,13 @@ class IQLDIALLearner:
 
         # ===== LOSS =====
         total_loss = torch.tensor(0.0, device=self.device)
+        loss_mask = batch.loss_mask.to(dtype=torch.float32)
         for t in range(seq_len):
             q_taken = online_q[t].gather(-1, batch.actions[:, t].unsqueeze(-1)).squeeze(-1)
-            total_loss = total_loss + F.mse_loss(q_taken, targets[t])
-        total_loss = total_loss / seq_len
+            td_error = F.mse_loss(q_taken, targets[t], reduction="none")
+            total_loss = total_loss + (td_error * loss_mask[:, t].unsqueeze(-1)).sum()
+        total_weight = (loss_mask.sum() * float(N)).clamp_min(1.0)
+        total_loss = total_loss / total_weight
 
         # ===== BACKPROP =====
         self.optimizer.zero_grad(set_to_none=True)
