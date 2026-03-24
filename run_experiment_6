@@ -99,6 +99,7 @@ run_one() {
 
 # Single-stage training: config-defined reward, reward normalization off.
 run_one "algorithms.marl_hasac" "hasac" "hasac" \
+  --cevat_state \
   --no-normalize-obs \
   --feature-norm \
   --layer-norm \

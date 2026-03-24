@@ -16,6 +16,16 @@ def _add_set_override_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_cevat_state_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--cevat_state",
+        action="append_const",
+        const="observation.cevat_state=true",
+        dest="set_overrides",
+        help="Replace each local observation with the concatenated observations of all agents.",
+    )
+
+
 def build_base_qlearning_parser(
     description: str,
     *,
@@ -70,6 +80,7 @@ def build_base_qlearning_parser(
     parser.add_argument("--n-eval-episodes", type=int, default=80)
     parser.add_argument("--n-eval-envs", type=int, default=8)
     _add_set_override_argument(parser)
+    _add_cevat_state_argument(parser)
     parser.set_defaults(normalize_obs=True)
     return parser
 
@@ -148,6 +159,7 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--n-eval-episodes", type=int, default=80)
     parser.add_argument("--n-eval-envs", type=int, default=8)
     _add_set_override_argument(parser)
+    _add_cevat_state_argument(parser)
     parser.set_defaults(normalize_obs=True, lr_decay=False)
     return parser
 
@@ -263,6 +275,7 @@ def build_hasac_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--n-eval-episodes", type=int, default=80)
     parser.add_argument("--n-eval-envs", type=int, default=8)
     _add_set_override_argument(parser)
+    _add_cevat_state_argument(parser)
     parser.set_defaults(
         normalize_obs=True,
         auto_alpha=False,
@@ -365,5 +378,6 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--n-eval-episodes", type=int, default=80)
     parser.add_argument("--n-eval-envs", type=int, default=8)
     _add_set_override_argument(parser)
+    _add_cevat_state_argument(parser)
     parser.set_defaults(normalize_obs=True, lr_decay=False)
     return parser

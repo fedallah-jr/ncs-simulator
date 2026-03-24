@@ -33,7 +33,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ncs_env.env import NCS_Env
-from utils.marl.args_builder import _add_set_override_argument
+from utils.marl.args_builder import _add_cevat_state_argument, _add_set_override_argument
 from utils.marl.common import run_evaluation_vectorized_seeded
 from utils.marl.vector_env import create_eval_async_vector_env
 from utils.marl_training import load_config_with_overrides, resolve_training_eval_baseline
@@ -1062,6 +1062,7 @@ def parse_args():
     parser.add_argument("--n-workers", type=int, default=multiprocessing.cpu_count(), help="Workers.")
     parser.add_argument("--checkpoint-freq", type=int, default=5, help="Checkpoint frequency.")
     _add_set_override_argument(parser)
+    _add_cevat_state_argument(parser)
     parser.add_argument("--output-root", type=Path, default=Path("outputs"), help="Output directory.")
     parser.set_defaults(normalize_obs=True)
     return parser.parse_args()

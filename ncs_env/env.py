@@ -157,6 +157,7 @@ class NCS_Env(gym.Env):
         self.throughput_windows = [tp_window] if isinstance(tp_window, int) else list(tp_window)
         self.n_throughput_windows = len(self.throughput_windows)
         self.quantization_step = observation_cfg.get("quantization_step", 0.05)
+        self.cevat_state = bool(observation_cfg.get("cevat_state", False))
 
         # Create a local RNG instance for this environment
         self.np_random, _ = gym.utils.seeding.np_random(seed)
@@ -166,7 +167,7 @@ class NCS_Env(gym.Env):
             {f"agent_{i}": spaces.Discrete(2) for i in range(n_agents)}
         )
 
-        obs_dim = (
+        local_obs_dim = (
             self.state_dim  # current state
             + self.state_dim  # local sensor KF state estimate
             + self.state_dim  # local estimation gap
@@ -176,11 +177,14 @@ class NCS_Env(gym.Env):
             + self.history_window  # previous statuses
             + self.history_window  # previous throughputs
         )
-        self.obs_dim = int(obs_dim)
+        self.local_obs_dim = int(local_obs_dim)
+        self.obs_dim = (
+            self.local_obs_dim * self.n_agents if self.cevat_state else self.local_obs_dim
+        )
         self.observation_space = spaces.Dict(
             {
                 f"agent_{i}": spaces.Box(
-                    low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
+                    low=-np.inf, high=np.inf, shape=(self.obs_dim,), dtype=np.float32
                 )
                 for i in range(n_agents)
             }
@@ -1484,7 +1488,7 @@ class NCS_Env(gym.Env):
             throughputs = self._compute_observed_goodput_kbps_multi(i)
             measurement = self.last_sensor_measurements[i]
             quantized_state = self._quantize_state(measurement)
-            obs_values = np.empty(self.obs_dim, dtype=np.float32)
+            obs_values = np.empty(self.local_obs_dim, dtype=np.float32)
             cursor = 0
             obs_values[cursor : cursor + self.state_dim] = quantized_state
             cursor += self.state_dim
@@ -1515,6 +1519,15 @@ class NCS_Env(gym.Env):
             observations[f"agent_{i}"] = obs_values
             current_throughputs.append(throughputs[0])  # Use first window for history
             quantized_states.append(quantized_state)
+
+        if self.cevat_state:
+            joint_obs = np.concatenate(
+                [observations[f"agent_{i}"] for i in range(self.n_agents)]
+            ).astype(np.float32, copy=False)
+            observations = {
+                agent_id: joint_obs.copy()
+                for agent_id in observations
+            }
 
         self._update_history_buffers(current_throughputs, quantized_states)
         return observations
