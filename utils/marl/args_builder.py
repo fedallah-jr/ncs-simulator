@@ -20,6 +20,7 @@ def build_base_qlearning_parser(
     description: str,
     *,
     include_replay_buffer_args: bool = True,
+    include_mlp_arch_args: bool = True,
 ) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--config", type=Path, default=None)
@@ -30,30 +31,34 @@ def build_base_qlearning_parser(
     parser.add_argument("--episode-length", type=int, default=250)
     parser.add_argument("--total-timesteps", type=int, default=200_000)
     parser.add_argument("--n-envs", type=int, default=1)
-    parser.add_argument("--batch-size", type=int, default=2048)
+    if include_mlp_arch_args:
+        parser.add_argument("--batch-size", type=int, default=2048)
     if include_replay_buffer_args:
         parser.add_argument("--buffer-size", type=int, default=200_000)
         parser.add_argument("--start-learning", type=int, default=1_000)
         parser.add_argument("--train-interval", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=5e-4)
     parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--target-update-interval", type=int, default=500)
+    if include_mlp_arch_args:
+        parser.add_argument("--target-update-interval", type=int, default=500)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
-    parser.add_argument("--double-q", action="store_true")
+    if include_mlp_arch_args:
+        parser.add_argument("--double-q", action="store_true")
     parser.add_argument("--optimizer", type=str, default="rmsprop", choices=["adam", "rmsprop"])
     parser.add_argument("--epsilon-start", type=float, default=1.0)
     parser.add_argument("--epsilon-end", type=float, default=0.05)
     parser.add_argument("--epsilon-decay-steps", type=int, default=100_000)
-    parser.add_argument("--hidden-dims", type=int, nargs="+", default=[64, 64])
-    parser.add_argument("--activation", type=str, default="tanh", choices=["relu", "tanh", "elu"])
-    parser.add_argument("--feature-norm", action="store_true",
-                        help="Apply LayerNorm to input features (first layer).")
-    parser.add_argument("--layer-norm", action="store_true",
-                        help="Apply LayerNorm after each hidden layer.")
-    parser.add_argument("--dueling", action="store_true")
-    parser.add_argument("--stream-hidden-dim", type=int, default=64)
-    parser.add_argument("--no-agent-id", action="store_true")
-    parser.add_argument("--independent-agents", action="store_true")
+    if include_mlp_arch_args:
+        parser.add_argument("--hidden-dims", type=int, nargs="+", default=[64, 64])
+        parser.add_argument("--activation", type=str, default="tanh", choices=["relu", "tanh", "elu"])
+        parser.add_argument("--feature-norm", action="store_true",
+                            help="Apply LayerNorm to input features (first layer).")
+        parser.add_argument("--layer-norm", action="store_true",
+                            help="Apply LayerNorm after each hidden layer.")
+        parser.add_argument("--dueling", action="store_true")
+        parser.add_argument("--stream-hidden-dim", type=int, default=64)
+        parser.add_argument("--no-agent-id", action="store_true")
+        parser.add_argument("--independent-agents", action="store_true")
     obs_norm_group = parser.add_mutually_exclusive_group()
     obs_norm_group.add_argument("--normalize-obs", action="store_true")
     obs_norm_group.add_argument("--no-normalize-obs", action="store_false", dest="normalize_obs")

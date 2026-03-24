@@ -385,6 +385,67 @@ def load_dial_training_state(
     }
 
 
+def save_dial_rnn_checkpoint(
+    path: Path, n_agents: int, obs_dim: int, n_actions: int,
+    agent: torch.nn.Module, obs_normalizer: Optional["RunningObsNormalizer"],
+    comm_dim: int, dru_sigma: float,
+    rnn_hidden_dim: int = 128, rnn_layers: int = 2,
+) -> None:
+    ckpt: Dict[str, Any] = {
+        "algorithm": "iql_dial_rnn", "n_agents": n_agents, "obs_dim": obs_dim,
+        "n_actions": n_actions, "use_agent_id": True, "parameter_sharing": True,
+        "dial": True, "dial_arch": "rnn",
+        "comm_dim": comm_dim, "dru_sigma": dru_sigma,
+        "rnn_hidden_dim": rnn_hidden_dim, "rnn_layers": rnn_layers,
+        "agent_state_dict": agent.state_dict(),
+    }
+    ckpt["obs_normalization"] = (
+        obs_normalizer.state_dict() if obs_normalizer is not None else {"enabled": False}
+    )
+    torch.save(ckpt, path)
+
+
+def save_dial_rnn_training_state(
+    path: Path, learner: Any, collector: Any,
+    obs_normalizer: Any, best_model_tracker: Any,
+    global_step: int, episode: int, last_eval_step: int, vector_step: int,
+) -> None:
+    state: Dict[str, Any] = {
+        "learner": learner.state_dict(),
+        "collector": collector.state_dict(),
+        "obs_normalizer": obs_normalizer.state_dict() if obs_normalizer is not None else None,
+        "best_model_tracker": dict(best_model_tracker._best),
+        "global_step": global_step,
+        "episode": episode,
+        "last_eval_step": last_eval_step,
+        "vector_step": vector_step,
+    }
+    torch.save(state, path)
+
+
+def load_dial_rnn_training_state(
+    path: Path, learner: Any, collector: Any,
+    obs_normalizer: Any, best_model_tracker: Any,
+) -> Dict[str, Any]:
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    learner.load_state_dict(state["learner"])
+    if "collector" in state:
+        collector.load_state_dict(state["collector"])
+    if state["obs_normalizer"] is not None and obs_normalizer is not None:
+        from utils.marl.obs_normalization import RunningObsNormalizer
+        restored = RunningObsNormalizer.from_state_dict(state["obs_normalizer"])
+        obs_normalizer.mean = restored.mean
+        obs_normalizer.m2 = restored.m2
+        obs_normalizer.count = restored.count
+    best_model_tracker._best = dict(state["best_model_tracker"])
+    return {
+        "global_step": int(state["global_step"]),
+        "episode": int(state["episode"]),
+        "last_eval_step": int(state["last_eval_step"]),
+        "vector_step": int(state["vector_step"]),
+    }
+
+
 def build_qlearning_hyperparams(
     algorithm: str, args: Any, n_agents: int, use_agent_id: bool,
     device: torch.device, mixer_params: Optional[Dict[str, Any]] = None,
@@ -392,8 +453,8 @@ def build_qlearning_hyperparams(
     hyperparams: Dict[str, Any] = {
         "total_timesteps": args.total_timesteps, "episode_length": args.episode_length,
         "n_agents": n_agents, "n_envs": args.n_envs,
-        "buffer_size": args.buffer_size, "batch_size": args.batch_size,
-        "start_learning": args.start_learning, "train_interval": args.train_interval,
+        "buffer_size": getattr(args, "buffer_size", None), "batch_size": args.batch_size,
+        "start_learning": getattr(args, "start_learning", None), "train_interval": getattr(args, "train_interval", None),
         "learning_rate": args.learning_rate, "gamma": args.gamma,
         "target_update_interval": args.target_update_interval,
         "grad_clip_norm": args.grad_clip_norm, "double_q": args.double_q,

@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from utils.marl.common import select_actions, stack_obs
-from utils.marl.networks import MLPAgent, DuelingMLPAgent, DialMLPAgent, DRU, route_messages
+from utils.marl.networks import MLPAgent, DuelingMLPAgent, DialMLPAgent, DialRNNAgent, DRU, route_messages
 from utils.marl.obs_normalization import RunningObsNormalizer
 
 
@@ -271,5 +271,112 @@ class MARLDialTorchPolicy:
         inp = torch.cat([obs_t, recv_msg], dim=-1)
         q_values, msg_logits = self.agent(inp.reshape(n_agents, -1))
         actions = q_values.argmax(dim=-1).cpu().numpy().astype(np.int64)
+        self.prev_msg_logits = msg_logits.view(n_agents, self.comm_dim)
+        return {f"agent_{i}": int(actions[i]) for i in range(n_agents)}
+
+
+# ---------------------------------------------------------------------------
+# Recurrent DIAL inference
+# ---------------------------------------------------------------------------
+
+def load_dial_rnn_agent_from_checkpoint(
+    model_path: Path,
+) -> Tuple[DialRNNAgent, MARLTorchCheckpointMetadata, int, float]:
+    """Load a recurrent DIAL agent from checkpoint.
+
+    Returns (agent, metadata, comm_dim, dru_sigma).
+    """
+    ckpt = _load_checkpoint_dict(model_path)
+
+    n_agents = int(ckpt.get("n_agents", 1))
+    obs_dim = int(ckpt.get("obs_dim", 0))
+    n_actions = int(ckpt.get("n_actions", 0))
+    comm_dim = int(ckpt.get("comm_dim", 1))
+    dru_sigma = float(ckpt.get("dru_sigma", 2.0))
+    rnn_hidden_dim = int(ckpt.get("rnn_hidden_dim", 128))
+    rnn_layers = int(ckpt.get("rnn_layers", 2))
+
+    obs_normalizer: Optional[RunningObsNormalizer] = None
+    obs_norm_state = ckpt.get("obs_normalization", None)
+    if isinstance(obs_norm_state, dict) and bool(obs_norm_state.get("enabled", False)):
+        obs_normalizer = RunningObsNormalizer.from_state_dict(obs_norm_state)
+
+    agent = DialRNNAgent(
+        obs_dim=obs_dim,
+        n_agents=n_agents,
+        n_actions=n_actions,
+        comm_dim=comm_dim,
+        rnn_hidden_dim=rnn_hidden_dim,
+        rnn_layers=rnn_layers,
+    )
+    agent.load_state_dict(ckpt["agent_state_dict"])
+    agent.eval()
+
+    metadata = MARLTorchCheckpointMetadata(
+        algorithm=str(ckpt.get("algorithm", "iql_dial_rnn")),
+        n_agents=n_agents,
+        obs_dim=obs_dim,
+        n_actions=n_actions,
+        use_agent_id=True,
+        parameter_sharing=True,
+        agent_hidden_dims=(),
+        agent_activation="relu",
+        obs_normalizer=obs_normalizer,
+    )
+    return agent, metadata, comm_dim, dru_sigma
+
+
+class MARLDialRNNTorchPolicy:
+    """Stateful recurrent DIAL policy for inference."""
+
+    def __init__(
+        self,
+        agent: DialRNNAgent,
+        metadata: MARLTorchCheckpointMetadata,
+        dru: DRU,
+        comm_dim: int,
+        *,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        self.agent = agent
+        self.metadata = metadata
+        self.dru = dru
+        self.comm_dim = comm_dim
+        self.device = device or torch.device("cpu")
+        self.agent.to(self.device)
+
+        n_agents = metadata.n_agents
+        self.hidden = agent.init_hidden(n_agents).to(self.device)
+        self.prev_action = torch.full(
+            (n_agents,), agent.n_actions, dtype=torch.long, device=self.device,
+        )
+        self.prev_msg_logits = torch.zeros(
+            n_agents, comm_dim, device=self.device,
+        )
+
+    def reset(self) -> None:
+        self.hidden.zero_()
+        self.prev_action.fill_(self.agent.n_actions)
+        self.prev_msg_logits.zero_()
+
+    @torch.no_grad()
+    def act(self, obs_dict: Mapping[str, Any]) -> Dict[str, int]:
+        n_agents = self.metadata.n_agents
+        obs = stack_obs(dict(obs_dict), n_agents)
+        if self.metadata.obs_normalizer is not None:
+            obs = self.metadata.obs_normalizer.normalize(obs, update=False)
+
+        obs_t = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
+        msg_post_dru = self.dru(self.prev_msg_logits.unsqueeze(0), train_mode=False)
+        recv_msg = route_messages(msg_post_dru, n_agents).squeeze(0)
+
+        agent_idx = torch.arange(n_agents, device=self.device)
+
+        q_values, msg_logits, new_hidden = self.agent(
+            obs_t, agent_idx, self.prev_action, recv_msg, self.hidden,
+        )
+        actions = q_values.argmax(dim=-1).cpu().numpy().astype(np.int64)
+        self.hidden = new_hidden
+        self.prev_action = torch.as_tensor(actions, device=self.device, dtype=torch.long)
         self.prev_msg_logits = msg_logits.view(n_agents, self.comm_dim)
         return {f"agent_{i}": int(actions[i]) for i in range(n_agents)}

@@ -613,3 +613,115 @@ class OnlineBatchCollector:
 
     def load_state_dict(self, d: dict) -> None:
         self._chunks.clear()
+
+
+# ---------------------------------------------------------------------------
+# Recurrent DIAL episode batch and collector
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class DialRNNEpisodeBatch:
+    obs: torch.Tensor            # (B, max_T, N, obs_dim)
+    actions: torch.Tensor        # (B, max_T, N)           int64
+    rewards: torch.Tensor        # (B, max_T, N)           float32
+    terminated: torch.Tensor     # (B, max_T)              float32
+    mask: torch.Tensor           # (B, max_T)              float32
+    next_obs: torch.Tensor       # (B, N, obs_dim)         bootstrap obs
+
+
+class DialRNNEpisodeCollector:
+    """Accumulate complete episodes from vectorized envs for recurrent DIAL."""
+
+    def __init__(self, n_envs: int, device: torch.device) -> None:
+        self.n_envs = n_envs
+        self.device = device
+        self._buffers: List[List[dict]] = [[] for _ in range(n_envs)]
+        self._completed: List[dict] = []
+
+    def add(self, env_idx: int, transition: dict) -> None:
+        self._buffers[env_idx].append(transition)
+        if transition.get("reset", transition["done"]):
+            self._completed.append(self._finalize(env_idx))
+            self._buffers[env_idx] = []
+
+    def _finalize(self, env_idx: int) -> dict:
+        buf = self._buffers[env_idx]
+        return {
+            "obs": np.stack([t["obs"] for t in buf]),
+            "actions": np.stack([t["actions"] for t in buf]),
+            "rewards": np.stack([t["rewards"] for t in buf]),
+            "terminated": np.array([t["done"] for t in buf], dtype=np.float32),
+            "next_obs": buf[-1]["next_obs"],
+        }
+
+    def has_episodes(self, min_count: int) -> bool:
+        return len(self._completed) >= min_count
+
+    def __len__(self) -> int:
+        return len(self._completed)
+
+    def pop_batch(
+        self, n_episodes: int, obs_normalizer: Optional[RunningObsNormalizer] = None,
+    ) -> Optional[DialRNNEpisodeBatch]:
+        if len(self._completed) < n_episodes:
+            return None
+        episodes = self._completed[:n_episodes]
+        self._completed = self._completed[n_episodes:]
+
+        lengths = [ep["obs"].shape[0] for ep in episodes]
+        max_T = max(lengths)
+        B = len(episodes)
+
+        # Determine shapes from first episode
+        sample = episodes[0]
+        N, obs_dim = sample["obs"].shape[1], sample["obs"].shape[2]
+
+        obs = np.zeros((B, max_T, N, obs_dim), dtype=np.float32)
+        actions = np.zeros((B, max_T, N), dtype=np.int64)
+        rewards = np.zeros((B, max_T, N), dtype=np.float32)
+        terminated = np.zeros((B, max_T), dtype=np.float32)
+        mask = np.zeros((B, max_T), dtype=np.float32)
+        next_obs = np.stack([ep["next_obs"] for ep in episodes])
+
+        for i, ep in enumerate(episodes):
+            T = lengths[i]
+            obs[i, :T] = ep["obs"]
+            actions[i, :T] = ep["actions"]
+            rewards[i, :T] = ep["rewards"]
+            terminated[i, :T] = ep["terminated"]
+            mask[i, :T] = 1.0
+
+        if obs_normalizer is not None:
+            obs = obs_normalizer.normalize(
+                obs.reshape(B * max_T * N, obs_dim), update=False,
+            ).reshape(B, max_T, N, obs_dim)
+            next_obs = obs_normalizer.normalize(
+                next_obs.reshape(B * N, obs_dim), update=False,
+            ).reshape(B, N, obs_dim)
+
+        return DialRNNEpisodeBatch(
+            obs=torch.as_tensor(obs, device=self.device, dtype=torch.float32),
+            actions=torch.as_tensor(actions, device=self.device, dtype=torch.long),
+            rewards=torch.as_tensor(rewards, device=self.device, dtype=torch.float32),
+            terminated=torch.as_tensor(terminated, device=self.device, dtype=torch.float32),
+            mask=torch.as_tensor(mask, device=self.device, dtype=torch.float32),
+            next_obs=torch.as_tensor(next_obs, device=self.device, dtype=torch.float32),
+        )
+
+    def state_dict(self) -> dict:
+        serialized_buffers = []
+        for buf in self._buffers:
+            serialized_buffers.append([
+                {k: v.copy() if isinstance(v, np.ndarray) else v for k, v in t.items()}
+                for t in buf
+            ])
+        serialized_completed = []
+        for ep in self._completed:
+            serialized_completed.append(
+                {k: v.copy() if isinstance(v, np.ndarray) else v for k, v in ep.items()}
+            )
+        return {"buffers": serialized_buffers, "completed": serialized_completed}
+
+    def load_state_dict(self, d: dict) -> None:
+        self._buffers = d.get("buffers", [[] for _ in range(self.n_envs)])
+        self._completed = d.get("completed", [])

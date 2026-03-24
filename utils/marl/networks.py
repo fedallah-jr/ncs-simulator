@@ -347,6 +347,86 @@ class DialMLPAgent(nn.Module):
         return q_values, msg_logits
 
 
+class DialRNNAgent(nn.Module):
+    """GRU-based DIAL agent following the reference SwitchCNet architecture.
+
+    Inputs are projected to rnn_hidden_dim and summed (not concatenated).
+    A single output head produces both action Q-values and communication logits.
+    """
+
+    def __init__(
+        self,
+        obs_dim: int,
+        n_agents: int,
+        n_actions: int,
+        comm_dim: int,
+        rnn_hidden_dim: int = 128,
+        rnn_layers: int = 2,
+    ) -> None:
+        super().__init__()
+        self.obs_dim = obs_dim
+        self.n_agents = n_agents
+        self.n_actions = n_actions
+        self.comm_dim = comm_dim
+        self.rnn_hidden_dim = rnn_hidden_dim
+        self.rnn_layers = rnn_layers
+
+        # Input encoders — all project to rnn_hidden_dim, then summed
+        self.obs_encoder = nn.Linear(obs_dim, rnn_hidden_dim)
+        self.agent_lookup = nn.Embedding(n_agents, rnn_hidden_dim)
+        self.prev_action_lookup = nn.Embedding(n_actions + 1, rnn_hidden_dim)  # +1 for start token
+        self.msg_encoder = nn.Linear(n_agents * comm_dim, rnn_hidden_dim)
+
+        # GRU core
+        self.rnn = nn.GRU(
+            input_size=rnn_hidden_dim,
+            hidden_size=rnn_hidden_dim,
+            num_layers=rnn_layers,
+            batch_first=True,
+        )
+
+        # Single combined output head (reference-faithful)
+        self.output_head = nn.Sequential(
+            nn.Linear(rnn_hidden_dim, rnn_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(rnn_hidden_dim, n_actions + comm_dim),
+        )
+
+    def forward(
+        self,
+        obs: torch.Tensor,
+        agent_idx: torch.Tensor,
+        prev_action: torch.Tensor,
+        recv_msg: torch.Tensor,
+        hidden: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            obs:         (B*N, obs_dim)
+            agent_idx:   (B*N,)          int64
+            prev_action: (B*N,)          int64
+            recv_msg:    (B*N, N*comm_dim)
+            hidden:      (rnn_layers, B*N, rnn_hidden_dim)
+        Returns:
+            q_values:    (B*N, n_actions)
+            msg_logits:  (B*N, comm_dim)
+            h_out:       (rnn_layers, B*N, rnn_hidden_dim)
+        """
+        z = (
+            self.obs_encoder(obs)
+            + self.agent_lookup(agent_idx)
+            + self.prev_action_lookup(prev_action)
+            + self.msg_encoder(recv_msg)
+        )
+        rnn_out, h_out = self.rnn(z.unsqueeze(1), hidden)
+        out = self.output_head(rnn_out.squeeze(1))
+        return out[:, : self.n_actions], out[:, self.n_actions :], h_out
+
+    def init_hidden(self, batch_size: int) -> torch.Tensor:
+        """Return zero initial hidden state of shape (rnn_layers, batch_size, rnn_hidden_dim)."""
+        return torch.zeros(self.rnn_layers, batch_size, self.rnn_hidden_dim)
+
+
 class VDNMixer(nn.Module):
     def __init__(self) -> None:
         super().__init__()

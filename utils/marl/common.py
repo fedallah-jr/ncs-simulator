@@ -678,3 +678,158 @@ def dial_collect_transition(
         infos=infos,
         msg_logits=new_msg_logits,
     )
+
+
+# ---------------------------------------------------------------------------
+# Recurrent DIAL collection utilities
+# ---------------------------------------------------------------------------
+
+class DialRNNStepResult(NamedTuple):
+    obs: np.ndarray
+    epsilon: float
+    actions: np.ndarray
+    next_obs_raw: np.ndarray
+    rewards_arr: np.ndarray
+    terminated: np.ndarray
+    done_reset: np.ndarray
+    infos: Dict[str, Any]
+    msg_logits: np.ndarray
+
+
+@torch.no_grad()
+def select_actions_dial_rnn_batched(
+    agent: "DialRNNAgent",
+    obs: np.ndarray,
+    recv_msg: np.ndarray,
+    hidden: torch.Tensor,
+    prev_actions: np.ndarray,
+    n_envs: int,
+    n_agents: int,
+    n_actions: int,
+    epsilon: float,
+    rng: np.random.Generator,
+    device: torch.device,
+) -> Tuple[np.ndarray, np.ndarray, torch.Tensor]:
+    """Select actions for recurrent DIAL agents.
+
+    Returns (actions, msg_logits_np, new_hidden).
+    """
+    obs_t = torch.as_tensor(obs, device=device, dtype=torch.float32)
+    recv_msg_t = torch.as_tensor(recv_msg, device=device, dtype=torch.float32)
+    prev_act_t = torch.as_tensor(prev_actions, device=device, dtype=torch.long)
+    agent_idx = torch.arange(n_agents, device=device).unsqueeze(0).expand(n_envs, -1)
+
+    q_values, msg_logits, new_hidden = agent(
+        obs_t.reshape(n_envs * n_agents, -1),
+        agent_idx.reshape(n_envs * n_agents),
+        prev_act_t.reshape(n_envs * n_agents),
+        recv_msg_t.reshape(n_envs * n_agents, -1),
+        hidden,
+    )
+    q_values = q_values.view(n_envs, n_agents, n_actions)
+    msg_logits = msg_logits.view(n_envs, n_agents, -1)
+
+    greedy = q_values.argmax(dim=-1).cpu().numpy().astype(np.int64)
+    actions = greedy.copy()
+    explore_mask = rng.random((n_envs, n_agents)) < float(epsilon)
+    if np.any(explore_mask):
+        actions[explore_mask] = rng.integers(
+            0, n_actions, size=int(explore_mask.sum()), endpoint=False, dtype=np.int64,
+        )
+
+    return actions, msg_logits.cpu().numpy(), new_hidden
+
+
+def dial_rnn_collect_transition(
+    *,
+    env: Any,
+    agent: "DialRNNAgent",
+    obs_raw: np.ndarray,
+    obs_normalizer: Optional[RunningObsNormalizer],
+    global_step: int,
+    epsilon_start: float,
+    epsilon_end: float,
+    epsilon_decay_steps: int,
+    n_envs: int,
+    n_agents: int,
+    n_actions: int,
+    rng: np.random.Generator,
+    device: torch.device,
+    prev_msg_logits: np.ndarray,
+    prev_actions: np.ndarray,
+    hidden_states: torch.Tensor,
+    dru: DRU,
+    collector: Any,
+    comm_dim: int,
+) -> DialRNNStepResult:
+    """Collect a single vectorized recurrent DIAL transition."""
+    if obs_normalizer is not None:
+        obs = obs_normalizer.normalize(obs_raw, update=True)
+    else:
+        obs = obs_raw
+
+    eps = epsilon_by_step(global_step, epsilon_start, epsilon_end, epsilon_decay_steps)
+
+    # DRU on previous message logits → recv messages
+    msg_logits_t = torch.as_tensor(prev_msg_logits, device=device, dtype=torch.float32)
+    msg_post_dru = dru(msg_logits_t, train_mode=True)
+    recv_msg = route_messages(msg_post_dru, n_agents).cpu().numpy()
+
+    actions, new_msg_logits, new_hidden = select_actions_dial_rnn_batched(
+        agent=agent, obs=obs, recv_msg=recv_msg,
+        hidden=hidden_states, prev_actions=prev_actions,
+        n_envs=n_envs, n_agents=n_agents, n_actions=n_actions,
+        epsilon=eps, rng=rng, device=device,
+    )
+
+    action_dict = {f"agent_{i}": actions[:, i] for i in range(n_agents)}
+    next_obs_dict, rewards_arr, terminated, truncated, infos = env.step(action_dict)
+    next_obs_raw = stack_vector_obs(next_obs_dict, n_agents)
+
+    terminated_any = np.asarray(terminated, dtype=np.bool_)
+    truncated_any = np.asarray(truncated, dtype=np.bool_)
+    done_reset = np.logical_or(terminated_any, truncated_any)
+
+    next_obs_for_buffer, _ = patch_autoreset_final_obs(
+        next_obs_raw, infos, done_reset, n_agents,
+    )
+
+    rewards_np = np.asarray(rewards_arr, dtype=np.float32)
+    team_rewards = rewards_np.sum(axis=1, keepdims=True)
+    rewards_team = np.repeat(team_rewards, n_agents, axis=1).astype(np.float32)
+
+    for e in range(n_envs):
+        transition = {
+            "obs": obs_raw[e],
+            "actions": actions[e],
+            "rewards": rewards_team[e],
+            "next_obs": next_obs_for_buffer[e],
+            "done": float(terminated_any[e]),
+            "reset": bool(done_reset[e]),
+        }
+        collector.add(e, transition)
+
+    # Update state
+    prev_msg_logits[:] = new_msg_logits
+    prev_actions[:] = actions
+    hidden_states.copy_(new_hidden)
+
+    # Reset state for envs that ended
+    start_token = n_actions
+    for e in range(n_envs):
+        if done_reset[e]:
+            prev_msg_logits[e] = 0.0
+            prev_actions[e] = start_token
+            hidden_states[:, e * n_agents : (e + 1) * n_agents, :] = 0.0
+
+    return DialRNNStepResult(
+        obs=obs,
+        epsilon=eps,
+        actions=actions,
+        next_obs_raw=next_obs_raw,
+        rewards_arr=rewards_np,
+        terminated=terminated_any,
+        done_reset=done_reset,
+        infos=infos,
+        msg_logits=new_msg_logits,
+    )

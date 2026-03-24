@@ -8,8 +8,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from utils.marl.buffer import MARLBatch, DialSequenceBatch
-from utils.marl.networks import MLPAgent, DuelingMLPAgent, DialMLPAgent, DRU, QMixer, QPLEXMixer, VDNMixer, TwinQNetwork, append_agent_id, route_messages
+from utils.marl.buffer import MARLBatch, DialSequenceBatch, DialRNNEpisodeBatch
+from utils.marl.networks import MLPAgent, DuelingMLPAgent, DialMLPAgent, DialRNNAgent, DRU, QMixer, QPLEXMixer, VDNMixer, TwinQNetwork, append_agent_id, route_messages
 from utils.marl.value_norm import ValueNorm
 
 
@@ -53,11 +53,13 @@ def _q_values(agent: nn.Module, obs: torch.Tensor, n_agents: int, n_actions: int
 
 
 def _make_optimizer(
-    params, lr: float, optimizer_type: str = "adam", rmsprop_alpha: float = 0.99, rmsprop_eps: float = 1e-5
+    params, lr: float, optimizer_type: str = "adam",
+    rmsprop_alpha: float = 0.99, rmsprop_eps: float = 1e-5,
+    momentum: float = 0.0,
 ) -> torch.optim.Optimizer:
     """Create optimizer based on type. RMSprop uses PyMARL defaults."""
     if optimizer_type == "rmsprop":
-        return torch.optim.RMSprop(params, lr=lr, alpha=rmsprop_alpha, eps=rmsprop_eps)
+        return torch.optim.RMSprop(params, lr=lr, alpha=rmsprop_alpha, eps=rmsprop_eps, momentum=momentum)
     return torch.optim.Adam(params, lr=lr)
 
 
@@ -608,6 +610,182 @@ class IQLDIALLearner:
         self.target_agent.load_state_dict(d["target_agent"])
         self.optimizer.load_state_dict(d["optimizer"])
         self.train_steps = int(d["train_steps"])
+
+
+class IQLDIALRNNLearner:
+    """IQL learner with recurrent DIAL (GRU-based).
+
+    Recomputes the full online and target recurrent traces over padded episode
+    batches, with mask-aware hidden state freezing and per-sample bootstrap
+    selection.  Target network is updated every ``target_update_episodes``
+    episodes (accumulator pattern for B > 1).
+    """
+
+    def __init__(
+        self,
+        agent: DialRNNAgent,
+        n_agents: int,
+        n_actions: int,
+        comm_dim: int,
+        dru: DRU,
+        gamma: float,
+        lr: float,
+        target_update_steps: int = 100,
+        grad_clip_norm: Optional[float] = 10.0,
+        device: Optional[torch.device] = None,
+        momentum: float = 0.05,
+        optimizer_type: str = "rmsprop",
+    ) -> None:
+        self.agent = agent
+        self.target_agent = copy.deepcopy(agent)
+        for p in self.target_agent.parameters():
+            p.requires_grad = False
+
+        self.n_agents = n_agents
+        self.n_actions = n_actions
+        self.comm_dim = comm_dim
+        self.dru = dru
+        self.gamma = float(gamma)
+        self.target_update_steps = int(target_update_steps)
+        self.grad_clip_norm = grad_clip_norm
+
+        self.device = device if device is not None else torch.device("cpu")
+        self.agent.to(self.device)
+        self.target_agent.to(self.device)
+
+        self.optimizer = _make_optimizer(
+            self.agent.parameters(), lr=float(lr),
+            optimizer_type=optimizer_type, momentum=float(momentum),
+        )
+        self.episodes_seen = 0
+        self._train_steps = 0
+
+    # ------------------------------------------------------------------
+    def _forward_trace(
+        self,
+        agent: DialRNNAgent,
+        batch: DialRNNEpisodeBatch,
+        train_mode: bool,
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        """Run mask-aware recurrent trace. Returns (per_step_q, q_boot)."""
+        B, max_T, N = batch.obs.shape[:3]
+        hidden = agent.init_hidden(B * N).to(self.device)
+        prev_action = torch.full(
+            (B, N), self.n_actions, dtype=torch.long, device=self.device,
+        )
+        recv_msg = torch.zeros(B, N, N * self.comm_dim, device=self.device)
+        agent_idx = (
+            torch.arange(N, device=self.device).unsqueeze(0).expand(B, -1)
+        )
+
+        all_q: list[torch.Tensor] = []
+        for t in range(max_T):
+            obs_t = batch.obs[:, t]
+            q_t, m_t, new_hidden = agent(
+                obs_t.reshape(B * N, -1),
+                agent_idx.reshape(B * N),
+                prev_action.reshape(B * N),
+                recv_msg.reshape(B * N, -1),
+                hidden,
+            )
+            q_t = q_t.view(B, N, -1)
+            m_t = m_t.view(B, N, -1)
+            all_q.append(q_t)
+
+            new_recv = route_messages(self.dru(m_t, train_mode=train_mode), N)
+
+            # Freeze state for padded timesteps
+            valid = batch.mask[:, t].bool()
+            valid_bn = valid.unsqueeze(1).expand(B, N).reshape(B * N)
+            v_h = valid_bn.view(1, B * N, 1).expand_as(new_hidden)
+            hidden = torch.where(v_h, new_hidden, hidden)
+            v_a = valid.unsqueeze(1).expand(B, N)
+            prev_action = torch.where(v_a, batch.actions[:, t], prev_action)
+            v_m = valid.view(B, 1, 1).expand_as(new_recv)
+            recv_msg = torch.where(v_m, new_recv, recv_msg)
+
+        # Bootstrap step (reference runs nsteps+1)
+        q_boot, _, _ = agent(
+            batch.next_obs.reshape(B * N, -1),
+            agent_idx.reshape(B * N),
+            prev_action.reshape(B * N),
+            recv_msg.reshape(B * N, -1),
+            hidden,
+        )
+        q_boot = q_boot.view(B, N, -1)
+        return all_q, q_boot
+
+    # ------------------------------------------------------------------
+    def update(self, batch: DialRNNEpisodeBatch) -> None:
+        B, max_T = batch.obs.shape[:2]
+        N = self.n_agents
+
+        # Online trace WITH gradients
+        online_q, _ = self._forward_trace(self.agent, batch, train_mode=True)
+
+        # Target trace WITHOUT gradients
+        with torch.no_grad():
+            target_q, target_q_boot = self._forward_trace(
+                self.target_agent, batch, train_mode=True,
+            )
+
+        # TD targets — mask-aware per-sample bootstrap
+        with torch.no_grad():
+            targets: list[torch.Tensor] = []
+            boot_max = target_q_boot.max(-1).values  # (B, N)
+            for t in range(max_T):
+                if t < max_T - 1:
+                    has_next = batch.mask[:, t + 1].bool()
+                    next_max = target_q[t + 1].max(-1).values
+                    bootstrap_q = torch.where(
+                        has_next.unsqueeze(1).expand(B, N), next_max, boot_max,
+                    )
+                else:
+                    bootstrap_q = boot_max
+                not_done = (1.0 - batch.terminated[:, t]).unsqueeze(-1)
+                targets.append(batch.rewards[:, t] + self.gamma * not_done * bootstrap_q)
+
+        # Masked MSE loss
+        total_loss = torch.tensor(0.0, device=self.device)
+        for t in range(max_T):
+            q_taken = online_q[t].gather(
+                -1, batch.actions[:, t].unsqueeze(-1),
+            ).squeeze(-1)
+            td_error = (q_taken - targets[t]) ** 2
+            total_loss = total_loss + (td_error * batch.mask[:, t].unsqueeze(-1)).sum()
+        total_weight = (batch.mask.sum() * float(N)).clamp_min(1.0)
+        total_loss = total_loss / total_weight
+
+        self.optimizer.zero_grad(set_to_none=True)
+        total_loss.backward()
+        if self.grad_clip_norm is not None:
+            nn.utils.clip_grad_norm_(
+                self.agent.parameters(), float(self.grad_clip_norm),
+            )
+        self.optimizer.step()
+
+        # Target update — per-step counter (reference: agent.py:142-144)
+        self.episodes_seen += B
+        self._train_steps += 1
+        if self._train_steps % self.target_update_steps == 0:
+            _hard_update(self.target_agent, self.agent)
+
+    # ------------------------------------------------------------------
+    def state_dict(self) -> dict:
+        return {
+            "agent": self.agent.state_dict(),
+            "target_agent": self.target_agent.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "episodes_seen": self.episodes_seen,
+            "train_steps": self._train_steps,
+        }
+
+    def load_state_dict(self, d: dict) -> None:
+        self.agent.load_state_dict(d["agent"])
+        self.target_agent.load_state_dict(d["target_agent"])
+        self.optimizer.load_state_dict(d["optimizer"])
+        self.episodes_seen = int(d["episodes_seen"])
+        self._train_steps = int(d.get("train_steps", 0))
 
 
 def _soft_update(target: nn.Module, source: nn.Module, tau: float) -> None:
