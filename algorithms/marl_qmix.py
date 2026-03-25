@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -225,6 +226,7 @@ def main() -> None:
             eval_writer.writerow(["step", "mean_reward", "std_reward"])
 
         episode_reward_sums = np.zeros((args.n_envs,), dtype=np.float32)
+        start_time = time.time()
 
         while global_step < args.total_timesteps:
             step = qlearning_collect_transition(
@@ -269,6 +271,7 @@ def main() -> None:
                 algo_name="QMIX",
                 extra_csv_values=step.epsilon,
                 extra_log_str=f" eps={step.epsilon:.3f}",
+                start_time=start_time, total_timesteps=args.total_timesteps,
             )
 
             if len(buffer) >= args.start_learning and vector_step % args.train_interval == 0:
@@ -286,6 +289,7 @@ def main() -> None:
                     save_checkpoint=save_checkpoint, global_step=global_step,
                     algo_name="QMIX",
                     eval_baseline=eval_baseline,
+                    start_time=start_time, total_timesteps=args.total_timesteps,
                 )
                 eval_seed += args.n_eval_episodes
                 last_eval_step = global_step

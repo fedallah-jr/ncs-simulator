@@ -13,6 +13,7 @@ import copy
 import json
 import os
 import tempfile
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import multiprocessing
@@ -344,6 +345,14 @@ def setup_shared_reward_normalizer(
     return config, manager
 
 
+def _format_eta(remaining_seconds: float) -> str:
+    """Format remaining seconds as HH:MM:SS."""
+    total = int(max(0, remaining_seconds))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
 def evaluate_and_log(
     *,
     eval_env: Any,
@@ -364,6 +373,8 @@ def evaluate_and_log(
     global_step: int,
     algo_name: str,
     eval_baseline: Dict[str, Any],
+    start_time: Optional[float] = None,
+    total_timesteps: Optional[int] = None,
 ) -> None:
     """Run paired-seed evaluation, write CSV row, update best model, and print."""
     from utils.marl.common import run_evaluation_vectorized_seeded
@@ -473,13 +484,20 @@ def evaluate_and_log(
         "eval_drop_ratio", -mean_drop_ratio, run_dir / "best_model.pt", save_checkpoint
     )
 
+    eta_str = ""
+    if start_time is not None and total_timesteps is not None and global_step > 0:
+        elapsed = time.time() - start_time
+        sps = global_step / elapsed
+        remaining = total_timesteps - global_step
+        eta_str = f" | ETA={_format_eta(remaining / sps)}"
+
     print(
         f"[{algo_name}] Eval at step {global_step}: "
         f"mean_reward={mean_eval_reward:.3f} std={std_eval_reward:.3f} | "
         f"baseline={baseline_label} "
         f"mean={mean_baseline_reward:.3f} std={std_baseline_reward:.3f} | "
         f"drop_ratio_mean={mean_drop_ratio:.6f} drop_ratio_std={std_drop_ratio:.6f} | "
-        f"win={win_rate:.0%}"
+        f"win={win_rate:.0%}{eta_str}"
     )
 
 
@@ -499,6 +517,8 @@ def log_completed_episodes(
     extra_csv_values: Any = None,
     extra_log_str: str = "",
     episode_lengths: Optional[np.ndarray] = None,
+    start_time: Optional[float] = None,
+    total_timesteps: Optional[int] = None,
 ) -> int:
     """Log completed episodes to CSV, update best train model, and print.
 
@@ -534,9 +554,15 @@ def log_completed_episodes(
         )
 
         if episode % log_interval == 0:
+            eta_str = ""
+            if start_time is not None and total_timesteps is not None and global_step > 0:
+                elapsed = time.time() - start_time
+                sps = global_step / elapsed
+                remaining = total_timesteps - global_step
+                eta_str = f" ETA={_format_eta(remaining / sps)}"
             print(
                 f"[{algo_name}] episode={episode} steps={global_step} "
-                f"reward_sum={episode_reward_sums[env_idx]:.3f}{extra_log_str}"
+                f"reward_sum={episode_reward_sums[env_idx]:.3f}{extra_log_str}{eta_str}"
             )
         episode += 1
         episode_reward_sums[env_idx] = 0.0

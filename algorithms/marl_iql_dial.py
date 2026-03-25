@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -97,6 +98,14 @@ def _make_dial_eval_action_selector(
     return action_selector, reset_eval_state
 
 
+def _format_eta(remaining_seconds: float) -> str:
+    """Format remaining seconds as HH:MM:SS."""
+    total = int(max(0, remaining_seconds))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
 def _evaluate_and_log_dial(
     *,
     eval_env,
@@ -118,6 +127,8 @@ def _evaluate_and_log_dial(
     save_checkpoint,
     global_step: int,
     eval_baseline: Dict[str, Any],
+    start_time: Optional[float] = None,
+    total_timesteps: Optional[int] = None,
 ):
     """DIAL-aware evaluation that maintains message state."""
     if n_episodes <= 0:
@@ -233,6 +244,13 @@ def _evaluate_and_log_dial(
         "eval_drop_ratio", -mean_drop_ratio, run_dir / "best_model.pt", save_checkpoint,
     )
 
+    eta_str = ""
+    if start_time is not None and total_timesteps is not None and global_step > 0:
+        elapsed = time.time() - start_time
+        sps = global_step / elapsed
+        remaining = total_timesteps - global_step
+        eta_str = f" | ETA={_format_eta(remaining / sps)}"
+
     algo_tag = "IQL-DIAL"
     print(
         f"[{algo_tag}] Eval at step {global_step}: "
@@ -240,7 +258,7 @@ def _evaluate_and_log_dial(
         f"baseline={baseline_label} "
         f"mean={mean_baseline_reward:.3f} std={std_baseline_reward:.3f} | "
         f"drop_ratio_mean={mean_drop_ratio:.6f} drop_ratio_std={std_drop_ratio:.6f} | "
-        f"win={win_rate:.0%}"
+        f"win={win_rate:.0%}{eta_str}"
     )
     agent.train()
 
@@ -406,6 +424,7 @@ def main() -> None:
         obs_raw = stack_vector_obs(obs_dict, n_agents)
 
         episode_reward_sums = np.zeros((args.n_envs,), dtype=np.float32)
+        start_time = time.time()
 
         while global_step < args.total_timesteps:
             step = dial_collect_transition(
@@ -436,6 +455,7 @@ def main() -> None:
                 algo_name="IQL-DIAL",
                 extra_csv_values=step.epsilon,
                 extra_log_str=f" eps={step.epsilon:.3f}",
+                start_time=start_time, total_timesteps=args.total_timesteps,
             )
 
             if len(buffer) >= args.batch_size:
@@ -455,6 +475,7 @@ def main() -> None:
                     best_model_tracker=best_model_tracker, run_dir=run_dir,
                     save_checkpoint=save_checkpoint, global_step=global_step,
                     eval_baseline=eval_baseline,
+                    start_time=start_time, total_timesteps=args.total_timesteps,
                 )
                 eval_seed += args.n_eval_episodes
                 last_eval_step = global_step

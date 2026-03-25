@@ -862,19 +862,27 @@ def train(args):
                 mean_drop_ratio = float(np.mean(drop_ratios))
                 std_drop_ratio = float(np.std(drop_ratios))
 
+                _eta_secs = (args.generations - gen) * elapsed / gen if gen > 0 else 0.0
+                _eta_h, _eta_rem = divmod(int(max(0, _eta_secs)), 3600)
+                _eta_m, _eta_s = divmod(_eta_rem, 60)
+                eta_str = f" | ETA={_eta_h:02d}:{_eta_m:02d}:{_eta_s:02d}"
                 print(
                     f"Gen {gen}/{args.generations} | Mean: {mean_fit:.1f} | "
                     f"Max: {max_fit:.1f} | Min: {min_fit:.1f} | Std: {std_fit:.1f} | "
                     f"Eval({model_selection_eval_episodes} eps): {fixed_eval_mean:.1f} ± {fixed_eval_std:.1f} | "
                     f"Baseline({baseline_label}): {baseline_mean:.1f} ± {baseline_std:.1f} | "
                     f"Drop: {mean_drop_ratio:.6f} ± {std_drop_ratio:.6f} | "
-                    f"Time: {elapsed:.1f}s"
+                    f"Time: {elapsed:.1f}s{eta_str}"
                 )
             else:
+                _eta_secs = (args.generations - gen) * elapsed / gen if gen > 0 else 0.0
+                _eta_h, _eta_rem = divmod(int(max(0, _eta_secs)), 3600)
+                _eta_m, _eta_s = divmod(_eta_rem, 60)
+                eta_str = f" | ETA={_eta_h:02d}:{_eta_m:02d}:{_eta_s:02d}"
                 print(
                     f"Gen {gen}/{args.generations} | Mean: {mean_fit:.1f} | "
                     f"Max: {max_fit:.1f} | Min: {min_fit:.1f} | Std: {std_fit:.1f} | "
-                    f"Time: {elapsed:.1f}s"
+                    f"Time: {elapsed:.1f}s{eta_str}"
                 )
 
             with rewards_file.open("a", newline="", encoding="utf-8") as f:
