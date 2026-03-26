@@ -98,12 +98,10 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
-# IQL-DIAL: online-only (paper-aligned)
-run_one "algorithms.marl_iql_dial" "iql_dial" "iql_dial" \
+# IQL-DIAL-RNN: online-only (paper-aligned)
+run_one "algorithms.marl_iql_dial_rnn" "iql_dial_rnn" "iql_dial_rnn" \
   --epsilon-decay-steps "${EPS_DECAY_STEPS}" \
-  --no-normalize-obs \
-  --feature-norm \
-  --layer-norm
+  --no-normalize-obs
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then

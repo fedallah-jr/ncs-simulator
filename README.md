@@ -10,9 +10,9 @@ Learning-based baselines live under `algorithms/`:
   - Uses `system.n_agents` from the config and appends a one-hot agent id for parameter sharing when `n_agents > 1`.
   - Observation normalization matches MARL flags: `--no-normalize-obs`, `--obs-norm-clip`, `--obs-norm-eps`.
 - IQL (multi-agent, PyTorch): `python -m algorithms.marl_iql --config configs/marl_absolute_plants.json --total-timesteps 200000`
-- IQL-DIAL (multi-agent, PyTorch, online-only): `python -m algorithms.marl_iql_dial --config configs/marl_absolute_plants.json --total-timesteps 200000`
-  - Uses a shared MLP with differentiable communication and sequence unrolling (`--seq-len`, minimum `2`).
-  - Communication-specific knobs: `--comm-dim` and `--dru-sigma`.
+- IQL-DIAL (multi-agent, PyTorch, recurrent, online-only): `python -m algorithms.marl_iql_dial_rnn --config configs/marl_absolute_plants.json --total-timesteps 200000`
+  - Uses a shared GRU with differentiable communication following the original DIAL paper architecture.
+  - Communication-specific knobs: `--comm-dim`, `--dru-sigma`, `--rnn-hidden-dim`, `--rnn-layers`, `--batch-episodes`, `--momentum`.
 - VDN (multi-agent, PyTorch): `python -m algorithms.marl_vdn --config configs/marl_absolute_plants.json --total-timesteps 200000`
 - QMIX (multi-agent, PyTorch): `python -m algorithms.marl_qmix --config configs/marl_absolute_plants.json --total-timesteps 200000`
 - QPLEX (multi-agent, PyTorch, Q-attention mixer): `python -m algorithms.marl_qplex --config configs/marl_absolute_plants.json --total-timesteps 200000`

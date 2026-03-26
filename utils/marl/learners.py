@@ -8,8 +8,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from utils.marl.buffer import MARLBatch, DialSequenceBatch, DialRNNEpisodeBatch
-from utils.marl.networks import MLPAgent, DuelingMLPAgent, DialMLPAgent, DialRNNAgent, DRU, QMixer, QPLEXMixer, VDNMixer, TwinQNetwork, append_agent_id, route_messages
+from utils.marl.buffer import MARLBatch, DialRNNEpisodeBatch
+from utils.marl.networks import MLPAgent, DuelingMLPAgent, DialRNNAgent, DRU, QMixer, QPLEXMixer, VDNMixer, TwinQNetwork, append_agent_id, route_messages
 from utils.marl.value_norm import ValueNorm
 
 
@@ -462,156 +462,6 @@ class QPLEXLearner:
         self.train_steps = int(d["train_steps"])
 
 
-class IQLDIALLearner:
-    """IQL learner with DIAL differentiable communication.
-
-    Sequence unroll connects consecutive timesteps so that sender gradients
-    flow through the receiver's TD loss via the DRU.
-    """
-
-    def __init__(
-        self,
-        agent: DialMLPAgent,
-        n_agents: int,
-        n_actions: int,
-        comm_dim: int,
-        dru: DRU,
-        gamma: float,
-        lr: float,
-        target_update_interval: int = 200,
-        grad_clip_norm: Optional[float] = 1.0,
-        use_agent_id: bool = True,
-        double_q: bool = True,
-        device: Optional[torch.device] = None,
-        optimizer_type: str = "rmsprop",
-    ) -> None:
-        self.agent = agent
-        self.target_agent = copy.deepcopy(agent)
-
-        self.n_agents = n_agents
-        self.n_actions = n_actions
-        self.comm_dim = comm_dim
-        self.dru = dru
-        self.gamma = float(gamma)
-        self.target_update_interval = int(target_update_interval)
-        self.grad_clip_norm = grad_clip_norm
-        self.use_agent_id = bool(use_agent_id)
-        self.double_q = bool(double_q)
-
-        self.device = device if device is not None else torch.device("cpu")
-        self.agent.to(self.device)
-        self.target_agent.to(self.device)
-
-        self.optimizer = _make_optimizer(self.agent.parameters(), lr=float(lr), optimizer_type=optimizer_type)
-        self.train_steps = 0
-
-    def update(self, batch: DialSequenceBatch) -> None:
-        self.train_steps += 1
-        B = batch.obs.shape[0]
-        seq_len = batch.obs.shape[1]
-        N = self.n_agents
-
-        # ===== ONLINE UNROLL (with gradients) =====
-        recv = batch.init_recv_msg  # (B, N, N*C)
-        online_q = []
-        for t in range(seq_len):
-            obs_t = _maybe_append_id(batch.obs[:, t], N, self.use_agent_id)
-            inp = torch.cat([obs_t, recv], dim=-1)
-            q_t, m_t = self.agent(inp.reshape(B * N, -1))
-            q_t = q_t.view(B, N, self.n_actions)
-            m_t = m_t.view(B, N, self.comm_dim)
-            online_q.append(q_t)
-            if t < seq_len - 1:
-                recv = route_messages(self.dru(m_t, train_mode=True), N)
-
-        # ===== TARGET UNROLL (no gradients) =====
-        with torch.no_grad():
-            recv_tgt = batch.init_recv_msg
-            target_q = []
-            selector_q = [] if self.double_q else None
-            for t in range(seq_len):
-                obs_t = _maybe_append_id(batch.obs[:, t], N, self.use_agent_id)
-                inp = torch.cat([obs_t, recv_tgt], dim=-1)
-                q_t_tgt, m_t_tgt = self.target_agent(inp.reshape(B * N, -1))
-                q_t_tgt = q_t_tgt.view(B, N, self.n_actions)
-                m_t_tgt = m_t_tgt.view(B, N, self.comm_dim)
-                target_q.append(q_t_tgt)
-                if self.double_q:
-                    q_t_sel, _ = self.agent(inp.reshape(B * N, -1))
-                    selector_q.append(q_t_sel.view(B, N, self.n_actions))
-                recv_tgt = route_messages(self.dru(m_t_tgt, train_mode=True), N)
-            # recv_tgt now = messages from target at step seq_len
-
-            # Bootstrap: target network at step seq_len
-            obs_boot = _maybe_append_id(batch.next_obs, N, self.use_agent_id)
-            inp_boot = torch.cat([obs_boot, recv_tgt], dim=-1)
-            q_boot_tgt, _ = self.target_agent(inp_boot.reshape(B * N, -1))
-            q_boot_tgt = q_boot_tgt.view(B, N, self.n_actions)
-
-            q_boot_selector = None
-            if self.double_q:
-                # Double-Q must select and evaluate on the same communication-conditioned input.
-                q_boot_selector, _ = self.agent(inp_boot.reshape(B * N, -1))
-                q_boot_selector = q_boot_selector.view(B, N, self.n_actions)
-
-            # Compute TD targets
-            targets = []
-            for t in range(seq_len):
-                if t < seq_len - 1:
-                    next_q_tgt = target_q[t + 1]
-                    if self.double_q:
-                        assert selector_q is not None
-                        a_star = selector_q[t + 1].argmax(-1, keepdim=True)
-                    else:
-                        a_star = next_q_tgt.argmax(-1, keepdim=True)
-                    bootstrap_val = next_q_tgt.gather(-1, a_star).squeeze(-1)
-                else:
-                    if self.double_q:
-                        assert q_boot_selector is not None
-                        a_star = q_boot_selector.argmax(-1, keepdim=True)
-                    else:
-                        a_star = q_boot_tgt.argmax(-1, keepdim=True)
-                    bootstrap_val = q_boot_tgt.gather(-1, a_star).squeeze(-1)
-
-                not_done = (1.0 - batch.dones[:, t]).unsqueeze(-1)
-                y_t = batch.rewards[:, t] + self.gamma * not_done * bootstrap_val
-                targets.append(y_t)
-
-        # ===== LOSS =====
-        total_loss = torch.tensor(0.0, device=self.device)
-        loss_mask = batch.loss_mask.to(dtype=torch.float32)
-        for t in range(seq_len):
-            q_taken = online_q[t].gather(-1, batch.actions[:, t].unsqueeze(-1)).squeeze(-1)
-            td_error = F.mse_loss(q_taken, targets[t], reduction="none")
-            total_loss = total_loss + (td_error * loss_mask[:, t].unsqueeze(-1)).sum()
-        total_weight = (loss_mask.sum() * float(N)).clamp_min(1.0)
-        total_loss = total_loss / total_weight
-
-        # ===== BACKPROP =====
-        self.optimizer.zero_grad(set_to_none=True)
-        total_loss.backward()
-        if self.grad_clip_norm is not None:
-            nn.utils.clip_grad_norm_(self.agent.parameters(), float(self.grad_clip_norm))
-        self.optimizer.step()
-
-        if self.train_steps % self.target_update_interval == 0:
-            _hard_update(self.target_agent, self.agent)
-
-    def state_dict(self) -> dict:
-        return {
-            "agent": self.agent.state_dict(),
-            "target_agent": self.target_agent.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "train_steps": self.train_steps,
-        }
-
-    def load_state_dict(self, d: dict) -> None:
-        self.agent.load_state_dict(d["agent"])
-        self.target_agent.load_state_dict(d["target_agent"])
-        self.optimizer.load_state_dict(d["optimizer"])
-        self.train_steps = int(d["train_steps"])
-
-
 class IQLDIALRNNLearner:
     """IQL learner with recurrent DIAL (GRU-based).
 
@@ -640,6 +490,7 @@ class IQLDIALRNNLearner:
         self.target_agent = copy.deepcopy(agent)
         for p in self.target_agent.parameters():
             p.requires_grad = False
+        self.target_agent.eval()
 
         self.n_agents = n_agents
         self.n_actions = n_actions

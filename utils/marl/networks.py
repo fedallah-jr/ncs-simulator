@@ -275,78 +275,6 @@ def route_messages(msg_post_dru: torch.Tensor, n_agents: int) -> torch.Tensor:
     return expanded.reshape(B, N, N * C)
 
 
-class DialMLPAgent(nn.Module):
-    """DIAL agent with shared trunk, action Q-head, and communication head.
-
-    forward returns (q_values, msg_logits).
-    """
-
-    def __init__(
-        self,
-        input_dim: int,
-        n_actions: int,
-        comm_dim: int,
-        hidden_dims: Sequence[int] = (128, 128),
-        activation: str = "relu",
-        feature_norm: bool = False,
-        layer_norm: bool = False,
-        output_gain: float = 1.0,
-        dueling: bool = False,
-        stream_hidden_dim: int = 64,
-    ) -> None:
-        super().__init__()
-        if input_dim <= 0 or n_actions <= 0 or comm_dim <= 0:
-            raise ValueError("input_dim, n_actions, and comm_dim must be positive")
-        if not hidden_dims:
-            raise ValueError("hidden_dims must be non-empty")
-
-        self.dueling = dueling
-        self.feature_norm_layer = nn.LayerNorm(input_dim) if feature_norm else None
-
-        self.features, last_dim = build_mlp_hidden(input_dim, hidden_dims, activation, layer_norm)
-
-        if dueling:
-            act = _get_activation(activation)
-            self.value_stream = nn.Sequential(
-                nn.Linear(last_dim, stream_hidden_dim),
-                act,
-                nn.Linear(stream_hidden_dim, 1),
-            )
-            self.advantage_stream = nn.Sequential(
-                nn.Linear(last_dim, stream_hidden_dim),
-                _get_activation(activation),
-                nn.Linear(stream_hidden_dim, n_actions),
-            )
-        else:
-            self.action_head = nn.Linear(last_dim, n_actions)
-
-        self.comm_head = nn.Linear(last_dim, comm_dim)
-
-        hidden_gain = _get_activation_gain(activation)
-        _apply_orthogonal_init(self, gain=hidden_gain)
-        if dueling:
-            _init_linear(self.value_stream[-1], gain=float(output_gain))
-            _init_linear(self.advantage_stream[-1], gain=float(output_gain))
-        else:
-            _init_linear(self.action_head, gain=float(output_gain))
-        _init_linear(self.comm_head, gain=float(output_gain))
-
-    def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.feature_norm_layer is not None:
-            obs = self.feature_norm_layer(obs)
-        features = self.features(obs)
-
-        if self.dueling:
-            value = self.value_stream(features)
-            advantage = self.advantage_stream(features)
-            q_values = value + (advantage - advantage.mean(dim=-1, keepdim=True))
-        else:
-            q_values = self.action_head(features)
-
-        msg_logits = self.comm_head(features)
-        return q_values, msg_logits
-
-
 class DialRNNAgent(nn.Module):
     """GRU-based DIAL agent following the reference SwitchCNet architecture.
 
@@ -375,7 +303,13 @@ class DialRNNAgent(nn.Module):
         self.obs_encoder = nn.Linear(obs_dim, rnn_hidden_dim)
         self.agent_lookup = nn.Embedding(n_agents, rnn_hidden_dim)
         self.prev_action_lookup = nn.Embedding(n_actions + 1, rnn_hidden_dim)  # +1 for start token
-        self.msg_encoder = nn.Linear(n_agents * comm_dim, rnn_hidden_dim)
+        # BN on incoming messages before projection (paper: "essential for
+        # training stability"); narrow comm uses ReLU after the linear layer.
+        self.msg_encoder = nn.Sequential(
+            nn.BatchNorm1d(n_agents * comm_dim),
+            nn.Linear(n_agents * comm_dim, rnn_hidden_dim),
+            nn.ReLU(),
+        )
 
         # GRU core
         self.rnn = nn.GRU(

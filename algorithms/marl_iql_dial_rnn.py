@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-episodes", type=int, default=32, help="Episodes per training batch")
     parser.add_argument("--target-update-steps", type=int, default=100,
                         help="Target net sync every N optimizer steps (reference: step_target)")
-    parser.add_argument("--momentum", type=float, default=0.05, help="RMSprop momentum")
+    parser.add_argument("--momentum", type=float, default=0.95, help="RMSprop momentum")
     return parser.parse_args()
 
 
@@ -376,6 +376,7 @@ def main() -> None:
     )
     prev_msg_logits = np.zeros((args.n_envs, n_agents, comm_dim), dtype=np.float32)
     prev_actions = np.full((args.n_envs, n_agents), n_actions, dtype=np.int64)
+    episode_start_mask = np.ones(args.n_envs, dtype=np.bool_)
 
     best_model_tracker = BestModelTracker()
     global_step = 0
@@ -402,6 +403,7 @@ def main() -> None:
         hidden_states.zero_()
         prev_msg_logits[:] = 0.0
         prev_actions[:] = n_actions
+        episode_start_mask[:] = True
         print(f"Resumed from {run_dir} at step {global_step}")
 
     def save_checkpoint(path: Path) -> None:
@@ -450,6 +452,7 @@ def main() -> None:
                 prev_msg_logits=prev_msg_logits, prev_actions=prev_actions,
                 hidden_states=hidden_states, dru=dru,
                 collector=collector, comm_dim=comm_dim,
+                episode_start_mask=episode_start_mask,
             )
 
             raw_rewards = step.rewards_arr
