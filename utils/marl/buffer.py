@@ -446,6 +446,7 @@ class DialRNNEpisodeBatch:
     terminated: torch.Tensor     # (B, max_T)              float32
     mask: torch.Tensor           # (B, max_T)              float32
     next_obs: torch.Tensor       # (B, N, obs_dim)         bootstrap obs
+    dru_noise: torch.Tensor      # (B, max_T, N, comm_dim) float32
 
 
 class DialRNNEpisodeCollector:
@@ -465,13 +466,16 @@ class DialRNNEpisodeCollector:
 
     def _finalize(self, env_idx: int) -> dict:
         buf = self._buffers[env_idx]
-        return {
+        result = {
             "obs": np.stack([t["obs"] for t in buf]),
             "actions": np.stack([t["actions"] for t in buf]),
             "rewards": np.stack([t["rewards"] for t in buf]),
             "terminated": np.array([t["done"] for t in buf], dtype=np.float32),
             "next_obs": buf[-1]["next_obs"],
         }
+        if "dru_noise" in buf[0]:
+            result["dru_noise"] = np.stack([t["dru_noise"] for t in buf])
+        return result
 
     def has_episodes(self, min_count: int) -> bool:
         return len(self._completed) >= min_count
@@ -502,6 +506,11 @@ class DialRNNEpisodeCollector:
         mask = np.zeros((B, max_T), dtype=np.float32)
         next_obs = np.stack([ep["next_obs"] for ep in episodes])
 
+        has_dru_noise = "dru_noise" in sample
+        if has_dru_noise:
+            comm_dim = sample["dru_noise"].shape[2]
+            dru_noise = np.zeros((B, max_T, N, comm_dim), dtype=np.float32)
+
         for i, ep in enumerate(episodes):
             T = lengths[i]
             obs[i, :T] = ep["obs"]
@@ -509,6 +518,8 @@ class DialRNNEpisodeCollector:
             rewards[i, :T] = ep["rewards"]
             terminated[i, :T] = ep["terminated"]
             mask[i, :T] = 1.0
+            if has_dru_noise:
+                dru_noise[i, :T] = ep["dru_noise"]
 
         if obs_normalizer is not None:
             obs = obs_normalizer.normalize(
@@ -525,6 +536,9 @@ class DialRNNEpisodeCollector:
             terminated=torch.as_tensor(terminated, device=self.device, dtype=torch.float32),
             mask=torch.as_tensor(mask, device=self.device, dtype=torch.float32),
             next_obs=torch.as_tensor(next_obs, device=self.device, dtype=torch.float32),
+            dru_noise=torch.as_tensor(dru_noise, device=self.device, dtype=torch.float32)
+            if has_dru_noise
+            else torch.zeros(B, max_T, N, 0, device=self.device),
         )
 
     def state_dict(self) -> dict:

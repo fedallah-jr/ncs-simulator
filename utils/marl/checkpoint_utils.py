@@ -320,7 +320,7 @@ def save_dial_rnn_checkpoint(
     rnn_hidden_dim: int = 128, rnn_layers: int = 2,
 ) -> None:
     ckpt: Dict[str, Any] = {
-        "algorithm": "iql_dial_rnn", "n_agents": n_agents, "obs_dim": obs_dim,
+        "algorithm": "marl_dial", "n_agents": n_agents, "obs_dim": obs_dim,
         "n_actions": n_actions, "use_agent_id": True, "parameter_sharing": True,
         "dial": True, "dial_arch": "rnn",
         "comm_dim": comm_dim, "dru_sigma": dru_sigma,
@@ -334,13 +334,12 @@ def save_dial_rnn_checkpoint(
 
 
 def save_dial_rnn_training_state(
-    path: Path, learner: Any, collector: Any,
+    path: Path, learner: Any,
     obs_normalizer: Any, best_model_tracker: Any,
     global_step: int, episode: int, last_eval_step: int, vector_step: int,
 ) -> None:
     state: Dict[str, Any] = {
         "learner": learner.state_dict(),
-        "collector": collector.state_dict(),
         "obs_normalizer": obs_normalizer.state_dict() if obs_normalizer is not None else None,
         "best_model_tracker": dict(best_model_tracker._best),
         "global_step": global_step,
@@ -352,13 +351,11 @@ def save_dial_rnn_training_state(
 
 
 def load_dial_rnn_training_state(
-    path: Path, learner: Any, collector: Any,
+    path: Path, learner: Any,
     obs_normalizer: Any, best_model_tracker: Any,
 ) -> Dict[str, Any]:
     state = torch.load(path, map_location="cpu", weights_only=False)
     learner.load_state_dict(state["learner"])
-    if "collector" in state:
-        collector.load_state_dict(state["collector"])
     if state["obs_normalizer"] is not None and obs_normalizer is not None:
         from utils.marl.obs_normalization import RunningObsNormalizer
         restored = RunningObsNormalizer.from_state_dict(state["obs_normalizer"])

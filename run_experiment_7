@@ -98,8 +98,8 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
-# IQL-DIAL-RNN: online-only (paper-aligned)
-run_one "algorithms.marl_iql_dial_rnn" "iql_dial_rnn" "iql_dial_rnn" \
+# MARL-DIAL: online-only (paper-aligned)
+run_one "algorithms.marl_dial" "marl_dial" "marl_dial" \
   --epsilon-decay-steps "${EPS_DECAY_STEPS}" \
   --no-normalize-obs
 

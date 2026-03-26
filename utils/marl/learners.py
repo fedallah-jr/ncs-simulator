@@ -4,12 +4,13 @@ from typing import List, Optional
 
 import copy
 import math
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
 
 from utils.marl.buffer import MARLBatch, DialRNNEpisodeBatch
-from utils.marl.networks import MLPAgent, DuelingMLPAgent, DialRNNAgent, DRU, QMixer, QPLEXMixer, VDNMixer, TwinQNetwork, append_agent_id, route_messages
+from utils.marl.networks import MLPAgent, DuelingMLPAgent, DialRNNAgent, DRU, QMixer, QPLEXMixer, VDNMixer, TwinQNetwork, append_agent_id, route_messages, dial_rnn_forward_batched
 from utils.marl.value_norm import ValueNorm
 
 
@@ -462,7 +463,7 @@ class QPLEXLearner:
         self.train_steps = int(d["train_steps"])
 
 
-class IQLDIALRNNLearner:
+class MARLDIALLearner:
     """IQL learner with recurrent DIAL (GRU-based).
 
     Recomputes the full online and target recurrent traces over padded episode
@@ -490,7 +491,7 @@ class IQLDIALRNNLearner:
         self.target_agent = copy.deepcopy(agent)
         for p in self.target_agent.parameters():
             p.requires_grad = False
-        self.target_agent.eval()
+        self.target_agent.train()
 
         self.n_agents = n_agents
         self.n_actions = n_actions
@@ -517,33 +518,58 @@ class IQLDIALRNNLearner:
         agent: DialRNNAgent,
         batch: DialRNNEpisodeBatch,
         train_mode: bool,
+        dru_noise: Optional[torch.Tensor] = None,
+        init_hidden: Optional[torch.Tensor] = None,
+        init_prev_action: Optional[torch.Tensor] = None,
+        init_recv_msg: Optional[torch.Tensor] = None,
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
-        """Run mask-aware recurrent trace. Returns (per_step_q, q_boot)."""
-        B, max_T, N = batch.obs.shape[:3]
-        hidden = agent.init_hidden(B * N).to(self.device)
-        prev_action = torch.full(
-            (B, N), self.n_actions, dtype=torch.long, device=self.device,
-        )
-        recv_msg = torch.zeros(B, N, N * self.comm_dim, device=self.device)
-        agent_idx = (
-            torch.arange(N, device=self.device).unsqueeze(0).expand(B, -1)
-        )
+        """Run mask-aware recurrent trace. Returns (per_step_q, q_boot).
 
+        If *dru_noise* ``(B, max_T, N, comm_dim)`` is provided, the stored
+        noise is replayed so the communication trace matches collection.
+        ``dru_noise[:, t]`` is the noise that produced ``recv_msg`` at step
+        *t* during collection. DRU at learning step *t* produces messages
+        for step *t+1*, so we look up ``dru_noise[:, t+1]``.
+        """
+        B, max_T, N = batch.obs.shape[:3]
+        if init_hidden is None:
+            hidden = agent.init_hidden(B * N).to(self.device)
+        else:
+            hidden = init_hidden.to(self.device)
+            if hidden.ndim == 4:
+                hidden = hidden.reshape(agent.rnn_layers, B * N, agent.rnn_hidden_dim)
+            hidden = hidden.clone()
+
+        if init_prev_action is None:
+            prev_action = torch.full(
+                (B, N), self.n_actions, dtype=torch.long, device=self.device,
+            )
+        else:
+            prev_action = init_prev_action.to(self.device, dtype=torch.long).clone()
+
+        if init_recv_msg is None:
+            recv_msg = torch.zeros(B, N, N * self.comm_dim, device=self.device)
+        else:
+            recv_msg = init_recv_msg.to(self.device, dtype=torch.float32).clone()
         all_q: list[torch.Tensor] = []
         for t in range(max_T):
             obs_t = batch.obs[:, t]
-            q_t, m_t, new_hidden = agent(
-                obs_t.reshape(B * N, -1),
-                agent_idx.reshape(B * N),
-                prev_action.reshape(B * N),
-                recv_msg.reshape(B * N, -1),
+            q_t, m_t, new_hidden = dial_rnn_forward_batched(
+                agent,
+                obs_t,
+                prev_action,
+                recv_msg,
                 hidden,
             )
-            q_t = q_t.view(B, N, -1)
-            m_t = m_t.view(B, N, -1)
             all_q.append(q_t)
 
-            new_recv = route_messages(self.dru(m_t, train_mode=train_mode), N)
+            # Replay stored noise so recv_msg at step t+1 matches collection.
+            step_noise: Optional[torch.Tensor] = None
+            if dru_noise is not None and t + 1 < max_T:
+                step_noise = dru_noise[:, t + 1]
+            new_recv = route_messages(
+                self.dru(m_t, train_mode=train_mode, noise=step_noise), N,
+            )
 
             # Freeze state for padded timesteps
             valid = batch.mask[:, t].bool()
@@ -556,14 +582,13 @@ class IQLDIALRNNLearner:
             recv_msg = torch.where(v_m, new_recv, recv_msg)
 
         # Bootstrap step (reference runs nsteps+1)
-        q_boot, _, _ = agent(
-            batch.next_obs.reshape(B * N, -1),
-            agent_idx.reshape(B * N),
-            prev_action.reshape(B * N),
-            recv_msg.reshape(B * N, -1),
+        q_boot, _, _ = dial_rnn_forward_batched(
+            agent,
+            batch.next_obs,
+            prev_action,
+            recv_msg,
             hidden,
         )
-        q_boot = q_boot.view(B, N, -1)
         return all_q, q_boot
 
     # ------------------------------------------------------------------
@@ -571,13 +596,18 @@ class IQLDIALRNNLearner:
         B, max_T = batch.obs.shape[:2]
         N = self.n_agents
 
+        # Replay stored DRU noise so the communication trace matches collection.
+        noise = batch.dru_noise if batch.dru_noise.shape[-1] > 0 else None
+
         # Online trace WITH gradients
-        online_q, _ = self._forward_trace(self.agent, batch, train_mode=True)
+        online_q, _ = self._forward_trace(
+            self.agent, batch, train_mode=True, dru_noise=noise,
+        )
 
         # Target trace WITHOUT gradients
         with torch.no_grad():
             target_q, target_q_boot = self._forward_trace(
-                self.target_agent, batch, train_mode=True,
+                self.target_agent, batch, train_mode=True, dru_noise=noise,
             )
 
         # TD targets — mask-aware per-sample bootstrap
@@ -616,6 +646,145 @@ class IQLDIALRNNLearner:
         self.optimizer.step()
 
         # Target update — per-step counter (reference: agent.py:142-144)
+        self.episodes_seen += B
+        self._train_steps += 1
+        if self._train_steps % self.target_update_steps == 0:
+            _hard_update(self.target_agent, self.agent)
+
+    # ------------------------------------------------------------------
+    def update_online(
+        self,
+        episodes: list[dict],
+        obs_normalizer: Optional[object] = None,
+    ) -> None:
+        """On-policy DIAL update with pre-computed online Q-values (with grad).
+
+        Each episode dict contains:
+            online_q:     list of (N, n_actions) tensors WITH grad
+            obs_raw:      (T, N, obs_dim) ndarray
+            actions:      (T, N) ndarray int64
+            rewards:      (T, N) ndarray float32
+            terminated:   (T,) ndarray float32
+            next_obs_raw: (N, obs_dim) ndarray
+            init_hidden:  (rnn_layers, N, hidden_dim) tensor
+            init_prev_action: (N,) tensor
+            init_recv_msg: (N, N * comm_dim) tensor
+        """
+        B = len(episodes)
+        N = self.n_agents
+        lengths = [len(ep["online_q"]) for ep in episodes]
+        max_T = max(lengths)
+
+        mask = torch.zeros(B, max_T, device=self.device)
+        for i, L in enumerate(lengths):
+            mask[i, :L] = 1.0
+
+        # Stack online Q-values (preserves grad for valid entries)
+        online_q: list[torch.Tensor] = []
+        for t in range(max_T):
+            q_list = []
+            for i, ep in enumerate(episodes):
+                if t < lengths[i]:
+                    q_list.append(ep["online_q"][t])
+                else:
+                    q_list.append(torch.zeros(N, self.n_actions, device=self.device))
+            online_q.append(torch.stack(q_list))
+
+        # Build target batch from stored episode data
+        obs_dim = episodes[0]["obs_raw"].shape[-1]
+        obs_np = np.zeros((B, max_T, N, obs_dim), dtype=np.float32)
+        actions_np = np.zeros((B, max_T, N), dtype=np.int64)
+        rewards_np = np.zeros((B, max_T, N), dtype=np.float32)
+        terminated_np = np.zeros((B, max_T), dtype=np.float32)
+        next_obs_np = np.stack([ep["next_obs_raw"] for ep in episodes])
+
+        for i, ep in enumerate(episodes):
+            T = lengths[i]
+            obs_np[i, :T] = ep["obs_raw"]
+            actions_np[i, :T] = ep["actions"]
+            rewards_np[i, :T] = ep["rewards"]
+            terminated_np[i, :T] = ep["terminated"]
+
+        init_hidden = torch.stack(
+            [ep["init_hidden"].to(self.device, dtype=torch.float32) for ep in episodes],
+            dim=1,
+        )
+        init_prev_action = torch.stack(
+            [ep["init_prev_action"].to(self.device, dtype=torch.long) for ep in episodes],
+            dim=0,
+        )
+        init_recv_msg = torch.stack(
+            [ep["init_recv_msg"].to(self.device, dtype=torch.float32) for ep in episodes],
+            dim=0,
+        )
+
+        if obs_normalizer is not None:
+            obs_for_target = obs_normalizer.normalize(
+                obs_np.reshape(-1, obs_dim), update=False,
+            ).reshape(B, max_T, N, obs_dim)
+            next_obs_for_target = obs_normalizer.normalize(
+                next_obs_np.reshape(-1, obs_dim), update=False,
+            ).reshape(B, N, obs_dim)
+        else:
+            obs_for_target = obs_np
+            next_obs_for_target = next_obs_np
+
+        target_batch = DialRNNEpisodeBatch(
+            obs=torch.as_tensor(obs_for_target, device=self.device, dtype=torch.float32),
+            actions=torch.as_tensor(actions_np, device=self.device, dtype=torch.long),
+            rewards=torch.as_tensor(rewards_np, device=self.device, dtype=torch.float32),
+            terminated=torch.as_tensor(terminated_np, device=self.device, dtype=torch.float32),
+            mask=mask,
+            next_obs=torch.as_tensor(next_obs_for_target, device=self.device, dtype=torch.float32),
+            dru_noise=torch.zeros(B, max_T, N, 0, device=self.device),
+        )
+
+        # Target trace (no grad, training-time regularized messages)
+        with torch.no_grad():
+            target_q, target_q_boot = self._forward_trace(
+                self.target_agent,
+                target_batch,
+                train_mode=True,
+                init_hidden=init_hidden,
+                init_prev_action=init_prev_action,
+                init_recv_msg=init_recv_msg,
+            )
+
+        # TD targets
+        with torch.no_grad():
+            targets: list[torch.Tensor] = []
+            boot_max = target_q_boot.max(-1).values
+            for t in range(max_T):
+                if t < max_T - 1:
+                    has_next = mask[:, t + 1].bool()
+                    next_max = target_q[t + 1].max(-1).values
+                    bootstrap_q = torch.where(
+                        has_next.unsqueeze(1).expand(B, N), next_max, boot_max,
+                    )
+                else:
+                    bootstrap_q = boot_max
+                not_done = (1.0 - target_batch.terminated[:, t]).unsqueeze(-1)
+                targets.append(target_batch.rewards[:, t] + self.gamma * not_done * bootstrap_q)
+
+        # Masked MSE loss using online Q-values (with grad)
+        total_loss = torch.tensor(0.0, device=self.device)
+        for t in range(max_T):
+            q_taken = online_q[t].gather(
+                -1, target_batch.actions[:, t].unsqueeze(-1),
+            ).squeeze(-1)
+            td_error = (q_taken - targets[t]) ** 2
+            total_loss = total_loss + (td_error * mask[:, t].unsqueeze(-1)).sum()
+        total_weight = (mask.sum() * float(N)).clamp_min(1.0)
+        total_loss = total_loss / total_weight
+
+        self.optimizer.zero_grad(set_to_none=True)
+        total_loss.backward()
+        if self.grad_clip_norm is not None:
+            nn.utils.clip_grad_norm_(
+                self.agent.parameters(), float(self.grad_clip_norm),
+            )
+        self.optimizer.step()
+
         self.episodes_seen += B
         self._train_steps += 1
         if self._train_steps % self.target_update_steps == 0:

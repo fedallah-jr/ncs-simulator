@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from gymnasium.vector import AsyncVectorEnv
 
-from utils.marl.networks import MLPAgent, DuelingMLPAgent, DRU, append_agent_id, route_messages
+from utils.marl.networks import MLPAgent, DuelingMLPAgent, DRU, append_agent_id, route_messages, dial_rnn_forward_batched
 from utils.marl.obs_normalization import RunningObsNormalizer
 from utils.marl.vector_env import stack_vector_obs
 
@@ -562,17 +562,13 @@ def select_actions_dial_rnn_batched(
     obs_t = torch.as_tensor(obs, device=device, dtype=torch.float32)
     recv_msg_t = torch.as_tensor(recv_msg, device=device, dtype=torch.float32)
     prev_act_t = torch.as_tensor(prev_actions, device=device, dtype=torch.long)
-    agent_idx = torch.arange(n_agents, device=device).unsqueeze(0).expand(n_envs, -1)
-
-    q_values, msg_logits, new_hidden = agent(
-        obs_t.reshape(n_envs * n_agents, -1),
-        agent_idx.reshape(n_envs * n_agents),
-        prev_act_t.reshape(n_envs * n_agents),
-        recv_msg_t.reshape(n_envs * n_agents, -1),
+    q_values, msg_logits, new_hidden = dial_rnn_forward_batched(
+        agent,
+        obs_t,
+        prev_act_t,
+        recv_msg_t,
         hidden,
     )
-    q_values = q_values.view(n_envs, n_agents, n_actions)
-    msg_logits = msg_logits.view(n_envs, n_agents, -1)
 
     greedy = q_values.argmax(dim=-1).cpu().numpy().astype(np.int64)
     actions = greedy.copy()
@@ -617,10 +613,13 @@ def dial_rnn_collect_transition(
     eps = epsilon_by_step(global_step, epsilon_start, epsilon_end, epsilon_decay_steps)
 
     # DRU on previous message logits → recv messages (no graph needed)
+    # Sample noise explicitly so we can store and replay it during learning.
     with torch.no_grad():
         msg_logits_t = torch.as_tensor(prev_msg_logits, device=device, dtype=torch.float32)
-        msg_post_dru = dru(msg_logits_t, train_mode=True)
+        dru_noise = torch.randn_like(msg_logits_t) * dru.sigma
+        msg_post_dru = dru(msg_logits_t, train_mode=True, noise=dru_noise)
         recv_msg = route_messages(msg_post_dru, n_agents).cpu().numpy()
+        dru_noise_np = dru_noise.cpu().numpy()
     # At episode start no messages have been sent yet — use clean zeros
     # instead of DRU(0) = sigmoid(noise) ≈ 0.5 (reference: arena.py init)
     if np.any(episode_start_mask):
@@ -657,6 +656,7 @@ def dial_rnn_collect_transition(
             "next_obs": next_obs_for_buffer[e],
             "done": float(terminated_any[e]),
             "reset": bool(done_reset[e]),
+            "dru_noise": dru_noise_np[e],
         }
         collector.add(e, transition)
 

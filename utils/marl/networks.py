@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager
 from typing import Optional, Sequence
 
 import torch
@@ -253,9 +254,16 @@ class DRU(nn.Module):
         super().__init__()
         self.sigma = float(sigma)
 
-    def forward(self, msg_logits: torch.Tensor, train_mode: bool = True) -> torch.Tensor:
+    def forward(
+        self,
+        msg_logits: torch.Tensor,
+        train_mode: bool = True,
+        noise: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if train_mode:
-            return torch.sigmoid(msg_logits + torch.randn_like(msg_logits) * self.sigma)
+            if noise is None:
+                noise = torch.randn_like(msg_logits) * self.sigma
+            return torch.sigmoid(msg_logits + noise)
         else:
             return (msg_logits > 0.0).float()
 
@@ -280,7 +288,11 @@ class DialRNNAgent(nn.Module):
 
     Inputs are projected to rnn_hidden_dim and summed (not concatenated).
     A single output head produces both action Q-values and communication logits.
+    BatchNorm follows the paper/reference on the message preprocessing path and
+    the first layer of the output head.
     """
+
+    init_param_range = (-0.08, 0.08)
 
     def __init__(
         self,
@@ -303,9 +315,11 @@ class DialRNNAgent(nn.Module):
         self.obs_encoder = nn.Linear(obs_dim, rnn_hidden_dim)
         self.agent_lookup = nn.Embedding(n_agents, rnn_hidden_dim)
         self.prev_action_lookup = nn.Embedding(n_actions + 1, rnn_hidden_dim)  # +1 for start token
-        # BN on incoming messages before projection (paper: "essential for
-        # training stability"); narrow comm uses ReLU after the linear layer.
         self.msg_encoder = nn.Sequential(
+            # The paper/reference batch-normalize the incoming message vector
+            # before the message MLP. In this codebase the receiver sees the
+            # routed all-to-all message vector, so BN is applied to that full
+            # flattened receive tensor of shape (batch * agents, N * comm_dim).
             nn.BatchNorm1d(n_agents * comm_dim),
             nn.Linear(n_agents * comm_dim, rnn_hidden_dim),
             nn.ReLU(),
@@ -322,9 +336,11 @@ class DialRNNAgent(nn.Module):
         # Single combined output head (reference-faithful)
         self.output_head = nn.Sequential(
             nn.Linear(rnn_hidden_dim, rnn_hidden_dim),
+            nn.BatchNorm1d(rnn_hidden_dim),
             nn.ReLU(),
             nn.Linear(rnn_hidden_dim, n_actions + comm_dim),
         )
+        self.reset_parameters()
 
     def forward(
         self,
@@ -359,6 +375,112 @@ class DialRNNAgent(nn.Module):
     def init_hidden(self, batch_size: int) -> torch.Tensor:
         """Return zero initial hidden state of shape (rnn_layers, batch_size, rnn_hidden_dim)."""
         return torch.zeros(self.rnn_layers, batch_size, self.rnn_hidden_dim)
+
+    def reset_parameters(self) -> None:
+        """Reference-style parameter reset adapted to the continuous-observation model."""
+        self.obs_encoder.reset_parameters()
+        self.agent_lookup.reset_parameters()
+        self.prev_action_lookup.reset_parameters()
+        self.msg_encoder[0].reset_parameters()
+        self.msg_encoder[1].reset_parameters()
+        self.rnn.reset_parameters()
+        self.output_head[0].reset_parameters()
+        self.output_head[1].reset_parameters()
+        self.output_head[3].reset_parameters()
+        for param in self.rnn.parameters():
+            param.data.uniform_(*self.init_param_range)
+
+
+@contextmanager
+def _dial_batchnorm_fallback_eval(agent: DialRNNAgent, enabled: bool):
+    """Temporarily use BN running stats for degenerate per-agent batch size 1.
+
+    The reference code always trains with batch size > 1 per agent. In this
+    codebase, truncated vectorized segments can occasionally produce a single
+    sample. For that case only, use running stats instead of mixing agents into
+    one BatchNorm batch.
+    """
+    if not enabled:
+        yield
+        return
+
+    restored: list[tuple[nn.BatchNorm1d, bool]] = []
+    for module in agent.modules():
+        if isinstance(module, nn.BatchNorm1d):
+            restored.append((module, module.training))
+            module.eval()
+    try:
+        yield
+    finally:
+        for module, was_training in restored:
+            module.train(was_training)
+
+
+def dial_rnn_forward_batched(
+    agent: DialRNNAgent,
+    obs: torch.Tensor,
+    prev_action: torch.Tensor,
+    recv_msg: torch.Tensor,
+    hidden: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run shared-parameter DIAL one agent at a time over a vectorized batch.
+
+    This preserves the reference BatchNorm semantics: the shared network is
+    reused across agents, but BatchNorm statistics are computed over the batch
+    of environments/episodes for a single agent instead of mixing agents
+    together inside one flattened batch.
+
+    Args:
+        obs:         (B, N, obs_dim)
+        prev_action: (B, N)
+        recv_msg:    (B, N, N * comm_dim)
+        hidden:      (rnn_layers, B * N, rnn_hidden_dim)
+    Returns:
+        q_values:    (B, N, n_actions)
+        msg_logits:  (B, N, comm_dim)
+        h_out:       (rnn_layers, B * N, rnn_hidden_dim)
+    """
+    if obs.ndim != 3:
+        raise ValueError("obs must have shape (B, N, obs_dim)")
+    if prev_action.shape != obs.shape[:2]:
+        raise ValueError("prev_action must have shape (B, N)")
+    if recv_msg.ndim != 3 or recv_msg.shape[:2] != obs.shape[:2]:
+        raise ValueError("recv_msg must have shape (B, N, N * comm_dim)")
+    if hidden.ndim != 3:
+        raise ValueError("hidden must have shape (rnn_layers, B * N, rnn_hidden_dim)")
+
+    B, N = obs.shape[:2]
+    if N != agent.n_agents:
+        raise ValueError("obs agent dimension must equal agent.n_agents")
+
+    hidden_view = hidden.reshape(agent.rnn_layers, B, N, agent.rnn_hidden_dim)
+    q_per_agent: list[torch.Tensor] = []
+    m_per_agent: list[torch.Tensor] = []
+    h_per_agent: list[torch.Tensor] = []
+
+    # BatchNorm cannot estimate variance from a single sample. In that
+    # degenerate vectorized case, preserve per-agent isolation and fall back to
+    # running stats instead of mixing multiple agents into one BN batch.
+    with _dial_batchnorm_fallback_eval(agent, enabled=bool(agent.training and B < 2)):
+        for agent_id in range(N):
+            agent_idx = torch.full((B,), agent_id, device=obs.device, dtype=torch.long)
+            q_i, m_i, h_i = agent(
+                obs[:, agent_id, :],
+                agent_idx,
+                prev_action[:, agent_id],
+                recv_msg[:, agent_id, :],
+                hidden_view[:, :, agent_id, :],
+            )
+            q_per_agent.append(q_i)
+            m_per_agent.append(m_i)
+            h_per_agent.append(h_i)
+
+    q_values = torch.stack(q_per_agent, dim=1)
+    msg_logits = torch.stack(m_per_agent, dim=1)
+    h_out = torch.stack(h_per_agent, dim=2).reshape(
+        agent.rnn_layers, B * N, agent.rnn_hidden_dim,
+    )
+    return q_values, msg_logits, h_out
 
 
 class VDNMixer(nn.Module):

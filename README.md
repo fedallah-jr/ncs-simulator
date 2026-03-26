@@ -10,7 +10,7 @@ Learning-based baselines live under `algorithms/`:
   - Uses `system.n_agents` from the config and appends a one-hot agent id for parameter sharing when `n_agents > 1`.
   - Observation normalization matches MARL flags: `--no-normalize-obs`, `--obs-norm-clip`, `--obs-norm-eps`.
 - IQL (multi-agent, PyTorch): `python -m algorithms.marl_iql --config configs/marl_absolute_plants.json --total-timesteps 200000`
-- IQL-DIAL (multi-agent, PyTorch, recurrent, online-only): `python -m algorithms.marl_iql_dial_rnn --config configs/marl_absolute_plants.json --total-timesteps 200000`
+- DIAL (multi-agent, PyTorch, recurrent, online-only): `python -m algorithms.marl_dial --config configs/marl_absolute_plants.json --total-timesteps 200000`
   - Uses a shared GRU with differentiable communication following the original DIAL paper architecture.
   - Communication-specific knobs: `--comm-dim`, `--dru-sigma`, `--rnn-hidden-dim`, `--rnn-layers`, `--batch-episodes`, `--momentum`.
 - VDN (multi-agent, PyTorch): `python -m algorithms.marl_vdn --config configs/marl_absolute_plants.json --total-timesteps 200000`

@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from utils.marl.common import select_actions, stack_obs
-from utils.marl.networks import MLPAgent, DuelingMLPAgent, DialRNNAgent, DRU, route_messages
+from utils.marl.networks import MLPAgent, DuelingMLPAgent, DialRNNAgent, DRU, route_messages, dial_rnn_forward_batched
 from utils.marl.obs_normalization import RunningObsNormalizer
 
 
@@ -196,10 +196,9 @@ def load_dial_rnn_agent_from_checkpoint(
         rnn_layers=rnn_layers,
     )
     agent.load_state_dict(ckpt["agent_state_dict"])
-    agent.eval()
 
     metadata = MARLTorchCheckpointMetadata(
-        algorithm=str(ckpt.get("algorithm", "iql_dial_rnn")),
+        algorithm=str(ckpt.get("algorithm", "marl_dial")),
         n_agents=n_agents,
         obs_dim=obs_dim,
         n_actions=n_actions,
@@ -255,14 +254,15 @@ class MARLDialRNNTorchPolicy:
         obs_t = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
         msg_post_dru = self.dru(self.prev_msg_logits.unsqueeze(0), train_mode=False)
         recv_msg = route_messages(msg_post_dru, n_agents).squeeze(0)
-
-        agent_idx = torch.arange(n_agents, device=self.device)
-
-        q_values, msg_logits, new_hidden = self.agent(
-            obs_t, agent_idx, self.prev_action, recv_msg, self.hidden,
+        q_values, msg_logits, new_hidden = dial_rnn_forward_batched(
+            self.agent,
+            obs_t.unsqueeze(0),
+            self.prev_action.unsqueeze(0),
+            recv_msg.unsqueeze(0),
+            self.hidden,
         )
-        actions = q_values.argmax(dim=-1).cpu().numpy().astype(np.int64)
+        actions = q_values.squeeze(0).argmax(dim=-1).cpu().numpy().astype(np.int64)
         self.hidden = new_hidden
         self.prev_action = torch.as_tensor(actions, device=self.device, dtype=torch.long)
-        self.prev_msg_logits = msg_logits.view(n_agents, self.comm_dim)
+        self.prev_msg_logits = msg_logits.squeeze(0)
         return {f"agent_{i}": int(actions[i]) for i in range(n_agents)}

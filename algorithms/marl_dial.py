@@ -1,3 +1,10 @@
+"""Reimplementation of the reference DIAL codebase:
+https://github.com/minqi/learning-to-communicate-pytorch
+
+This version adapts the original shared-parameter recurrent DIAL setup to the
+vectorized NCS environment used in this repository.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -14,13 +21,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from utils.marl.networks import DialRNNAgent, DRU, route_messages, append_agent_id
-from utils.marl.buffer import DialRNNEpisodeCollector
-from utils.marl.learners import IQLDIALRNNLearner
+from utils.marl.networks import DialRNNAgent, DRU, route_messages, append_agent_id, dial_rnn_forward_batched
+from utils.marl.learners import MARLDIALLearner
 from utils.marl.common import (
     run_evaluation_vectorized_seeded,
     epsilon_by_step,
-    dial_rnn_collect_transition,
+    patch_autoreset_final_obs,
 )
 from utils.marl.args_builder import build_base_qlearning_parser
 from utils.marl.checkpoint_utils import (
@@ -52,7 +58,7 @@ from utils.run_utils import (
 
 def parse_args() -> argparse.Namespace:
     parser = build_base_qlearning_parser(
-        description="Train IQL-DIAL-RNN (recurrent DIAL) on multi-agent NCS env.",
+        description="Train MARL-DIAL on multi-agent NCS env.",
         include_replay_buffer_args=False,
         include_mlp_arch_args=False,
     )
@@ -101,18 +107,14 @@ def _make_dial_rnn_eval_action_selector(
         recv_msg = route_messages(msg_post_dru, n_agents)
 
         prev_act_t = torch.as_tensor(prev_actions, device=device, dtype=torch.long)
-        agent_idx = torch.arange(n_agents, device=device).unsqueeze(0).expand(n_eval_envs, -1)
-
-        q_values, msg_logits, new_hidden = agent(
-            obs_t.reshape(n_eval_envs * n_agents, -1),
-            agent_idx.reshape(n_eval_envs * n_agents),
-            prev_act_t.reshape(n_eval_envs * n_agents),
-            recv_msg.reshape(n_eval_envs * n_agents, -1),
+        q_values, msg_logits, new_hidden = dial_rnn_forward_batched(
+            agent,
+            obs_t,
+            prev_act_t,
+            recv_msg,
             hidden,
         )
         hidden = new_hidden
-        q_values = q_values.view(n_eval_envs, n_agents, n_actions)
-        msg_logits = msg_logits.view(n_eval_envs, n_agents, comm_dim)
 
         actions = q_values.argmax(dim=-1).cpu().numpy().astype(np.int64)
         prev_msg_logits[:] = msg_logits.cpu().numpy()
@@ -165,7 +167,6 @@ def _evaluate_and_log_dial_rnn(
     else:
         episode_seeds = [int(seed) + ep for ep in range(int(n_episodes))]
 
-    agent.eval()
     action_selector, reset_eval = _make_dial_rnn_eval_action_selector(
         agent, dru, n_eval_envs, n_agents, n_actions, comm_dim, device,
         rnn_layers, rnn_hidden_dim,
@@ -271,14 +272,13 @@ def _evaluate_and_log_dial_rnn(
         eta_str = f" | ETA={_format_eta(remaining / sps)}"
 
     print(
-        f"[IQL-DIAL-RNN] Eval at step {global_step}: "
+        f"[MARL-DIAL] Eval at step {global_step}: "
         f"mean_reward={mean_eval_reward:.3f} std={std_eval_reward:.3f} | "
         f"baseline={baseline_label} "
         f"mean={mean_baseline_reward:.3f} std={std_baseline_reward:.3f} | "
         f"drop_ratio_mean={mean_drop_ratio:.6f} drop_ratio_std={std_drop_ratio:.6f} | "
         f"win={win_rate:.0%}{eta_str}"
     )
-    agent.train()
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +295,7 @@ def main() -> None:
     )
     eval_baseline = resolve_training_eval_baseline(cfg, n_agents)
 
-    algo_label = "iql_dial_rnn"
+    algo_label = "marl_dial"
 
     resuming = args.resume is not None
     if resuming:
@@ -353,7 +353,7 @@ def main() -> None:
 
     dru = DRU(sigma=args.dru_sigma)
 
-    learner = IQLDIALRNNLearner(
+    learner = MARLDIALLearner(
         agent=agent,
         n_agents=n_agents,
         n_actions=n_actions,
@@ -368,16 +368,6 @@ def main() -> None:
         optimizer_type=args.optimizer,
     )
 
-    collector = DialRNNEpisodeCollector(n_envs=args.n_envs, device=device)
-
-    # Collection state
-    hidden_states = torch.zeros(
-        args.rnn_layers, args.n_envs * n_agents, args.rnn_hidden_dim, device=device,
-    )
-    prev_msg_logits = np.zeros((args.n_envs, n_agents, comm_dim), dtype=np.float32)
-    prev_actions = np.full((args.n_envs, n_agents), n_actions, dtype=np.int64)
-    episode_start_mask = np.ones(args.n_envs, dtype=np.bool_)
-
     best_model_tracker = BestModelTracker()
     global_step = 0
     episode = 0
@@ -390,21 +380,15 @@ def main() -> None:
         if not training_state_path.exists():
             raise FileNotFoundError(f"No training_state.pt found in {run_dir}")
         counters = load_dial_rnn_training_state(
-            training_state_path, learner, collector, obs_normalizer, best_model_tracker,
+            training_state_path, learner, obs_normalizer, best_model_tracker,
         )
         global_step = counters["global_step"]
         episode = counters["episode"]
         last_eval_step = counters["last_eval_step"]
         vector_step = counters["vector_step"]
-        # Clear in-progress buffers (hidden state is zeroed so partial episodes are invalid)
-        # Completed episodes loaded by load_dial_rnn_training_state are kept.
-        for buf in collector._buffers:
-            buf.clear()
-        hidden_states.zero_()
-        prev_msg_logits[:] = 0.0
-        prev_actions[:] = n_actions
-        episode_start_mask[:] = True
         print(f"Resumed from {run_dir} at step {global_step}")
+
+    learner.agent.train()
 
     def save_checkpoint(path: Path) -> None:
         save_dial_rnn_checkpoint(
@@ -422,7 +406,7 @@ def main() -> None:
 
     def save_training_state() -> None:
         save_dial_rnn_training_state(
-            run_dir / "training_state.pt", learner, collector,
+            run_dir / "training_state.pt", learner,
             obs_normalizer, best_model_tracker, global_step, episode,
             last_eval_step, vector_step,
         )
@@ -441,44 +425,188 @@ def main() -> None:
         episode_reward_sums = np.zeros((args.n_envs,), dtype=np.float32)
         start_time = time.time()
 
+        # On-policy DIAL state (tensors for gradient flow)
+        hidden = torch.zeros(
+            args.rnn_layers, args.n_envs * n_agents, args.rnn_hidden_dim, device=device,
+        )
+        prev_action = torch.full(
+            (args.n_envs, n_agents), n_actions, dtype=torch.long, device=device,
+        )
+        recv_msg = torch.zeros(
+            args.n_envs, n_agents, n_agents * comm_dim, device=device,
+        )
+
+        # Per-env episode accumulators
+        env_online_q = [[] for _ in range(args.n_envs)]
+        env_obs_raw = [[] for _ in range(args.n_envs)]
+        env_actions = [[] for _ in range(args.n_envs)]
+        env_rewards = [[] for _ in range(args.n_envs)]
+        env_terminated = [[] for _ in range(args.n_envs)]
+        pending_episodes: list[dict] = []
+        seg_init_hidden = [
+            hidden[:, env_idx * n_agents : (env_idx + 1) * n_agents, :].detach().clone()
+            for env_idx in range(args.n_envs)
+        ]
+        seg_init_prev_action = [
+            prev_action[env_idx].detach().clone() for env_idx in range(args.n_envs)
+        ]
+        seg_init_recv_msg = [
+            recv_msg[env_idx].detach().clone() for env_idx in range(args.n_envs)
+        ]
+
+        def flush_env_segment(env_idx: int, next_obs_segment: np.ndarray) -> None:
+            """Finalize the current per-env segment into a learner episode."""
+            if not env_online_q[env_idx]:
+                return
+            pending_episodes.append({
+                "online_q": env_online_q[env_idx],
+                "obs_raw": np.stack(env_obs_raw[env_idx]),
+                "actions": np.stack(env_actions[env_idx]),
+                "rewards": np.stack(env_rewards[env_idx]),
+                "terminated": np.array(env_terminated[env_idx], dtype=np.float32),
+                "next_obs_raw": np.asarray(next_obs_segment, dtype=np.float32).copy(),
+                "init_hidden": seg_init_hidden[env_idx],
+                "init_prev_action": seg_init_prev_action[env_idx],
+                "init_recv_msg": seg_init_recv_msg[env_idx],
+            })
+            env_online_q[env_idx] = []
+            env_obs_raw[env_idx] = []
+            env_actions[env_idx] = []
+            env_rewards[env_idx] = []
+            env_terminated[env_idx] = []
+
         while global_step < args.total_timesteps:
-            step = dial_rnn_collect_transition(
-                env=env, agent=learner.agent, obs_raw=obs_raw,
-                obs_normalizer=obs_normalizer, global_step=global_step,
-                epsilon_start=args.epsilon_start, epsilon_end=args.epsilon_end,
-                epsilon_decay_steps=args.epsilon_decay_steps,
-                n_envs=args.n_envs, n_agents=n_agents, n_actions=n_actions,
-                rng=rng, device=device,
-                prev_msg_logits=prev_msg_logits, prev_actions=prev_actions,
-                hidden_states=hidden_states, dru=dru,
-                collector=collector, comm_dim=comm_dim,
-                episode_start_mask=episode_start_mask,
+            # Normalize obs
+            if obs_normalizer is not None:
+                obs = obs_normalizer.normalize(obs_raw, update=True)
+            else:
+                obs = obs_raw
+
+            eps = epsilon_by_step(
+                global_step, args.epsilon_start, args.epsilon_end, args.epsilon_decay_steps,
             )
 
-            raw_rewards = step.rewards_arr
-            team_rewards = raw_rewards.sum(axis=1)
+            # Forward pass WITH gradients (on-policy DIAL)
+            obs_t = torch.as_tensor(obs, device=device, dtype=torch.float32)
+            q_t, m_t, new_hidden = dial_rnn_forward_batched(
+                learner.agent,
+                obs_t,
+                prev_action,
+                recv_msg,
+                hidden,
+            )
+
+            # Epsilon-greedy action selection (detached)
+            greedy = q_t.detach().argmax(dim=-1).cpu().numpy().astype(np.int64)
+            actions = greedy.copy()
+            explore_mask = rng.random((args.n_envs, n_agents)) < eps
+            if np.any(explore_mask):
+                actions[explore_mask] = rng.integers(
+                    0, n_actions, size=int(explore_mask.sum()),
+                    endpoint=False, dtype=np.int64,
+                )
+
+            # Step environment
+            action_dict = {f"agent_{i}": actions[:, i] for i in range(n_agents)}
+            next_obs_dict, rewards_arr, terminated, truncated, infos = env.step(action_dict)
+            next_obs_raw = stack_vector_obs(next_obs_dict, n_agents)
+
+            terminated_any = np.asarray(terminated, dtype=np.bool_)
+            truncated_any = np.asarray(truncated, dtype=np.bool_)
+            done_reset = np.logical_or(terminated_any, truncated_any)
+
+            rewards_np = np.asarray(rewards_arr, dtype=np.float32)
+            team_rewards = rewards_np.sum(axis=1)
+            rewards_team = np.repeat(
+                team_rewards[:, None], n_agents, axis=1,
+            ).astype(np.float32)
             episode_reward_sums += team_rewards
 
-            obs_raw = step.next_obs_raw
+            next_obs_for_buffer, _ = patch_autoreset_final_obs(
+                next_obs_raw, infos, done_reset, n_agents,
+            )
+
+            # Store per-env data (Q-values keep grad for end-to-end DIAL)
+            for i in range(args.n_envs):
+                env_online_q[i].append(q_t[i])
+                env_obs_raw[i].append(obs_raw[i].copy())
+                env_actions[i].append(actions[i].copy())
+                env_rewards[i].append(rewards_team[i].copy())
+                env_terminated[i].append(float(terminated_any[i]))
+
+            # DRU + message routing (with grad)
+            new_recv = route_messages(dru(m_t, train_mode=True), n_agents)
+
+            # Handle done envs: finalize episodes and reset state
+            done_indices = np.where(done_reset)[0]
+            for i in done_indices:
+                flush_env_segment(i, next_obs_for_buffer[i])
+
+            # Update recurrent state (torch.where preserves grad for ongoing envs)
+            if len(done_indices) > 0:
+                reset_mask = torch.zeros(args.n_envs, dtype=torch.bool, device=device)
+                reset_mask[done_indices] = True
+                h_mask = reset_mask.unsqueeze(1).expand(
+                    args.n_envs, n_agents,
+                ).reshape(1, args.n_envs * n_agents, 1).expand_as(new_hidden)
+                hidden = torch.where(h_mask, torch.zeros_like(new_hidden), new_hidden)
+                m_mask = reset_mask.view(args.n_envs, 1, 1).expand_as(new_recv)
+                recv_msg = torch.where(m_mask, torch.zeros_like(new_recv), new_recv)
+                actions_t = torch.as_tensor(actions, device=device, dtype=torch.long)
+                a_mask = reset_mask.view(args.n_envs, 1).expand_as(actions_t)
+                prev_action = torch.where(
+                    a_mask, torch.full_like(actions_t, n_actions), actions_t,
+                )
+            else:
+                hidden = new_hidden
+                recv_msg = new_recv
+                prev_action = torch.as_tensor(actions, device=device, dtype=torch.long)
+
+            for i in range(args.n_envs):
+                if env_online_q[i]:
+                    continue
+                seg_init_hidden[i] = hidden[
+                    :, i * n_agents : (i + 1) * n_agents, :
+                ].detach().clone()
+                seg_init_prev_action[i] = prev_action[i].detach().clone()
+                seg_init_recv_msg[i] = recv_msg[i].detach().clone()
+
+            obs_raw = next_obs_raw
             global_step += args.n_envs
             vector_step += 1
 
             episode = log_completed_episodes(
-                done_reset=step.done_reset, episode_reward_sums=episode_reward_sums,
+                done_reset=done_reset, episode_reward_sums=episode_reward_sums,
                 global_step=global_step, episode=episode,
                 train_writer=train_writer, train_f=train_f,
                 best_model_tracker=best_model_tracker, run_dir=run_dir,
                 save_checkpoint=save_checkpoint, log_interval=args.log_interval,
-                algo_name="IQL-DIAL-RNN",
-                extra_csv_values=step.epsilon,
-                extra_log_str=f" eps={step.epsilon:.3f}",
+                algo_name="MARL-DIAL",
+                extra_csv_values=eps,
+                extra_log_str=f" eps={eps:.3f}",
                 start_time=start_time, total_timesteps=args.total_timesteps,
             )
 
-            if collector.has_episodes(args.batch_episodes):
-                batch = collector.pop_batch(args.batch_episodes, obs_normalizer=obs_normalizer)
-                assert batch is not None
-                learner.update(batch)
+            # On-policy training: update as soon as enough episodes are ready
+            if len(pending_episodes) >= args.batch_episodes:
+                # Truncate any still-running segments at the optimizer boundary.
+                # The next segment will continue from the detached recurrent state.
+                for i in range(args.n_envs):
+                    flush_env_segment(i, obs_raw[i])
+                batch_eps = pending_episodes
+                pending_episodes = []
+                learner.update_online(batch_eps, obs_normalizer=obs_normalizer)
+
+                # Detach recurrent state at the truncation boundary.
+                hidden = hidden.detach()
+                recv_msg = recv_msg.detach()
+                prev_action = prev_action.detach()
+                for i in range(args.n_envs):
+                    seg_init_hidden[i] = hidden[
+                        :, i * n_agents : (i + 1) * n_agents, :
+                    ].detach().clone()
+                    seg_init_prev_action[i] = prev_action[i].detach().clone()
+                    seg_init_recv_msg[i] = recv_msg[i].detach().clone()
 
             if global_step - last_eval_step >= args.eval_freq:
                 _evaluate_and_log_dial_rnn(
@@ -499,6 +627,12 @@ def main() -> None:
                 eval_seed += args.n_eval_episodes
                 last_eval_step = global_step
                 save_training_state()
+
+        if pending_episodes or any(env_online_q[i] for i in range(args.n_envs)):
+            for i in range(args.n_envs):
+                flush_env_segment(i, obs_raw[i])
+            if pending_episodes:
+                learner.update_online(pending_episodes, obs_normalizer=obs_normalizer)
 
     latest_path = run_dir / "latest_model.pt"
     save_checkpoint(latest_path)

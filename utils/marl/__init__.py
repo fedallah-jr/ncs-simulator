@@ -22,7 +22,7 @@ from .common import (
     dial_rnn_collect_transition,
     qlearning_collect_transition,
 )
-from .learners import IQLLearner, VDNLearner, QMIXLearner, QPLEXLearner, HASACLearner, IQLDIALRNNLearner
+from .learners import IQLLearner, VDNLearner, QMIXLearner, QPLEXLearner, HASACLearner, MARLDIALLearner
 from .networks import (
     CentralValueMLP,
     MLPAgent,
@@ -94,7 +94,7 @@ __all__ = [
     "DuelingMLPAgent",
     "epsilon_by_step",
     "HASACLearner",
-    "IQLDIALRNNLearner",
+    "MARLDIALLearner",
     "IQLLearner",
     "load_happo_arch_args",
     "load_happo_training_state",
