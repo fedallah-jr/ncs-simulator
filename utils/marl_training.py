@@ -149,6 +149,7 @@ def create_environments(
     seed: Optional[int],
     eval_reward_override: Optional[Dict[str, Any]],
     eval_termination_override: Optional[Dict[str, Any]],
+    observation_override: Optional[Dict[str, Any]] = None,
     network_override: Optional[Dict[str, Any]] = None,
     training_reward_override: Optional[Dict[str, Any]] = None,
 ) -> Tuple["NCS_Env", "NCS_Env"]:
@@ -162,6 +163,7 @@ def create_environments(
         seed: Random seed
         eval_reward_override: Evaluation reward config override
         eval_termination_override: Evaluation termination config override
+        observation_override: Observation config override for both training and eval envs.
         network_override: Network config override for the training env (--set network.* values).
             Eval env always loads network settings from the config file directly.
         training_reward_override: Reward config override for the training env (--set reward.* values).
@@ -177,6 +179,7 @@ def create_environments(
         episode_length=episode_length,
         config_path=config_path_str,
         seed=seed,
+        observation_override=observation_override,
         reward_override=training_reward_override,
         network_override=network_override,
     )
@@ -186,6 +189,7 @@ def create_environments(
         episode_length=episode_length,
         config_path=config_path_str,
         seed=seed,
+        observation_override=observation_override,
         reward_override=eval_reward_override,
         termination_override=eval_termination_override,
         freeze_running_normalization=True,

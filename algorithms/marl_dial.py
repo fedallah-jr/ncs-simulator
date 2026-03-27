@@ -8,6 +8,7 @@ vectorized NCS environment used in this repository.
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import sys
 import time
@@ -137,6 +138,15 @@ def _format_eta(remaining_seconds: float) -> str:
     h, rem = divmod(total, 3600)
     m, s = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _recurrent_observation_override() -> Dict[str, Any]:
+    """Reduce handcrafted temporal features so the recurrent policy carries memory."""
+    return {
+        "history_window": 0,
+        "state_history_window": 0,
+        "include_current_throughput": False,
+    }
 
 
 def _evaluate_and_log_dial_rnn(
@@ -301,6 +311,9 @@ def main() -> None:
         load_config_with_overrides(args.config, args.n_agents, True, args.set_overrides)
     )
     eval_baseline = resolve_training_eval_baseline(cfg, n_agents)
+    observation_override = _recurrent_observation_override()
+    cfg_effective = copy.deepcopy(cfg)
+    cfg_effective.setdefault("observation", {}).update(observation_override)
 
     algo_label = "marl_dial"
 
@@ -328,6 +341,7 @@ def main() -> None:
         config_path_str=config_path_str,
         seed=args.seed,
         shared_reward_normalizer=shared_reward_normalizer,
+        observation_override=observation_override,
         network_override=network_override,
         reward_override=training_reward_override,
         minimal_info=True,
@@ -338,6 +352,7 @@ def main() -> None:
         episode_length=args.episode_length,
         config_path_str=config_path_str,
         seed=args.seed,
+        observation_override=observation_override,
         reward_override=eval_reward_override,
         termination_override=eval_termination_override,
     )
@@ -547,10 +562,11 @@ def main() -> None:
         "n_eval_envs": args.n_eval_envs,
         "device": str(device),
         "seed": args.seed,
+        "force_recurrent_observation": True,
     }
     save_config_with_hyperparameters(
         run_dir, args.config, algo_label, hyperparams,
-        resolved_config=cfg, set_overrides=args.set_overrides,
+        resolved_config=cfg_effective, set_overrides=args.set_overrides,
     )
 
     print_run_summary(run_dir, latest_path, rewards_csv_path, eval_csv_path)

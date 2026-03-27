@@ -87,6 +87,7 @@ class NCS_Env(gym.Env):
         episode_length: int = 250,
         config_path: Optional[str] = None,
         seed: Optional[int] = None,
+        observation_override: Optional[Dict[str, Any]] = None,
         reward_override: Optional[Dict[str, Any]] = None,
         termination_override: Optional[Dict[str, Any]] = None,
         network_override: Optional[Dict[str, Any]] = None,
@@ -101,6 +102,7 @@ class NCS_Env(gym.Env):
         self.minimal_info = bool(minimal_info)
         self.n_agents = n_agents
         self.episode_length = episode_length
+        self.observation_override = observation_override
         self.reward_override = reward_override
         self.termination_override = termination_override
         self.freeze_running_normalization = bool(freeze_running_normalization)
@@ -150,12 +152,23 @@ class NCS_Env(gym.Env):
             self.initial_state_fixed_seed = 0
         self._fixed_initial_states: Optional[List[np.ndarray]] = None
 
-        observation_cfg = self.config.get("observation", {})
-        self.history_window = observation_cfg.get("history_window", 10)
-        self.state_history_window = observation_cfg.get("state_history_window", self.history_window)
+        base_observation_cfg = self.config.get("observation", {})
+        observation_cfg = self._merge_config_override(base_observation_cfg, observation_override)
+        self._default_observation_history_window = int(base_observation_cfg.get("history_window", 10))
+        self.history_window = int(observation_cfg.get("history_window", self._default_observation_history_window))
+        self.state_history_window = int(
+            observation_cfg.get("state_history_window", self.history_window)
+        )
+        if self.history_window < 0 or self.state_history_window < 0:
+            raise ValueError("observation history windows must be >= 0")
         tp_window = observation_cfg.get("throughput_window", 50)
         self.throughput_windows = [tp_window] if isinstance(tp_window, int) else list(tp_window)
+        if not self.throughput_windows:
+            raise ValueError("observation.throughput_window must define at least one window")
         self.n_throughput_windows = len(self.throughput_windows)
+        self.include_current_throughput = bool(
+            observation_cfg.get("include_current_throughput", True)
+        )
         self.quantization_step = observation_cfg.get("quantization_step", 0.05)
         self.cevat_state = bool(observation_cfg.get("cevat_state", False))
 
@@ -172,7 +185,9 @@ class NCS_Env(gym.Env):
             + self.state_dim  # local sensor KF state estimate
             + self.state_dim  # local estimation gap
             + self.state_dim  # local sensor covariance diagonal
-            + self.n_throughput_windows  # current throughputs (one per window)
+            + (
+                self.n_throughput_windows if self.include_current_throughput else 0
+            )  # current throughputs (one per window)
             + self.state_history_window * self.state_dim  # previous states
             + self.history_window  # previous statuses
             + self.history_window  # previous throughputs
@@ -256,9 +271,16 @@ class NCS_Env(gym.Env):
         reward_cfg = self._merge_config_override(base_reward_cfg, self.reward_override)
         self.reward_normalization_gamma = float(reward_cfg.get("normalization_gamma", 0.999))
         self.state_cost_matrix = self.lqr_Q.copy()
-        self.comm_recent_window = int(reward_cfg.get("comm_recent_window", self.history_window))
+        self.comm_recent_window = int(
+            reward_cfg.get(
+                "comm_recent_window", self._default_observation_history_window,
+            )
+        )
         self.comm_throughput_window = int(
-            reward_cfg.get("comm_throughput_window", max(5 * self.history_window, 50))
+            reward_cfg.get(
+                "comm_throughput_window",
+                max(5 * self._default_observation_history_window, 50),
+            )
         )
         base_comm_penalty_alpha = float(reward_cfg.get("comm_penalty_alpha", 0.0))
         self.reward_definition = self._build_reward_definition(
@@ -1485,7 +1507,11 @@ class NCS_Env(gym.Env):
             # throughput_history has maxlen=history_window and is pre-filled, always full
             prev_throughputs = np.asarray(self.throughput_history[i], dtype=np.float32)
 
-            throughputs = self._compute_observed_goodput_kbps_multi(i)
+            include_throughput_history = self.history_window > 0
+            if self.include_current_throughput or include_throughput_history:
+                throughputs = self._compute_observed_goodput_kbps_multi(i)
+            else:
+                throughputs = []
             measurement = self.last_sensor_measurements[i]
             quantized_state = self._quantize_state(measurement)
             obs_values = np.empty(self.local_obs_dim, dtype=np.float32)
@@ -1508,8 +1534,9 @@ class NCS_Env(gym.Env):
                 np.float32
             )
             cursor += self.state_dim
-            obs_values[cursor : cursor + self.n_throughput_windows] = throughputs
-            cursor += self.n_throughput_windows
+            if self.include_current_throughput:
+                obs_values[cursor : cursor + self.n_throughput_windows] = throughputs
+                cursor += self.n_throughput_windows
             obs_values[cursor : cursor + prev_states_flat.size] = prev_states_flat
             cursor += prev_states_flat.size
             obs_values[cursor : cursor + self.history_window] = status_values
@@ -1517,7 +1544,7 @@ class NCS_Env(gym.Env):
             obs_values[cursor : cursor + self.history_window] = prev_throughputs
 
             observations[f"agent_{i}"] = obs_values
-            current_throughputs.append(throughputs[0])  # Use first window for history
+            current_throughputs.append(float(throughputs[0]) if throughputs else 0.0)
             quantized_states.append(quantized_state)
 
         if self.cevat_state:

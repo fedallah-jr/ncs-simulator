@@ -12,6 +12,7 @@ Learning-based baselines live under `algorithms/`:
 - IQL (multi-agent, PyTorch): `python -m algorithms.marl_iql --config configs/marl_absolute_plants.json --total-timesteps 200000`
 - DIAL (multi-agent, PyTorch, recurrent, online-only): `python -m algorithms.marl_dial --config configs/marl_absolute_plants.json --total-timesteps 200000`
   - Uses a shared GRU with differentiable communication following the original DIAL paper architecture.
+  - Forces a recurrent observation profile during train/eval: `observation.history_window=0`, `observation.state_history_window=0`, and `observation.include_current_throughput=false`.
   - Communication-specific knobs: `--comm-dim`, `--dru-sigma`, `--rnn-hidden-dim`, `--rnn-layers`, `--batch-episodes`, `--momentum`.
 - VDN (multi-agent, PyTorch): `python -m algorithms.marl_vdn --config configs/marl_absolute_plants.json --total-timesteps 200000`
 - QMIX (multi-agent, PyTorch): `python -m algorithms.marl_qmix --config configs/marl_absolute_plants.json --total-timesteps 200000`
