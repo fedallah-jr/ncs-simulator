@@ -77,6 +77,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-update-steps", type=int, default=100,
                         help="Target net sync every N optimizer steps (reference: step_target)")
     parser.add_argument("--momentum", type=float, default=0.05, help="RMSprop momentum")
+    parser.add_argument("--use-vdn-mixer", action="store_true",
+                        help="Use VDN mixer (Q_tot = sum Q_i) for joint TD loss instead of per-agent IQL loss")
     return parser.parse_args()
 
 
@@ -388,6 +390,7 @@ def main() -> None:
         device=device,
         momentum=args.momentum,
         optimizer_type=args.optimizer,
+        use_vdn_mixer=args.use_vdn_mixer,
     )
 
     best_model_tracker = BestModelTracker()
@@ -424,6 +427,7 @@ def main() -> None:
             dru_sigma=args.dru_sigma,
             rnn_hidden_dim=args.rnn_hidden_dim,
             rnn_layers=args.rnn_layers,
+            use_vdn_mixer=args.use_vdn_mixer,
         )
 
     def save_training_state() -> None:
@@ -562,6 +566,7 @@ def main() -> None:
         "n_eval_envs": args.n_eval_envs,
         "device": str(device),
         "seed": args.seed,
+        "use_vdn_mixer": args.use_vdn_mixer,
         "force_recurrent_observation": True,
     }
     save_config_with_hyperparameters(

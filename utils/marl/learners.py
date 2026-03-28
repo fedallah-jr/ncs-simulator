@@ -486,6 +486,7 @@ class MARLDIALLearner:
         device: Optional[torch.device] = None,
         momentum: float = 0.05,
         optimizer_type: str = "rmsprop",
+        use_vdn_mixer: bool = False,
     ) -> None:
         self.agent = agent
         self.target_agent = copy.deepcopy(agent)
@@ -500,10 +501,15 @@ class MARLDIALLearner:
         self.gamma = float(gamma)
         self.target_update_steps = int(target_update_steps)
         self.grad_clip_norm = grad_clip_norm
+        self.use_vdn_mixer = use_vdn_mixer
 
         self.device = device if device is not None else torch.device("cpu")
         self.agent.to(self.device)
         self.target_agent.to(self.device)
+
+        if self.use_vdn_mixer:
+            self.mixer = VDNMixer().to(self.device)
+            self.target_mixer = VDNMixer().to(self.device)
 
         self.optimizer = _make_optimizer(
             self.agent.parameters(), lr=float(lr),
@@ -610,6 +616,23 @@ class MARLDIALLearner:
                 self.target_agent, batch, train_mode=True, dru_noise=noise,
             )
 
+        if self.use_vdn_mixer:
+            self._update_vdn(batch, online_q, target_q, target_q_boot, B, max_T, N)
+        else:
+            self._update_iql(batch, online_q, target_q, target_q_boot, B, max_T, N)
+
+        # Target update — per-step counter (reference: agent.py:142-144)
+        self.episodes_seen += B
+        self._train_steps += 1
+        if self._train_steps % self.target_update_steps == 0:
+            _hard_update(self.target_agent, self.agent)
+
+    def _update_iql(
+        self, batch: DialRNNEpisodeBatch,
+        online_q: list[torch.Tensor], target_q: list[torch.Tensor],
+        target_q_boot: torch.Tensor, B: int, max_T: int, N: int,
+    ) -> None:
+        """Original per-agent TD loss."""
         # TD targets — mask-aware per-sample bootstrap
         with torch.no_grad():
             targets: list[torch.Tensor] = []
@@ -645,21 +668,65 @@ class MARLDIALLearner:
             )
         self.optimizer.step()
 
-        # Target update — per-step counter (reference: agent.py:142-144)
-        self.episodes_seen += B
-        self._train_steps += 1
-        if self._train_steps % self.target_update_steps == 0:
-            _hard_update(self.target_agent, self.agent)
+    def _update_vdn(
+        self, batch: DialRNNEpisodeBatch,
+        online_q: list[torch.Tensor], target_q: list[torch.Tensor],
+        target_q_boot: torch.Tensor, B: int, max_T: int, N: int,
+    ) -> None:
+        """VDN-mixed loss: TD error on Q_tot = sum(Q_i)."""
+        with torch.no_grad():
+            # Target: mix per-agent max-Q into Q_tot
+            boot_max = target_q_boot.max(-1).values  # (B, N)
+            boot_q_tot = self.target_mixer(boot_max)  # (B, 1)
+            targets: list[torch.Tensor] = []
+            for t in range(max_T):
+                if t < max_T - 1:
+                    has_next = batch.mask[:, t + 1].bool()
+                    next_max = target_q[t + 1].max(-1).values
+                    bootstrap_q = torch.where(
+                        has_next.unsqueeze(1).expand(B, N), next_max, boot_max,
+                    )
+                else:
+                    bootstrap_q = boot_max
+                next_q_tot = self.target_mixer(bootstrap_q)  # (B, 1)
+                r_tot = batch.rewards[:, t].sum(dim=-1, keepdim=True)  # (B, 1)
+                not_done = (1.0 - batch.terminated[:, t]).unsqueeze(-1)  # (B, 1)
+                targets.append(r_tot + self.gamma * not_done * next_q_tot)
+
+        # Online: mix per-agent Q(s,a) into Q_tot
+        total_loss = torch.tensor(0.0, device=self.device)
+        for t in range(max_T):
+            q_taken = online_q[t].gather(
+                -1, batch.actions[:, t].unsqueeze(-1),
+            ).squeeze(-1)  # (B, N)
+            q_tot = self.mixer(q_taken)  # (B, 1)
+            td_error = (q_tot - targets[t]) ** 2
+            total_loss = total_loss + (td_error * batch.mask[:, t].unsqueeze(-1)).sum()
+        total_weight = batch.mask.sum().clamp_min(1.0)
+        total_loss = total_loss / total_weight
+
+        self.optimizer.zero_grad(set_to_none=True)
+        total_loss.backward()
+        if self.grad_clip_norm is not None:
+            nn.utils.clip_grad_norm_(
+                self.agent.parameters(), float(self.grad_clip_norm),
+            )
+        self.optimizer.step()
 
     # ------------------------------------------------------------------
     def state_dict(self) -> dict:
-        return {
+        d = {
             "agent": self.agent.state_dict(),
             "target_agent": self.target_agent.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "episodes_seen": self.episodes_seen,
             "train_steps": self._train_steps,
+            "use_vdn_mixer": self.use_vdn_mixer,
         }
+        if self.use_vdn_mixer:
+            d["mixer"] = self.mixer.state_dict()
+            d["target_mixer"] = self.target_mixer.state_dict()
+        return d
 
     def load_state_dict(self, d: dict) -> None:
         self.agent.load_state_dict(d["agent"])
@@ -667,6 +734,9 @@ class MARLDIALLearner:
         self.optimizer.load_state_dict(d["optimizer"])
         self.episodes_seen = int(d["episodes_seen"])
         self._train_steps = int(d.get("train_steps", 0))
+        if self.use_vdn_mixer and "mixer" in d:
+            self.mixer.load_state_dict(d["mixer"])
+            self.target_mixer.load_state_dict(d["target_mixer"])
 
 
 def _soft_update(target: nn.Module, source: nn.Module, tau: float) -> None:

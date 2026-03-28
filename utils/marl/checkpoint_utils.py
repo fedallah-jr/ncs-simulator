@@ -318,6 +318,7 @@ def save_dial_rnn_checkpoint(
     agent: torch.nn.Module, obs_normalizer: Optional["RunningObsNormalizer"],
     comm_dim: int, dru_sigma: float,
     rnn_hidden_dim: int = 128, rnn_layers: int = 2,
+    use_vdn_mixer: bool = False,
 ) -> None:
     ckpt: Dict[str, Any] = {
         "algorithm": "marl_dial", "n_agents": n_agents, "obs_dim": obs_dim,
@@ -325,6 +326,7 @@ def save_dial_rnn_checkpoint(
         "dial": True, "dial_arch": "rnn",
         "comm_dim": comm_dim, "dru_sigma": dru_sigma,
         "rnn_hidden_dim": rnn_hidden_dim, "rnn_layers": rnn_layers,
+        "use_vdn_mixer": use_vdn_mixer,
         "agent_state_dict": agent.state_dict(),
     }
     ckpt["obs_normalization"] = (
