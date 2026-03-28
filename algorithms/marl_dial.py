@@ -64,6 +64,7 @@ def parse_args() -> argparse.Namespace:
         include_mlp_arch_args=False,
     )
     parser.set_defaults(
+        optimizer="adam",
         grad_clip_norm=10.0,
         epsilon_start=0.05,
         epsilon_end=0.05,
