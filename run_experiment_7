@@ -102,13 +102,13 @@ run_one() {
 mixer_args=()
 mixer_suffix=""
 case "${MIXER}" in
-  vdn)
-    mixer_args+=(--use-vdn-mixer)
-    mixer_suffix="_vdn"
+  vdn|qmix)
+    mixer_args+=(--mixer "${MIXER}")
+    mixer_suffix="_${MIXER}"
     ;;
   none) ;;
   *)
-    echo "Unknown MIXER value: ${MIXER} (expected: none, vdn)" >&2
+    echo "Unknown MIXER value: ${MIXER} (expected: none, vdn, qmix)" >&2
     exit 1
     ;;
 esac

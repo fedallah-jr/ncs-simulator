@@ -487,6 +487,10 @@ class MARLDIALLearner:
         momentum: float = 0.05,
         optimizer_type: str = "rmsprop",
         use_vdn_mixer: bool = False,
+        mixer_type: str = "none",
+        obs_dim: int = 0,
+        qmix_mixing_hidden_dim: int = 32,
+        qmix_hypernet_hidden_dim: int = 64,
     ) -> None:
         self.agent = agent
         self.target_agent = copy.deepcopy(agent)
@@ -501,18 +505,37 @@ class MARLDIALLearner:
         self.gamma = float(gamma)
         self.target_update_steps = int(target_update_steps)
         self.grad_clip_norm = grad_clip_norm
-        self.use_vdn_mixer = use_vdn_mixer
+
+        # Resolve mixer type: --use-vdn-mixer (legacy) or --mixer vdn/qmix
+        if use_vdn_mixer and mixer_type == "none":
+            mixer_type = "vdn"
+        self.mixer_type = mixer_type
 
         self.device = device if device is not None else torch.device("cpu")
         self.agent.to(self.device)
         self.target_agent.to(self.device)
 
-        if self.use_vdn_mixer:
+        self.mixer: Optional[nn.Module] = None
+        self.target_mixer: Optional[nn.Module] = None
+        if self.mixer_type == "vdn":
             self.mixer = VDNMixer().to(self.device)
             self.target_mixer = VDNMixer().to(self.device)
+        elif self.mixer_type == "qmix":
+            state_dim = n_agents * obs_dim
+            self.mixer = QMixer(
+                n_agents=n_agents, state_dim=state_dim,
+                mixing_hidden_dim=qmix_mixing_hidden_dim,
+                hypernet_hidden_dim=qmix_hypernet_hidden_dim,
+            ).to(self.device)
+            self.target_mixer = copy.deepcopy(self.mixer).to(self.device)
+            for p in self.target_mixer.parameters():
+                p.requires_grad = False
 
+        all_params = list(self.agent.parameters())
+        if self.mixer is not None:
+            all_params += list(self.mixer.parameters())
         self.optimizer = _make_optimizer(
-            self.agent.parameters(), lr=float(lr),
+            all_params, lr=float(lr),
             optimizer_type=optimizer_type, momentum=float(momentum),
         )
         self.episodes_seen = 0
@@ -616,8 +639,10 @@ class MARLDIALLearner:
                 self.target_agent, batch, train_mode=True, dru_noise=noise,
             )
 
-        if self.use_vdn_mixer:
+        if self.mixer_type == "vdn":
             self._update_vdn(batch, online_q, target_q, target_q_boot, B, max_T, N)
+        elif self.mixer_type == "qmix":
+            self._update_qmix(batch, online_q, target_q, target_q_boot, B, max_T, N)
         else:
             self._update_iql(batch, online_q, target_q, target_q_boot, B, max_T, N)
 
@@ -626,6 +651,8 @@ class MARLDIALLearner:
         self._train_steps += 1
         if self._train_steps % self.target_update_steps == 0:
             _hard_update(self.target_agent, self.agent)
+            if self.target_mixer is not None:
+                _hard_update(self.target_mixer, self.mixer)
 
     def _update_iql(
         self, batch: DialRNNEpisodeBatch,
@@ -708,9 +735,59 @@ class MARLDIALLearner:
         self.optimizer.zero_grad(set_to_none=True)
         total_loss.backward()
         if self.grad_clip_norm is not None:
-            nn.utils.clip_grad_norm_(
-                self.agent.parameters(), float(self.grad_clip_norm),
-            )
+            all_params = list(self.agent.parameters()) + list(self.mixer.parameters())
+            nn.utils.clip_grad_norm_(all_params, float(self.grad_clip_norm))
+        self.optimizer.step()
+
+    def _update_qmix(
+        self, batch: DialRNNEpisodeBatch,
+        online_q: list[torch.Tensor], target_q: list[torch.Tensor],
+        target_q_boot: torch.Tensor, B: int, max_T: int, N: int,
+    ) -> None:
+        """QMIX-mixed loss: TD error on Q_tot from state-conditioned hypernetwork."""
+        # Global state = concatenated per-agent observations: (B, T, N*obs_dim)
+        obs_dim = batch.obs.shape[-1]
+        states = batch.obs.view(B, max_T, N * obs_dim)
+        boot_state = batch.next_obs.view(B, N * obs_dim)
+
+        with torch.no_grad():
+            boot_max = target_q_boot.max(-1).values  # (B, N)
+            targets: list[torch.Tensor] = []
+            for t in range(max_T):
+                if t < max_T - 1:
+                    has_next = batch.mask[:, t + 1].bool()
+                    next_max = target_q[t + 1].max(-1).values
+                    bootstrap_q = torch.where(
+                        has_next.unsqueeze(1).expand(B, N), next_max, boot_max,
+                    )
+                    next_state = torch.where(
+                        has_next.view(B, 1).expand(B, N * obs_dim),
+                        states[:, t + 1], boot_state,
+                    )
+                else:
+                    bootstrap_q = boot_max
+                    next_state = boot_state
+                next_q_tot = self.target_mixer(bootstrap_q, next_state)  # (B, 1)
+                r_tot = batch.rewards[:, t].sum(dim=-1, keepdim=True)  # (B, 1)
+                not_done = (1.0 - batch.terminated[:, t]).unsqueeze(-1)  # (B, 1)
+                targets.append(r_tot + self.gamma * not_done * next_q_tot)
+
+        total_loss = torch.tensor(0.0, device=self.device)
+        for t in range(max_T):
+            q_taken = online_q[t].gather(
+                -1, batch.actions[:, t].unsqueeze(-1),
+            ).squeeze(-1)  # (B, N)
+            q_tot = self.mixer(q_taken, states[:, t])  # (B, 1)
+            td_error = (q_tot - targets[t]) ** 2
+            total_loss = total_loss + (td_error * batch.mask[:, t].unsqueeze(-1)).sum()
+        total_weight = batch.mask.sum().clamp_min(1.0)
+        total_loss = total_loss / total_weight
+
+        self.optimizer.zero_grad(set_to_none=True)
+        total_loss.backward()
+        if self.grad_clip_norm is not None:
+            all_params = list(self.agent.parameters()) + list(self.mixer.parameters())
+            nn.utils.clip_grad_norm_(all_params, float(self.grad_clip_norm))
         self.optimizer.step()
 
     # ------------------------------------------------------------------
@@ -721,9 +798,9 @@ class MARLDIALLearner:
             "optimizer": self.optimizer.state_dict(),
             "episodes_seen": self.episodes_seen,
             "train_steps": self._train_steps,
-            "use_vdn_mixer": self.use_vdn_mixer,
+            "mixer_type": self.mixer_type,
         }
-        if self.use_vdn_mixer:
+        if self.mixer is not None:
             d["mixer"] = self.mixer.state_dict()
             d["target_mixer"] = self.target_mixer.state_dict()
         return d
@@ -734,7 +811,7 @@ class MARLDIALLearner:
         self.optimizer.load_state_dict(d["optimizer"])
         self.episodes_seen = int(d["episodes_seen"])
         self._train_steps = int(d.get("train_steps", 0))
-        if self.use_vdn_mixer and "mixer" in d:
+        if self.mixer is not None and "mixer" in d:
             self.mixer.load_state_dict(d["mixer"])
             self.target_mixer.load_state_dict(d["target_mixer"])
 
