@@ -13,9 +13,10 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-15000000}"
 N_ENVS="${N_ENVS:-8}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-$((TOTAL_TIMESTEPS * 60 / 100))}"
+MIXER="${MIXER:-none}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-run_root="${OUTPUT_ROOT}/exp_7_iql_dial_${timestamp}_seed${SEED}"
+run_root="${OUTPUT_ROOT}/exp_7_iql_dial_${MIXER}_${timestamp}_seed${SEED}"
 
 mkdir -p "${run_root}/logs"
 
@@ -98,10 +99,25 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
+mixer_args=()
+mixer_suffix=""
+case "${MIXER}" in
+  vdn)
+    mixer_args+=(--use-vdn-mixer)
+    mixer_suffix="_vdn"
+    ;;
+  none) ;;
+  *)
+    echo "Unknown MIXER value: ${MIXER} (expected: none, vdn)" >&2
+    exit 1
+    ;;
+esac
+
 # MARL-DIAL: online-only (paper-aligned)
-run_one "algorithms.marl_dial" "marl_dial" "marl_dial" \
+run_one "algorithms.marl_dial" "marl_dial" "marl_dial${mixer_suffix}" \
   --epsilon-decay-steps "${EPS_DECAY_STEPS}" \
-  --no-normalize-obs
+  --no-normalize-obs \
+  "${mixer_args[@]+${mixer_args[@]}}"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then
