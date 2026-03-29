@@ -779,8 +779,12 @@ def _strip_non_dynamics_config_fields(value: Any) -> Any:
 
 
 def _extract_env_signature(config: Dict[str, Any]) -> Dict[str, Any]:
+    # Batch evaluation runs each checkpoint with its own config path, so
+    # observation-shape settings do not need to match across model folders.
+    # Keep the compatibility check focused on environment dynamics and reward-
+    # affecting settings that would make leaderboard rows incomparable.
     signature: Dict[str, Any] = {}
-    for key in ("system", "lqr", "network", "observation", "termination", "controller"):
+    for key in ("system", "lqr", "network", "termination", "controller"):
         if key in config:
             signature[key] = _strip_non_dynamics_config_fields(config.get(key))
     reward_cfg = config.get("reward", {})
@@ -1834,7 +1838,8 @@ def main() -> int:
         mismatch_paths = ", ".join(sorted(mismatched))
         raise ValueError(
             "Config mismatch across model folders. "
-            f"Ensure environment sections match for all runs. Offending runs: {mismatch_paths}"
+            "Ensure dynamics/reward sections match for all runs. "
+            f"Offending runs: {mismatch_paths}"
         )
 
     reference_config = load_config(str(runs[0].config_path))
