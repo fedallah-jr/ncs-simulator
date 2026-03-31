@@ -171,6 +171,32 @@ class NCS_Env(gym.Env):
         )
         self.quantization_step = observation_cfg.get("quantization_step", 0.05)
         self.cevat_state = bool(observation_cfg.get("cevat_state", False))
+        self.handcrafted_comm_enabled = bool(
+            observation_cfg.get("handcrafted_comm_enabled", False)
+        )
+        self.handcrafted_comm_bits = int(
+            observation_cfg.get("handcrafted_comm_bits", 1)
+        )
+        threshold_raw = observation_cfg.get("handcrafted_comm_threshold", None)
+        self.handcrafted_comm_threshold = (
+            None if threshold_raw is None else float(threshold_raw)
+        )
+        if self.handcrafted_comm_bits <= 0:
+            raise ValueError("observation.handcrafted_comm_bits must be positive")
+        if self.cevat_state and self.handcrafted_comm_enabled:
+            raise ValueError(
+                "observation.cevat_state and "
+                "observation.handcrafted_comm_enabled cannot be enabled together"
+            )
+        if self.handcrafted_comm_enabled:
+            if (
+                self.handcrafted_comm_threshold is None
+                or self.handcrafted_comm_threshold <= 0.0
+            ):
+                raise ValueError(
+                    "observation.handcrafted_comm_threshold must be > 0 when "
+                    "observation.handcrafted_comm_enabled=true"
+                )
 
         # Create a local RNG instance for this environment
         self.np_random, _ = gym.utils.seeding.np_random(seed)
@@ -180,7 +206,7 @@ class NCS_Env(gym.Env):
             {f"agent_{i}": spaces.Discrete(2) for i in range(n_agents)}
         )
 
-        local_obs_dim = (
+        local_obs_base_dim = (
             self.state_dim  # current state
             + self.state_dim  # local sensor KF state estimate
             + self.state_dim  # local estimation gap
@@ -192,7 +218,15 @@ class NCS_Env(gym.Env):
             + self.history_window  # previous statuses
             + self.history_window  # previous throughputs
         )
-        self.local_obs_dim = int(local_obs_dim)
+        self.local_obs_base_dim = int(local_obs_base_dim)
+        self.handcrafted_comm_obs_dim = (
+            self.n_agents * self.handcrafted_comm_bits
+            if self.handcrafted_comm_enabled
+            else 0
+        )
+        self.local_obs_dim = int(
+            self.local_obs_base_dim + self.handcrafted_comm_obs_dim
+        )
         self.obs_dim = (
             self.local_obs_dim * self.n_agents if self.cevat_state else self.local_obs_dim
         )
@@ -1269,6 +1303,60 @@ class NCS_Env(gym.Env):
         dx = state  # reference is zero
         return float(dx.T @ self.state_cost_matrix @ dx)
 
+    def _encode_handcrafted_comm_score(self, score: float) -> np.ndarray:
+        """Encode a non-negative VoU score into a fixed-width binary message."""
+        if not self.handcrafted_comm_enabled:
+            return np.zeros((0,), dtype=np.float32)
+
+        threshold = float(self.handcrafted_comm_threshold)
+        bits = int(self.handcrafted_comm_bits)
+        score_value = max(0.0, float(score))
+
+        if bits == 1:
+            return np.asarray(
+                [1.0 if score_value > threshold else 0.0],
+                dtype=np.float32,
+            )
+
+        n_levels = 1 << bits
+        edge_offsets = np.arange(n_levels - 1, dtype=np.float64) - ((n_levels - 2) / 2.0)
+        edges = threshold * np.power(2.0, edge_offsets)
+        level = int(np.searchsorted(edges, score_value, side="right"))
+        message = np.zeros((bits,), dtype=np.float32)
+        for bit_idx in range(bits):
+            shift = bits - bit_idx - 1
+            message[bit_idx] = float((level >> shift) & 1)
+        return message
+
+    def _build_handcrafted_comm_features(
+        self,
+        local_gaps: List[np.ndarray],
+    ) -> np.ndarray:
+        """Route encoded per-agent gap messages all-to-all with self-slots zeroed."""
+        if not self.handcrafted_comm_enabled:
+            return np.zeros((self.n_agents, 0), dtype=np.float32)
+
+        sender_messages = np.zeros(
+            (self.n_agents, self.handcrafted_comm_bits),
+            dtype=np.float32,
+        )
+        for agent_idx, gap in enumerate(local_gaps):
+            weight_matrix = np.asarray(
+                self._get_kf_info_matrix(agent_idx),
+                dtype=np.float64,
+            )
+            gap_vec = np.asarray(gap, dtype=np.float64).reshape(-1)
+            score = float(gap_vec @ weight_matrix @ gap_vec)
+            sender_messages[agent_idx] = self._encode_handcrafted_comm_score(score)
+
+        routed = np.broadcast_to(
+            sender_messages[np.newaxis, :, :],
+            (self.n_agents, self.n_agents, self.handcrafted_comm_bits),
+        ).copy()
+        idx = np.arange(self.n_agents)
+        routed[idx, idx, :] = 0.0
+        return routed.reshape(self.n_agents, self.handcrafted_comm_obs_dim)
+
     def _get_kf_info_matrix(self, agent_idx: int) -> np.ndarray:
         info_entry = self.M_list[agent_idx]
         if isinstance(info_entry, list):
@@ -1488,6 +1576,7 @@ class NCS_Env(gym.Env):
         observations = {}
         current_throughputs: List[float] = []
         quantized_states: List[np.ndarray] = []
+        local_gaps: List[np.ndarray] = []
 
         for i in range(self.n_agents):
             # decision_history maxlen may be larger than history_window, so use islice
@@ -1528,6 +1617,7 @@ class NCS_Env(gym.Env):
                 - self.local_shadow_controllers[i].x_hat
             )
             obs_values[cursor : cursor + self.state_dim] = local_gap.astype(np.float32)
+            local_gaps.append(local_gap.astype(np.float32, copy=True))
             cursor += self.state_dim
             sensor_cov_diag = np.maximum(np.diag(self.local_sensor_trackers[i].P), 0.0)
             obs_values[cursor : cursor + self.state_dim] = sensor_cov_diag.astype(
@@ -1542,10 +1632,20 @@ class NCS_Env(gym.Env):
             obs_values[cursor : cursor + self.history_window] = status_values
             cursor += self.history_window
             obs_values[cursor : cursor + self.history_window] = prev_throughputs
+            cursor += self.history_window
+            if self.handcrafted_comm_enabled:
+                obs_values[cursor : cursor + self.handcrafted_comm_obs_dim] = 0.0
 
             observations[f"agent_{i}"] = obs_values
             current_throughputs.append(float(throughputs[0]) if throughputs else 0.0)
             quantized_states.append(quantized_state)
+
+        if self.handcrafted_comm_enabled:
+            routed_comm = self._build_handcrafted_comm_features(local_gaps)
+            for i in range(self.n_agents):
+                observations[f"agent_{i}"][
+                    self.local_obs_base_dim : self.local_obs_dim
+                ] = routed_comm[i]
 
         if self.cevat_state:
             joint_obs = np.concatenate(

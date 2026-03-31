@@ -26,6 +26,16 @@ def _add_cevat_state_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_handcrafted_comm_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--handcrafted_comm",
+        action="append_const",
+        const="observation.handcrafted_comm_enabled=true",
+        dest="set_overrides",
+        help="Append all-to-all handcrafted communication bits to each local observation.",
+    )
+
+
 def build_base_qlearning_parser(
     description: str,
     *,
@@ -81,6 +91,7 @@ def build_base_qlearning_parser(
     parser.add_argument("--n-eval-envs", type=int, default=8)
     _add_set_override_argument(parser)
     _add_cevat_state_argument(parser)
+    _add_handcrafted_comm_argument(parser)
     parser.set_defaults(normalize_obs=True)
     return parser
 
@@ -160,6 +171,7 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--n-eval-envs", type=int, default=8)
     _add_set_override_argument(parser)
     _add_cevat_state_argument(parser)
+    _add_handcrafted_comm_argument(parser)
     parser.set_defaults(normalize_obs=True, lr_decay=False)
     return parser
 
@@ -276,6 +288,7 @@ def build_hasac_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--n-eval-envs", type=int, default=8)
     _add_set_override_argument(parser)
     _add_cevat_state_argument(parser)
+    _add_handcrafted_comm_argument(parser)
     parser.set_defaults(
         normalize_obs=True,
         auto_alpha=False,
@@ -379,5 +392,6 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--n-eval-envs", type=int, default=8)
     _add_set_override_argument(parser)
     _add_cevat_state_argument(parser)
+    _add_handcrafted_comm_argument(parser)
     parser.set_defaults(normalize_obs=True, lr_decay=False)
     return parser
