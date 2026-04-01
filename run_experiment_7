@@ -117,6 +117,7 @@ esac
 run_one "algorithms.marl_dial" "marl_dial" "marl_dial${mixer_suffix}" \
   --epsilon-decay-steps "${EPS_DECAY_STEPS}" \
   --no-normalize-obs \
+  --comm-dim 1 \
   "${mixer_args[@]+${mixer_args[@]}}"
 
 zip_path="${run_root}.zip"
