@@ -10,6 +10,7 @@ import math
 import sys
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
@@ -58,20 +59,13 @@ def _sample_candidates(
     lower: float,
     upper: float,
     count: int,
-    rng: np.random.Generator,
 ) -> List[float]:
+    """Return *count* log-spaced thresholds spanning [lower, upper] (endpoints included)."""
     if count < 2:
         raise ValueError("count must be at least 2 so both interval endpoints are evaluated")
     if math.isclose(lower, upper, rel_tol=1e-12, abs_tol=1e-12):
         return [float(lower)]
-    candidates: List[float] = [float(lower), float(upper)]
-    interior_count = count - 2
-    if interior_count > 0:
-        # Threshold behavior changes over orders of magnitude, so sample the
-        # interior uniformly in log space while keeping the endpoints explicit.
-        interior = np.exp(rng.uniform(np.log(lower), np.log(upper), size=interior_count))
-        candidates.extend(float(value) for value in interior)
-    return sorted(_dedupe(candidates))
+    return sorted(_dedupe(np.geomspace(lower, upper, num=count).tolist()))
 
 
 def _all_send_rates_same(rows: Sequence[Dict[str, Any]], *, send_rate_tol: float) -> bool:
@@ -132,6 +126,109 @@ def _eval_threshold(
     return _summarize_results(results)
 
 
+def _eval_candidates(
+    candidates: Sequence[float],
+    *,
+    config_path: Path,
+    episode_length: int,
+    n_agents: int,
+    seeds: Sequence[int],
+    num_workers: int,
+    cache: Dict[str, Dict[str, float]],
+) -> List[Dict[str, float]]:
+    """Evaluate *candidates* with caching; parallelize across thresholds."""
+    results: Dict[float, Dict[str, float]] = {}
+    to_eval: List[float] = []
+    for c in candidates:
+        key = f"{c:.15g}"
+        if key in cache:
+            results[c] = cache[key]
+        else:
+            to_eval.append(c)
+
+    if to_eval:
+        eval_kwargs = dict(
+            config_path=config_path,
+            episode_length=episode_length,
+            n_agents=n_agents,
+            seeds=seeds,
+            num_workers=1,  # avoid nested multiprocessing
+        )
+        if num_workers <= 1 or len(to_eval) == 1:
+            for c in to_eval:
+                summary = _eval_threshold(threshold=c, **eval_kwargs)
+                cache[f"{c:.15g}"] = summary
+                results[c] = summary
+        else:
+            pool_size = min(num_workers, len(to_eval))
+            with ProcessPoolExecutor(max_workers=pool_size) as executor:
+                future_to_c = {
+                    executor.submit(_eval_threshold, threshold=c, **eval_kwargs): c
+                    for c in to_eval
+                }
+                for future in as_completed(future_to_c):
+                    c = future_to_c[future]
+                    summary = future.result()
+                    cache[f"{c:.15g}"] = summary
+                    results[c] = summary
+
+    return [results[c] for c in candidates]
+
+
+def _collect_scores_for_seed(
+    *,
+    threshold: float,
+    config_path: Path,
+    episode_length: int,
+    n_agents: int,
+    seed: int,
+) -> List[float]:
+    """Collect VoU scores for a single seed (top-level for pickling)."""
+    from ncs_env.env import NCS_Env
+    from tools._common import MultiAgentHeuristicPolicy
+
+    env = NCS_Env(
+        n_agents=n_agents,
+        episode_length=episode_length,
+        config_path=str(config_path),
+        seed=seed,
+        reward_override=dict(SEARCH_REWARD_OVERRIDE),
+        track_lqr_cost=True,
+    )
+    policy_name = _threshold_policy_name(threshold)
+    policy = MultiAgentHeuristicPolicy(
+        policy_name,
+        n_agents=n_agents,
+        seed=seed,
+        deterministic=True,
+        env=env,
+    )
+    if hasattr(policy, "reset"):
+        policy.reset()
+    obs_dict, _ = env.reset(seed=seed)
+
+    scores: List[float] = []
+    for _ in range(episode_length):
+        for agent_idx in range(n_agents):
+            obs = obs_dict[f"agent_{agent_idx}"]
+            weight_matrix = np.asarray(
+                env._get_kf_info_matrix(agent_idx), dtype=np.float64
+            )
+            gap = obs[2 * env.state_dim : 3 * env.state_dim].astype(np.float64)
+            scores.append(float(gap @ weight_matrix @ gap))
+
+        action_dict = policy.act(obs_dict)
+        obs_dict, _, terminated, truncated, _ = env.step(action_dict)
+        done = any(
+            bool(terminated[f"agent_{i}"]) or bool(truncated[f"agent_{i}"])
+            for i in range(n_agents)
+        )
+        if done:
+            break
+
+    return scores
+
+
 def _collect_vou_scores(
     *,
     threshold: float,
@@ -139,57 +236,36 @@ def _collect_vou_scores(
     episode_length: int,
     n_agents: int,
     seeds: Sequence[int],
+    num_workers: int = 1,
 ) -> np.ndarray:
     """Run episodes with a VoU threshold policy and collect per-step scores.
 
     Returns a 1-D array of all per-agent, per-step ``e^T M e`` scores
-    collected across the given seeds.
+    collected across the given seeds.  Seeds are evaluated in parallel when
+    *num_workers* > 1.
     """
-    from ncs_env.env import NCS_Env
-    from tools._common import MultiAgentHeuristicPolicy
-
-    all_scores: List[float] = []
-
-    for seed in seeds:
-        env = NCS_Env(
-            n_agents=n_agents,
-            episode_length=episode_length,
-            config_path=str(config_path),
-            seed=int(seed),
-            reward_override=dict(SEARCH_REWARD_OVERRIDE),
-            track_lqr_cost=True,
-        )
-        policy_name = _threshold_policy_name(threshold)
-        policy = MultiAgentHeuristicPolicy(
-            policy_name,
-            n_agents=n_agents,
-            seed=int(seed),
-            deterministic=True,
-            env=env,
-        )
-        if hasattr(policy, "reset"):
-            policy.reset()
-        obs_dict, _ = env.reset(seed=int(seed))
-
-        for _ in range(episode_length):
-            # Collect VoU scores from each agent before stepping
-            for agent_idx in range(n_agents):
-                obs = obs_dict[f"agent_{agent_idx}"]
-                weight_matrix = np.asarray(
-                    env._get_kf_info_matrix(agent_idx), dtype=np.float64
-                )
-                gap = obs[2 * env.state_dim : 3 * env.state_dim].astype(np.float64)
-                score = float(gap @ weight_matrix @ gap)
-                all_scores.append(score)
-
-            action_dict = policy.act(obs_dict)
-            obs_dict, _, terminated, truncated, _ = env.step(action_dict)
-            done = any(
-                bool(terminated[f"agent_{i}"]) or bool(truncated[f"agent_{i}"])
-                for i in range(n_agents)
+    seed_kwargs = dict(
+        threshold=threshold,
+        config_path=config_path,
+        episode_length=episode_length,
+        n_agents=n_agents,
+    )
+    if num_workers <= 1 or len(seeds) <= 1:
+        all_scores: List[float] = []
+        for seed in seeds:
+            all_scores.extend(
+                _collect_scores_for_seed(seed=int(seed), **seed_kwargs)
             )
-            if done:
-                break
+    else:
+        pool_size = min(num_workers, len(seeds))
+        all_scores = []
+        with ProcessPoolExecutor(max_workers=pool_size) as executor:
+            futures = [
+                executor.submit(_collect_scores_for_seed, seed=int(s), **seed_kwargs)
+                for s in seeds
+            ]
+            for future in futures:  # preserve seed order
+                all_scores.extend(future.result())
 
     return np.asarray(all_scores, dtype=np.float64)
 
@@ -215,7 +291,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Search a VoU threshold by repeated policy_tester evaluation.")
     parser.add_argument("--config", type=Path, default=Path("configs/marl_absolute_plants_hetero.json"))
     parser.add_argument("--episode-length", type=int, default=250)
-    parser.add_argument("--seed", type=int, default=0, help="RNG seed for interior candidate sampling.")
     parser.add_argument("--eval-seed-start", type=int, default=100)
     parser.add_argument("--eval-num-seeds", type=int, default=32)
     parser.add_argument("--threshold-min", type=float, default=0.01)
@@ -233,7 +308,12 @@ def main() -> int:
         default=1e-6,
         help="Absolute tolerance for treating two mean send rates as identical.",
     )
-    parser.add_argument("--num-workers", type=int, default=1)
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=1,
+        help="Number of thresholds (or seeds for score collection) to evaluate in parallel.",
+    )
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument(
         "--collect-bits",
@@ -263,7 +343,6 @@ def main() -> int:
     config = load_config(str(config_path))
     n_agents = _resolve_n_agents(config)
     seeds = list(range(int(args.eval_seed_start), int(args.eval_seed_start) + int(args.eval_num_seeds)))
-    rng = np.random.default_rng(int(args.seed))
     lower = float(args.threshold_min)
     upper = float(args.threshold_max)
     initial_lower = float(lower)
@@ -271,30 +350,32 @@ def main() -> int:
     best_result: Dict[str, Any] | None = None
     history: List[Dict[str, Any]] = []
     stop_reason = "max_iters_reached"
+    eval_cache: Dict[str, Dict[str, float]] = {}
 
     print("VoU threshold search")
     print(f"  config: {config_path}")
     print(f"  eval seeds: {seeds[0]}..{seeds[-1]}")
     print(f"  initial range: [{lower:.12g}, {upper:.12g}]")
     print(f"  samples per iter: {int(args.samples_per_iter)} (including endpoints)")
+    print(f"  num workers: {int(args.num_workers)}")
 
     for iteration in range(int(args.iters)):
         candidates = _sample_candidates(
             lower=lower,
             upper=upper,
             count=int(args.samples_per_iter),
-            rng=rng,
+        )
+        summaries = _eval_candidates(
+            candidates,
+            config_path=config_path,
+            episode_length=int(args.episode_length),
+            n_agents=n_agents,
+            seeds=seeds,
+            num_workers=int(args.num_workers),
+            cache=eval_cache,
         )
         rows: List[Dict[str, Any]] = []
-        for sample_index, candidate in enumerate(candidates):
-            summary = _eval_threshold(
-                threshold=candidate,
-                config_path=config_path,
-                episode_length=int(args.episode_length),
-                n_agents=n_agents,
-                seeds=seeds,
-                num_workers=int(args.num_workers),
-            )
+        for sample_index, (candidate, summary) in enumerate(zip(candidates, summaries)):
             row = {
                 "iteration": iteration,
                 "sample_index": sample_index,
@@ -418,6 +499,7 @@ def main() -> int:
             episode_length=int(args.episode_length),
             n_agents=n_agents,
             seeds=seeds,
+            num_workers=int(args.num_workers),
         )
         scores_path = output_dir / "vou_scores.npy"
         np.save(str(scores_path), scores)
