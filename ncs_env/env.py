@@ -188,14 +188,29 @@ class NCS_Env(gym.Env):
                 "observation.cevat_state and "
                 "observation.handcrafted_comm_enabled cannot be enabled together"
             )
-        if self.handcrafted_comm_enabled:
+        edges_raw = observation_cfg.get("handcrafted_comm_edges", None)
+        if edges_raw is not None:
+            self.handcrafted_comm_edges: np.ndarray | None = np.asarray(
+                edges_raw, dtype=np.float64
+            )
+            expected_n_edges = (1 << self.handcrafted_comm_bits) - 1
+            if len(self.handcrafted_comm_edges) != expected_n_edges:
+                raise ValueError(
+                    f"observation.handcrafted_comm_edges must have "
+                    f"2^handcrafted_comm_bits - 1 = {expected_n_edges} entries, "
+                    f"got {len(self.handcrafted_comm_edges)}"
+                )
+        else:
+            self.handcrafted_comm_edges = None
+        if self.handcrafted_comm_enabled and self.handcrafted_comm_edges is None:
             if (
                 self.handcrafted_comm_threshold is None
                 or self.handcrafted_comm_threshold <= 0.0
             ):
                 raise ValueError(
                     "observation.handcrafted_comm_threshold must be > 0 when "
-                    "observation.handcrafted_comm_enabled=true"
+                    "observation.handcrafted_comm_enabled=true and "
+                    "observation.handcrafted_comm_edges is not set"
                 )
 
         # Create a local RNG instance for this environment
@@ -1308,19 +1323,22 @@ class NCS_Env(gym.Env):
         if not self.handcrafted_comm_enabled:
             return np.zeros((0,), dtype=np.float32)
 
-        threshold = float(self.handcrafted_comm_threshold)
         bits = int(self.handcrafted_comm_bits)
         score_value = max(0.0, float(score))
 
-        if bits == 1:
+        if self.handcrafted_comm_edges is not None:
+            edges = self.handcrafted_comm_edges
+        elif bits == 1:
+            threshold = float(self.handcrafted_comm_threshold)
             return np.asarray(
                 [1.0 if score_value > threshold else 0.0],
                 dtype=np.float32,
             )
-
-        n_levels = 1 << bits
-        edge_offsets = np.arange(n_levels - 1, dtype=np.float64) - ((n_levels - 2) / 2.0)
-        edges = threshold * np.power(2.0, edge_offsets)
+        else:
+            threshold = float(self.handcrafted_comm_threshold)
+            n_levels = 1 << bits
+            edge_offsets = np.arange(n_levels - 1, dtype=np.float64) - ((n_levels - 2) / 2.0)
+            edges = threshold * np.power(2.0, edge_offsets)
         level = int(np.searchsorted(edges, score_value, side="right"))
         message = np.zeros((bits,), dtype=np.float32)
         for bit_idx in range(bits):

@@ -13,7 +13,14 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-15000000}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-$((TOTAL_TIMESTEPS * 60 / 100))}"
 HANDCRAFTED_COMM_BITS="${HANDCRAFTED_COMM_BITS:-4}"
-HANDCRAFTED_COMM_THRESHOLD="${HANDCRAFTED_COMM_THRESHOLD:-0.642550100286}"
+# Set VOU_QUANTILE_EDGES=1 to auto-search the threshold and compute
+# equal-probability quantile bin edges instead of geometric bins.
+VOU_QUANTILE_EDGES="${VOU_QUANTILE_EDGES:-0}"
+VOU_SEARCH_ITERS="${VOU_SEARCH_ITERS:-12}"
+VOU_SEARCH_SAMPLES="${VOU_SEARCH_SAMPLES:-8}"
+VOU_SEARCH_EVAL_SEEDS="${VOU_SEARCH_EVAL_SEEDS:-32}"
+VOU_THRESHOLD_MIN="${VOU_THRESHOLD_MIN:-0.01}"
+VOU_THRESHOLD_MAX="${VOU_THRESHOLD_MAX:-10}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_root="${OUTPUT_ROOT}/exp_3_vdn_doubleq_${timestamp}_seed${SEED}"
@@ -76,9 +83,6 @@ run_one() {
     --n-eval-envs 8
     --n-eval-episodes 80
     --episode-length 250
-    --handcrafted_comm
-    --set "observation.handcrafted_comm_bits=${HANDCRAFTED_COMM_BITS}"
-    --set "observation.handcrafted_comm_threshold=${HANDCRAFTED_COMM_THRESHOLD}"
   )
 
   local log_path="${run_root}/logs/${run_label}.log"
@@ -103,13 +107,58 @@ run_one() {
   mv "${expected_dir}" "${final_dir}"
 }
 
+# ------------------------------------------------------------------
+# VoU threshold search + quantile edge computation (opt-in)
+# ------------------------------------------------------------------
+hcomm_args=()
+if [[ "${VOU_QUANTILE_EDGES}" == "1" ]]; then
+  echo "=== VoU threshold search ==="
+  vou_output_dir="${run_root}/vou_search"
+
+  PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -m tools.search_vou_threshold \
+    --config "${config_path}" \
+    --threshold-min "${VOU_THRESHOLD_MIN}" \
+    --threshold-max "${VOU_THRESHOLD_MAX}" \
+    --iters "${VOU_SEARCH_ITERS}" \
+    --samples-per-iter "${VOU_SEARCH_SAMPLES}" \
+    --eval-num-seeds "${VOU_SEARCH_EVAL_SEEDS}" \
+    --collect-bits "${HANDCRAFTED_COMM_BITS}" \
+    --output-dir "${vou_output_dir}" \
+    2>&1 | tee "${run_root}/logs/vou_search.log"
+
+  HANDCRAFTED_COMM_THRESHOLD="$("${PYTHON_BIN}" -c "
+import json, sys
+with open('${vou_output_dir}/search_summary.json') as f:
+    s = json.load(f)
+br = s.get('best_result')
+if br is None:
+    print('ERROR: no best_result in search summary', file=sys.stderr); sys.exit(1)
+print(br['theta'])
+")"
+  HANDCRAFTED_COMM_EDGES="$("${PYTHON_BIN}" -c "
+import json
+with open('${vou_output_dir}/quantile_edges.json') as f:
+    d = json.load(f)
+print(json.dumps(d['edges']['bits_${HANDCRAFTED_COMM_BITS}']['edges']))
+")"
+  echo "VoU threshold: ${HANDCRAFTED_COMM_THRESHOLD}"
+  echo "Quantile edges (${HANDCRAFTED_COMM_BITS} bits): ${HANDCRAFTED_COMM_EDGES}"
+
+  hcomm_args=(
+    --handcrafted_comm
+    --set "observation.handcrafted_comm_bits=${HANDCRAFTED_COMM_BITS}"
+    --set "observation.handcrafted_comm_edges=${HANDCRAFTED_COMM_EDGES}"
+  )
+fi
+
 run_one "algorithms.marl_vdn" "vdn" "vdn_doubleq" \
   --double-q --batch-size 512 --learning-rate 2.5e-5 \
   --epsilon-decay-steps "${EPS_DECAY_STEPS}" \
   --eval-freq 40000 \
   --no-normalize-obs \
   --feature-norm \
-  --layer-norm
+  --layer-norm \
+  "${hcomm_args[@]+${hcomm_args[@]}}"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then
