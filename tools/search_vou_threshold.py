@@ -135,8 +135,12 @@ def _eval_candidates(
     seeds: Sequence[int],
     num_workers: int,
     cache: Dict[str, Dict[str, float]],
-) -> List[Dict[str, float]]:
-    """Evaluate *candidates* with caching; parallelize across thresholds."""
+) -> Tuple[List[Dict[str, float]], int]:
+    """Evaluate *candidates* with caching; parallelize across thresholds.
+
+    Returns ``(summaries, n_new)`` where *n_new* is the number of
+    candidates that were actually evaluated (not served from cache).
+    """
     results: Dict[float, Dict[str, float]] = {}
     to_eval: List[float] = []
     for c in candidates:
@@ -172,7 +176,7 @@ def _eval_candidates(
                     cache[f"{c:.15g}"] = summary
                     results[c] = summary
 
-    return [results[c] for c in candidates]
+    return [results[c] for c in candidates], len(to_eval)
 
 
 def _collect_scores_for_seed(
@@ -351,6 +355,8 @@ def main() -> int:
     history: List[Dict[str, Any]] = []
     stop_reason = "max_iters_reached"
     eval_cache: Dict[str, Dict[str, float]] = {}
+    prev_lower: float | None = None
+    prev_upper: float | None = None
 
     print("VoU threshold search")
     print(f"  config: {config_path}")
@@ -365,7 +371,7 @@ def main() -> int:
             upper=upper,
             count=int(args.samples_per_iter),
         )
-        summaries = _eval_candidates(
+        summaries, n_new = _eval_candidates(
             candidates,
             config_path=config_path,
             episode_length=int(args.episode_length),
@@ -403,6 +409,7 @@ def main() -> int:
                 f"reward={float(best_row['mean_total_reward']):.6f} "
                 f"send_rate={float(best_row['mean_send_rate']):.6f} "
                 f"range=[{lower:.12g}, {upper:.12g}] "
+                f"({n_new} new / {len(candidates) - n_new} cached) "
                 f"status=all_send_rates_equal"
             )
             stop_reason = "all_sampled_send_rates_equal"
@@ -419,6 +426,7 @@ def main() -> int:
                 f"reward={float(best_row['mean_total_reward']):.6f} "
                 f"send_rate={float(best_row['mean_send_rate']):.6f} "
                 f"range=[{lower:.12g}, {upper:.12g}] "
+                f"({n_new} new / {len(candidates) - n_new} cached) "
                 f"status=no_distinct_send_rate_match"
             )
             stop_reason = "no_distinct_send_rate_found"
@@ -441,8 +449,25 @@ def main() -> int:
             f"second_theta={float(second_row['theta']):.12g} "
             f"second_reward={float(second_row['mean_total_reward']):.6f} "
             f"second_send_rate={float(second_row['mean_send_rate']):.6f} "
-            f"next_range=[{next_lower:.12g}, {next_upper:.12g}]"
+            f"next_range=[{next_lower:.12g}, {next_upper:.12g}] "
+            f"({n_new} new / {len(candidates) - n_new} cached)"
         )
+
+        # Stop if the interval is unchanged for two consecutive iterations —
+        # all interior points collapsed to the same send rates as the endpoints.
+        if (
+            prev_lower is not None
+            and math.isclose(next_lower, prev_lower, rel_tol=1e-12, abs_tol=1e-12)
+            and math.isclose(next_upper, prev_upper, rel_tol=1e-12, abs_tol=1e-12)
+        ):
+            stop_reason = "interval_converged"
+            print(f"  interval unchanged for 2 consecutive iterations, stopping")
+            lower = next_lower
+            upper = next_upper
+            break
+
+        prev_lower = next_lower
+        prev_upper = next_upper
         lower = next_lower
         upper = next_upper
 
@@ -514,7 +539,10 @@ def main() -> int:
             if bits <= 0:
                 print(f"  skipping bits={bits} (must be positive)")
                 continue
-            edges = _compute_quantile_edges(scores, bits=bits)
+            if bits == 1:
+                edges = np.asarray([best_theta])
+            else:
+                edges = _compute_quantile_edges(scores, bits=bits)
             key = f"bits_{bits}"
             edges_info[key] = {
                 "bits": bits,
