@@ -235,7 +235,7 @@ class NCS_Env(gym.Env):
         )
         self.local_obs_base_dim = int(local_obs_base_dim)
         self.handcrafted_comm_obs_dim = (
-            self.n_agents * self.handcrafted_comm_bits
+            self.n_agents
             if self.handcrafted_comm_enabled
             else 0
         )
@@ -1318,33 +1318,26 @@ class NCS_Env(gym.Env):
         dx = state  # reference is zero
         return float(dx.T @ self.state_cost_matrix @ dx)
 
-    def _encode_handcrafted_comm_score(self, score: float) -> np.ndarray:
-        """Encode a non-negative VoU score into a fixed-width binary message."""
+    def _encode_handcrafted_comm_score(self, score: float) -> float:
+        """Encode a non-negative VoU score into a normalised scalar in [0, 1]."""
         if not self.handcrafted_comm_enabled:
-            return np.zeros((0,), dtype=np.float32)
+            return 0.0
 
         bits = int(self.handcrafted_comm_bits)
         score_value = max(0.0, float(score))
+        n_levels = 1 << bits
 
         if self.handcrafted_comm_edges is not None:
             edges = self.handcrafted_comm_edges
         elif bits == 1:
             threshold = float(self.handcrafted_comm_threshold)
-            return np.asarray(
-                [1.0 if score_value > threshold else 0.0],
-                dtype=np.float32,
-            )
+            return 1.0 if score_value > threshold else 0.0
         else:
             threshold = float(self.handcrafted_comm_threshold)
-            n_levels = 1 << bits
             edge_offsets = np.arange(n_levels - 1, dtype=np.float64) - ((n_levels - 2) / 2.0)
             edges = threshold * np.power(2.0, edge_offsets)
         level = int(np.searchsorted(edges, score_value, side="right"))
-        message = np.zeros((bits,), dtype=np.float32)
-        for bit_idx in range(bits):
-            shift = bits - bit_idx - 1
-            message[bit_idx] = float((level >> shift) & 1)
-        return message
+        return level / max(n_levels - 1, 1)
 
     def _build_handcrafted_comm_features(
         self,
@@ -1354,10 +1347,7 @@ class NCS_Env(gym.Env):
         if not self.handcrafted_comm_enabled:
             return np.zeros((self.n_agents, 0), dtype=np.float32)
 
-        sender_messages = np.zeros(
-            (self.n_agents, self.handcrafted_comm_bits),
-            dtype=np.float32,
-        )
+        sender_messages = np.zeros(self.n_agents, dtype=np.float32)
         for agent_idx, gap in enumerate(local_gaps):
             weight_matrix = np.asarray(
                 self._get_kf_info_matrix(agent_idx),
@@ -1368,12 +1358,12 @@ class NCS_Env(gym.Env):
             sender_messages[agent_idx] = self._encode_handcrafted_comm_score(score)
 
         routed = np.broadcast_to(
-            sender_messages[np.newaxis, :, :],
-            (self.n_agents, self.n_agents, self.handcrafted_comm_bits),
+            sender_messages[np.newaxis, :],
+            (self.n_agents, self.n_agents),
         ).copy()
         idx = np.arange(self.n_agents)
-        routed[idx, idx, :] = 0.0
-        return routed.reshape(self.n_agents, self.handcrafted_comm_obs_dim)
+        routed[idx, idx] = 0.0
+        return routed
 
     def _get_kf_info_matrix(self, agent_idx: int) -> np.ndarray:
         info_entry = self.M_list[agent_idx]
