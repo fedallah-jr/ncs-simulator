@@ -315,7 +315,8 @@ class QMIXLearner:
             next_q_tot = self.target_mixer(next_q, next_states).squeeze(-1)
             r_tot = rewards.sum(dim=1)  # QMIX uses team reward sum
             not_done = (1.0 - dones)
-            targets = r_tot + self.gamma * not_done * next_q_tot
+            gamma_n = batch.gamma_n  # per-sample discount (gamma^n for n-step)
+            targets = r_tot + gamma_n * not_done * next_q_tot
 
         loss = F.mse_loss(q_tot, targets)
         self.optimizer.zero_grad(set_to_none=True)

@@ -83,7 +83,7 @@ STOCHASTIC_HEURISTICS: Sequence[str] = ("random_33", "random_20")
 # Reward override for evaluation: absolute reward, no normalization by default.
 # Reward clipping is disabled by default but can be enabled via --use-reward-clipping.
 EVAL_REWARD_OVERRIDE: Dict[str, Any] = {
-    "state_error_reward": "absolute",
+    "state_error_reward": "lqr_cost",
     "normalize": False,
     "reward_clip_min": None,
     "reward_clip_max": None,

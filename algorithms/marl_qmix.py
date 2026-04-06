@@ -49,6 +49,8 @@ def parse_args() -> argparse.Namespace:
         description="Train QMIX (shared MLP + hypernet mixer) on multi-agent NCS env."
     )
     add_qmix_args(parser)
+    parser.add_argument("--n-step", type=int, default=3,
+                        help="N-step returns horizon (1 = standard TD, >1 = n-step).")
     return parser.parse_args()
 
 
@@ -161,6 +163,9 @@ def main() -> None:
         state_dim=state_dim,
         device=device,
         rng=rng,
+        n_step=args.n_step,
+        gamma=args.gamma,
+        n_envs=args.n_envs,
     )
 
     best_model_tracker = BestModelTracker()
@@ -255,6 +260,7 @@ def main() -> None:
                 dones=step.terminated,
                 states=global_state_raw,
                 next_states=next_global_state_for_buffer,
+                resets=step.done_reset,
             )
 
             obs_raw = step.next_obs_raw
@@ -302,6 +308,7 @@ def main() -> None:
     mixer_params = {
         "mixer_hidden_dim": args.mixer_hidden_dim,
         "hypernet_hidden_dim": args.hypernet_hidden_dim,
+        "n_step": args.n_step,
     }
     hyperparams = build_qlearning_hyperparams(
         algorithm="qmix",
