@@ -308,7 +308,6 @@ def main() -> None:
     mixer_params = {
         "mixer_hidden_dim": args.mixer_hidden_dim,
         "hypernet_hidden_dim": args.hypernet_hidden_dim,
-        "n_step": args.n_step,
     }
     hyperparams = build_qlearning_hyperparams(
         algorithm="qmix",

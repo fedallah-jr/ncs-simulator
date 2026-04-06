@@ -86,6 +86,8 @@ def parse_args() -> argparse.Namespace:
                         help="QMIX mixing network hidden dim")
     parser.add_argument("--qmix-hypernet-hidden-dim", type=int, default=64,
                         help="QMIX hypernetwork hidden dim")
+    parser.add_argument("--td-lambda", type=float, default=0.0,
+                        help="TD(lambda) mixing parameter in [0, 1] (0 = 1-step TD).")
     return parser.parse_args()
 
 
@@ -406,6 +408,7 @@ def main() -> None:
         obs_dim=obs_dim,
         qmix_mixing_hidden_dim=args.qmix_mixing_hidden_dim,
         qmix_hypernet_hidden_dim=args.qmix_hypernet_hidden_dim,
+        td_lambda=args.td_lambda,
     )
 
     best_model_tracker = BestModelTracker()
@@ -584,6 +587,7 @@ def main() -> None:
         "mixer": mixer_type,
         "qmix_mixing_hidden_dim": args.qmix_mixing_hidden_dim,
         "qmix_hypernet_hidden_dim": args.qmix_hypernet_hidden_dim,
+        "td_lambda": args.td_lambda,
         "force_recurrent_observation": True,
     }
     save_config_with_hyperparameters(

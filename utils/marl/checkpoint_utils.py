@@ -395,6 +395,7 @@ def build_qlearning_hyperparams(
         "obs_norm_clip": args.obs_norm_clip, "obs_norm_eps": args.obs_norm_eps,
         "eval_freq": args.eval_freq, "n_eval_episodes": args.n_eval_episodes,
         "n_eval_envs": args.n_eval_envs, "device": str(device), "seed": args.seed,
+        "n_step": getattr(args, "n_step", 1),
     }
     if mixer_params is not None:
         hyperparams.update(mixer_params)

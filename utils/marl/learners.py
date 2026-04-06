@@ -125,7 +125,8 @@ class IQLLearner:
                 next_q = target_next_q.max(dim=-1).values
 
             not_done = (1.0 - dones).view(batch_size, 1)
-            targets = rewards + self.gamma * not_done * next_q
+            gamma_n = batch.gamma_n.view(batch_size, 1)  # per-sample discount (gamma^n for n-step)
+            targets = rewards + gamma_n * not_done * next_q
 
         loss = F.mse_loss(q_taken, targets)
         self.optimizer.zero_grad(set_to_none=True)
@@ -216,7 +217,8 @@ class VDNLearner:
             next_q_tot = self.target_mixer(next_q).squeeze(-1)
             r_tot = rewards.sum(dim=1)  # VDN always sums rewards (Q_tot = sum of Q_i)
             not_done = (1.0 - dones)
-            targets = r_tot + self.gamma * not_done * next_q_tot
+            gamma_n = batch.gamma_n  # per-sample discount (gamma^n for n-step)
+            targets = r_tot + gamma_n * not_done * next_q_tot
 
         loss = F.mse_loss(q_tot, targets)
         self.optimizer.zero_grad(set_to_none=True)
@@ -432,7 +434,8 @@ class QPLEXLearner:
 
             r_tot = rewards.sum(dim=1)
             not_done = (1.0 - dones)
-            targets = r_tot + self.gamma * not_done * target_q_tot
+            gamma_n = batch.gamma_n  # per-sample discount (gamma^n for n-step)
+            targets = r_tot + gamma_n * not_done * target_q_tot
 
         loss = F.mse_loss(q_tot, targets) + attend_reg
         self.optimizer.zero_grad(set_to_none=True)
@@ -492,7 +495,11 @@ class MARLDIALLearner:
         obs_dim: int = 0,
         qmix_mixing_hidden_dim: int = 32,
         qmix_hypernet_hidden_dim: int = 64,
+        td_lambda: float = 0.0,
     ) -> None:
+        td_lambda = float(td_lambda)
+        if not 0.0 <= td_lambda <= 1.0:
+            raise ValueError("td_lambda must be in [0, 1]")
         self.agent = agent
         self.target_agent = copy.deepcopy(agent)
         for p in self.target_agent.parameters():
@@ -504,6 +511,7 @@ class MARLDIALLearner:
         self.comm_dim = comm_dim
         self.dru = dru
         self.gamma = float(gamma)
+        self.td_lambda = td_lambda
         self.target_update_steps = int(target_update_steps)
         self.grad_clip_norm = grad_clip_norm
 
@@ -622,6 +630,38 @@ class MARLDIALLearner:
         return all_q, q_boot
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _apply_td_lambda(
+        targets: list[torch.Tensor],
+        rewards: list[torch.Tensor],
+        mask: torch.Tensor,
+        terminated: torch.Tensor,
+        gamma: float,
+        td_lambda: float,
+    ) -> list[torch.Tensor]:
+        """Convert 1-step TD targets to TD(lambda) returns via backward recursion.
+
+        G^lambda_t = (1-lambda)*T_t + lambda*(r_t + gamma*(1-d_t)*G^lambda_{t+1})
+
+        When td_lambda=0 this returns the original 1-step targets unchanged.
+        When td_lambda=1 this becomes the full sampled return, with the final
+        step bootstrapped only if the episode ended by truncation.
+        """
+        T = len(targets)
+        ret = [t.clone() for t in targets]
+        for t in range(T - 2, -1, -1):
+            not_done = (1.0 - terminated[:, t])
+            valid_next = mask[:, t + 1]
+            gate = not_done * valid_next
+            # Reshape for broadcasting against target shape (B, ...) e.g. (B, N) or (B, 1)
+            shape = [gate.shape[0]] + [1] * (targets[t].ndim - 1)
+            gate = gate.view(*shape)
+            ret[t] = (1.0 - td_lambda) * targets[t] + td_lambda * (
+                rewards[t] + gamma * gate * ret[t + 1]
+            )
+        return ret
+
+    # ------------------------------------------------------------------
     def update(self, batch: DialRNNEpisodeBatch) -> None:
         B, max_T = batch.obs.shape[:2]
         N = self.n_agents
@@ -664,6 +704,7 @@ class MARLDIALLearner:
         # TD targets — mask-aware per-sample bootstrap
         with torch.no_grad():
             targets: list[torch.Tensor] = []
+            rewards: list[torch.Tensor] = []
             boot_max = target_q_boot.max(-1).values  # (B, N)
             for t in range(max_T):
                 if t < max_T - 1:
@@ -675,7 +716,13 @@ class MARLDIALLearner:
                 else:
                     bootstrap_q = boot_max
                 not_done = (1.0 - batch.terminated[:, t]).unsqueeze(-1)
-                targets.append(batch.rewards[:, t] + self.gamma * not_done * bootstrap_q)
+                rewards.append(batch.rewards[:, t])
+                targets.append(rewards[-1] + self.gamma * not_done * bootstrap_q)
+            if self.td_lambda > 0:
+                targets = self._apply_td_lambda(
+                    targets, rewards, batch.mask, batch.terminated,
+                    self.gamma, self.td_lambda,
+                )
 
         # Masked MSE loss
         total_loss = torch.tensor(0.0, device=self.device)
@@ -705,8 +752,8 @@ class MARLDIALLearner:
         with torch.no_grad():
             # Target: mix per-agent max-Q into Q_tot
             boot_max = target_q_boot.max(-1).values  # (B, N)
-            boot_q_tot = self.target_mixer(boot_max)  # (B, 1)
             targets: list[torch.Tensor] = []
+            rewards: list[torch.Tensor] = []
             for t in range(max_T):
                 if t < max_T - 1:
                     has_next = batch.mask[:, t + 1].bool()
@@ -719,7 +766,13 @@ class MARLDIALLearner:
                 next_q_tot = self.target_mixer(bootstrap_q)  # (B, 1)
                 r_tot = batch.rewards[:, t].sum(dim=-1, keepdim=True)  # (B, 1)
                 not_done = (1.0 - batch.terminated[:, t]).unsqueeze(-1)  # (B, 1)
+                rewards.append(r_tot)
                 targets.append(r_tot + self.gamma * not_done * next_q_tot)
+            if self.td_lambda > 0:
+                targets = self._apply_td_lambda(
+                    targets, rewards, batch.mask, batch.terminated,
+                    self.gamma, self.td_lambda,
+                )
 
         # Online: mix per-agent Q(s,a) into Q_tot
         total_loss = torch.tensor(0.0, device=self.device)
@@ -754,6 +807,7 @@ class MARLDIALLearner:
         with torch.no_grad():
             boot_max = target_q_boot.max(-1).values  # (B, N)
             targets: list[torch.Tensor] = []
+            rewards: list[torch.Tensor] = []
             for t in range(max_T):
                 if t < max_T - 1:
                     has_next = batch.mask[:, t + 1].bool()
@@ -771,7 +825,13 @@ class MARLDIALLearner:
                 next_q_tot = self.target_mixer(bootstrap_q, next_state)  # (B, 1)
                 r_tot = batch.rewards[:, t].sum(dim=-1, keepdim=True)  # (B, 1)
                 not_done = (1.0 - batch.terminated[:, t]).unsqueeze(-1)  # (B, 1)
+                rewards.append(r_tot)
                 targets.append(r_tot + self.gamma * not_done * next_q_tot)
+            if self.td_lambda > 0:
+                targets = self._apply_td_lambda(
+                    targets, rewards, batch.mask, batch.terminated,
+                    self.gamma, self.td_lambda,
+                )
 
         total_loss = torch.tensor(0.0, device=self.device)
         for t in range(max_T):
