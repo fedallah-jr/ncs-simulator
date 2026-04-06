@@ -13,6 +13,8 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-15000000}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-$((TOTAL_TIMESTEPS * 60 / 100))}"
 HANDCRAFTED_COMM_BITS="${HANDCRAFTED_COMM_BITS:-4}"
+AGE_COMM="${AGE_COMM:-0}"
+AGE_COMM_BITS="${AGE_COMM_BITS:-4}"
 # Set VOU_QUANTILE_EDGES=1 to auto-search the threshold and compute
 # equal-probability quantile bin edges instead of geometric bins.
 VOU_QUANTILE_EDGES="${VOU_QUANTILE_EDGES:-0}"
@@ -145,9 +147,20 @@ print(json.dumps(d['edges']['bits_${HANDCRAFTED_COMM_BITS}']['edges']))
   echo "Quantile edges (${HANDCRAFTED_COMM_BITS} bits): ${HANDCRAFTED_COMM_EDGES}"
 
   hcomm_args=(
-    --handcrafted_comm
-    --set "observation.handcrafted_comm_bits=${HANDCRAFTED_COMM_BITS}"
-    --set "observation.handcrafted_comm_edges=${HANDCRAFTED_COMM_EDGES}"
+    --error_comm
+    --set "observation.error_comm_bits=${HANDCRAFTED_COMM_BITS}"
+    --set "observation.error_comm_edges=${HANDCRAFTED_COMM_EDGES}"
+  )
+fi
+
+# ------------------------------------------------------------------
+# Age-based communication (opt-in)
+# ------------------------------------------------------------------
+age_comm_args=()
+if [[ "${AGE_COMM}" == "1" ]]; then
+  age_comm_args=(
+    --age_comm
+    --set "observation.age_comm_bits=${AGE_COMM_BITS}"
   )
 fi
 
@@ -158,7 +171,8 @@ run_one "algorithms.marl_qmix" "qmix" "qmix_doubleq" \
   --no-normalize-obs \
   --feature-norm \
   --layer-norm \
-  "${hcomm_args[@]+${hcomm_args[@]}}"
+  "${hcomm_args[@]+${hcomm_args[@]}}" \
+  "${age_comm_args[@]+${age_comm_args[@]}}"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then

@@ -66,13 +66,13 @@ When `perfect_communication=true`, the whole communication logic is bypassed dir
 - `throughput_window`: Sliding window in steps used to estimate recent channel throughput in kbps. It can be a single integer such as `50` or an array such as `[200, 100, 10, 5]` to compute multiple throughput values at different time scales.
 - `include_current_throughput`: Whether to append the current throughput feature block to each observation. Defaults to `true`.
 - `quantization_step`: Step size for quantizing plant state before it appears in observations. Set to `0` or omit it to disable quantization.
-- `handcrafted_comm_enabled`: When `true`, append a routed all-to-all handcrafted communication block to each local observation. Defaults to `false`.
-- `handcrafted_comm_bits`: Number of binary communication features per sender when `handcrafted_comm_enabled=true`. Defaults to `1`.
-- `handcrafted_comm_threshold`: Positive threshold used to quantize the control-aware predicted-gap score when `handcrafted_comm_enabled=true`. There is no implicit default when enabled; set it explicitly from config or `--set`.
-- `cevat_state` and `handcrafted_comm_enabled` are mutually exclusive.
+- `error_comm_enabled`: When `true`, append a routed all-to-all handcrafted communication block to each local observation. Defaults to `false`.
+- `error_comm_bits`: Number of binary communication features per sender when `error_comm_enabled=true`. Defaults to `1`.
+- `error_comm_threshold`: Positive threshold used to quantize the control-aware predicted-gap score when `error_comm_enabled=true`. There is no implicit default when enabled; set it explicitly from config or `--set`.
+- `cevat_state` and `error_comm_enabled` are mutually exclusive.
 - Local observer features are always included as three per-agent blocks, each of size `state_dim`: first the local sensor Kalman estimate `x_hat_sensor_local`, then the prediction gap `x_hat_sensor_local - x_hat_controller_local`, then the diagonal of the sensor-local Kalman covariance `diag(P_sensor_local)`. The sensor-local tracker updates on every local measurement, while the shadow controller tracker updates only after the matching app ACK is observed.
 
-Observations are laid out as `[current_state, local_kf_prediction, local_estimation_gap, local_sensor_covariance_diag, current_throughput(s)?, prev_states..., prev_statuses..., prev_throughputs..., handcrafted_comm?]`. The `current_throughput(s)` block is present when `include_current_throughput=true`. The optional trailing `handcrafted_comm` block has size `n_agents * handcrafted_comm_bits`, uses a fixed sender-slot layout, and zeroes the receiver's own slot. Each "prev" block holds `history_window` entries except `prev_states`, which uses `state_history_window`. `current_state` is the quantized plant state.
+Observations are laid out as `[current_state, local_kf_prediction, local_estimation_gap, local_sensor_covariance_diag, current_throughput(s)?, prev_states..., prev_statuses..., prev_throughputs..., error_comm?]`. The `current_throughput(s)` block is present when `include_current_throughput=true`. The optional trailing `error_comm` block has size `n_agents * error_comm_bits`, uses a fixed sender-slot layout, and zeroes the receiver's own slot. Each "prev" block holds `history_window` entries except `prev_states`, which uses `state_history_window`. `current_state` is the quantized plant state.
 
 `history_window` and `state_history_window` are separate on purpose. Past state vectors are much more expensive in observation size than past status or throughput scalars, so you may want longer network/status history without also appending as many previous state vectors.
 

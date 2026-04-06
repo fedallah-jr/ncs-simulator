@@ -171,47 +171,68 @@ class NCS_Env(gym.Env):
         )
         self.quantization_step = observation_cfg.get("quantization_step", 0.05)
         self.cevat_state = bool(observation_cfg.get("cevat_state", False))
-        self.handcrafted_comm_enabled = bool(
-            observation_cfg.get("handcrafted_comm_enabled", False)
+        self.error_comm_enabled = bool(
+            observation_cfg.get("error_comm_enabled", False)
         )
-        self.handcrafted_comm_bits = int(
-            observation_cfg.get("handcrafted_comm_bits", 1)
+        self.error_comm_bits = int(
+            observation_cfg.get("error_comm_bits", 1)
         )
-        threshold_raw = observation_cfg.get("handcrafted_comm_threshold", None)
-        self.handcrafted_comm_threshold = (
+        threshold_raw = observation_cfg.get("error_comm_threshold", None)
+        self.error_comm_threshold = (
             None if threshold_raw is None else float(threshold_raw)
         )
-        if self.handcrafted_comm_bits <= 0:
-            raise ValueError("observation.handcrafted_comm_bits must be positive")
-        if self.cevat_state and self.handcrafted_comm_enabled:
+        if self.error_comm_bits <= 0:
+            raise ValueError("observation.error_comm_bits must be positive")
+        if self.cevat_state and self.error_comm_enabled:
             raise ValueError(
                 "observation.cevat_state and "
-                "observation.handcrafted_comm_enabled cannot be enabled together"
+                "observation.error_comm_enabled cannot be enabled together"
             )
-        edges_raw = observation_cfg.get("handcrafted_comm_edges", None)
+        edges_raw = observation_cfg.get("error_comm_edges", None)
         if edges_raw is not None:
-            self.handcrafted_comm_edges: np.ndarray | None = np.asarray(
+            self.error_comm_edges: np.ndarray | None = np.asarray(
                 edges_raw, dtype=np.float64
             )
-            expected_n_edges = (1 << self.handcrafted_comm_bits) - 1
-            if len(self.handcrafted_comm_edges) != expected_n_edges:
+            expected_n_edges = (1 << self.error_comm_bits) - 1
+            if len(self.error_comm_edges) != expected_n_edges:
                 raise ValueError(
-                    f"observation.handcrafted_comm_edges must have "
-                    f"2^handcrafted_comm_bits - 1 = {expected_n_edges} entries, "
-                    f"got {len(self.handcrafted_comm_edges)}"
+                    f"observation.error_comm_edges must have "
+                    f"2^error_comm_bits - 1 = {expected_n_edges} entries, "
+                    f"got {len(self.error_comm_edges)}"
                 )
         else:
-            self.handcrafted_comm_edges = None
-        if self.handcrafted_comm_enabled and self.handcrafted_comm_edges is None:
+            self.error_comm_edges = None
+        if self.error_comm_enabled and self.error_comm_edges is None:
             if (
-                self.handcrafted_comm_threshold is None
-                or self.handcrafted_comm_threshold <= 0.0
+                self.error_comm_threshold is None
+                or self.error_comm_threshold <= 0.0
             ):
                 raise ValueError(
-                    "observation.handcrafted_comm_threshold must be > 0 when "
-                    "observation.handcrafted_comm_enabled=true and "
-                    "observation.handcrafted_comm_edges is not set"
+                    "observation.error_comm_threshold must be > 0 when "
+                    "observation.error_comm_enabled=true and "
+                    "observation.error_comm_edges is not set"
                 )
+        # One-step delay buffer for error communication messages
+        self._prev_error_comm = np.zeros(
+            (n_agents, n_agents), dtype=np.float32,
+        )
+
+        # Age-based communication: encodes time since each agent last sent
+        self.age_comm_enabled = bool(
+            observation_cfg.get("age_comm_enabled", False)
+        )
+        self.age_comm_bits = int(observation_cfg.get("age_comm_bits", 1))
+        if self.age_comm_bits <= 0:
+            raise ValueError("observation.age_comm_bits must be positive")
+        if self.cevat_state and self.age_comm_enabled:
+            raise ValueError(
+                "observation.cevat_state and "
+                "observation.age_comm_enabled cannot be enabled together"
+            )
+        self._time_since_last_send = np.zeros(n_agents, dtype=np.int64)
+        self._prev_age_comm = np.zeros(
+            (n_agents, n_agents), dtype=np.float32,
+        )
 
         # Create a local RNG instance for this environment
         self.np_random, _ = gym.utils.seeding.np_random(seed)
@@ -234,13 +255,18 @@ class NCS_Env(gym.Env):
             + self.history_window  # previous throughputs
         )
         self.local_obs_base_dim = int(local_obs_base_dim)
-        self.handcrafted_comm_obs_dim = (
+        self.error_comm_obs_dim = (
             self.n_agents
-            if self.handcrafted_comm_enabled
+            if self.error_comm_enabled
+            else 0
+        )
+        self.age_comm_obs_dim = (
+            self.n_agents
+            if self.age_comm_enabled
             else 0
         )
         self.local_obs_dim = int(
-            self.local_obs_base_dim + self.handcrafted_comm_obs_dim
+            self.local_obs_base_dim + self.error_comm_obs_dim + self.age_comm_obs_dim
         )
         self.obs_dim = (
             self.local_obs_dim * self.n_agents if self.cevat_state else self.local_obs_dim
@@ -564,6 +590,13 @@ class NCS_Env(gym.Env):
         self._initialize_local_observer_features_after_reset()
         self._reset_running_returns()
         self.last_network_tick_trace = None
+        self._prev_error_comm = np.zeros(
+            (self.n_agents, self.n_agents), dtype=np.float32,
+        )
+        self._time_since_last_send = np.zeros(self.n_agents, dtype=np.int64)
+        self._prev_age_comm = np.zeros(
+            (self.n_agents, self.n_agents), dtype=np.float32,
+        )
         for idx in range(self.n_agents):
             self.last_measurements[idx] = self.plants[idx].get_state().copy()
 
@@ -796,6 +829,13 @@ class NCS_Env(gym.Env):
             if self.timestep - self._last_cleanup_step >= 100:
                 self._cleanup_old_pending_transmissions(max_age=100)
                 self._last_cleanup_step = self.timestep
+
+        # Update time-since-last-send counters for age_comm
+        for i in range(self.n_agents):
+            if actions[f"agent_{i}"] == 1:
+                self._time_since_last_send[i] = 0
+            else:
+                self._time_since_last_send[i] += 1
 
         mode = self.reward_definition.mode
         for i in range(self.n_agents):
@@ -1318,33 +1358,33 @@ class NCS_Env(gym.Env):
         dx = state  # reference is zero
         return float(dx.T @ self.state_cost_matrix @ dx)
 
-    def _encode_handcrafted_comm_score(self, score: float) -> float:
+    def _encode_error_comm_score(self, score: float) -> float:
         """Encode a non-negative VoU score into a normalised scalar in [0, 1]."""
-        if not self.handcrafted_comm_enabled:
+        if not self.error_comm_enabled:
             return 0.0
 
-        bits = int(self.handcrafted_comm_bits)
+        bits = int(self.error_comm_bits)
         score_value = max(0.0, float(score))
         n_levels = 1 << bits
 
-        if self.handcrafted_comm_edges is not None:
-            edges = self.handcrafted_comm_edges
+        if self.error_comm_edges is not None:
+            edges = self.error_comm_edges
         elif bits == 1:
-            threshold = float(self.handcrafted_comm_threshold)
+            threshold = float(self.error_comm_threshold)
             return 1.0 if score_value > threshold else 0.0
         else:
-            threshold = float(self.handcrafted_comm_threshold)
+            threshold = float(self.error_comm_threshold)
             edge_offsets = np.arange(n_levels - 1, dtype=np.float64) - ((n_levels - 2) / 2.0)
             edges = threshold * np.power(2.0, edge_offsets)
         level = int(np.searchsorted(edges, score_value, side="right"))
         return level / max(n_levels - 1, 1)
 
-    def _build_handcrafted_comm_features(
+    def _build_error_comm_features(
         self,
         local_gaps: List[np.ndarray],
     ) -> np.ndarray:
         """Route encoded per-agent gap messages all-to-all with self-slots zeroed."""
-        if not self.handcrafted_comm_enabled:
+        if not self.error_comm_enabled:
             return np.zeros((self.n_agents, 0), dtype=np.float32)
 
         sender_messages = np.zeros(self.n_agents, dtype=np.float32)
@@ -1355,7 +1395,25 @@ class NCS_Env(gym.Env):
             )
             gap_vec = np.asarray(gap, dtype=np.float64).reshape(-1)
             score = float(gap_vec @ weight_matrix @ gap_vec)
-            sender_messages[agent_idx] = self._encode_handcrafted_comm_score(score)
+            sender_messages[agent_idx] = self._encode_error_comm_score(score)
+
+        routed = np.broadcast_to(
+            sender_messages[np.newaxis, :],
+            (self.n_agents, self.n_agents),
+        ).copy()
+        idx = np.arange(self.n_agents)
+        routed[idx, idx] = 0.0
+        return routed
+
+    def _build_age_comm_features(self) -> np.ndarray:
+        """Route encoded time-since-last-send messages all-to-all with self-slots zeroed."""
+        if not self.age_comm_enabled:
+            return np.zeros((self.n_agents, 0), dtype=np.float32)
+
+        max_level = (1 << self.age_comm_bits) - 1
+        sender_messages = np.minimum(self._time_since_last_send, max_level).astype(np.float32)
+        if max_level > 0:
+            sender_messages = sender_messages / float(max_level)
 
         routed = np.broadcast_to(
             sender_messages[np.newaxis, :],
@@ -1641,19 +1699,34 @@ class NCS_Env(gym.Env):
             cursor += self.history_window
             obs_values[cursor : cursor + self.history_window] = prev_throughputs
             cursor += self.history_window
-            if self.handcrafted_comm_enabled:
-                obs_values[cursor : cursor + self.handcrafted_comm_obs_dim] = 0.0
+            if self.error_comm_enabled:
+                obs_values[cursor : cursor + self.error_comm_obs_dim] = 0.0
+                cursor += self.error_comm_obs_dim
+            if self.age_comm_enabled:
+                obs_values[cursor : cursor + self.age_comm_obs_dim] = 0.0
 
             observations[f"agent_{i}"] = obs_values
             current_throughputs.append(float(throughputs[0]) if throughputs else 0.0)
             quantized_states.append(quantized_state)
 
-        if self.handcrafted_comm_enabled:
-            routed_comm = self._build_handcrafted_comm_features(local_gaps)
+        error_comm_end = self.local_obs_base_dim + self.error_comm_obs_dim
+        if self.error_comm_enabled:
+            routed_comm = self._build_error_comm_features(local_gaps)
+            # Use previous step's messages (one-step communication delay)
             for i in range(self.n_agents):
                 observations[f"agent_{i}"][
-                    self.local_obs_base_dim : self.local_obs_dim
-                ] = routed_comm[i]
+                    self.local_obs_base_dim : error_comm_end
+                ] = self._prev_error_comm[i]
+            self._prev_error_comm = routed_comm
+
+        if self.age_comm_enabled:
+            routed_age = self._build_age_comm_features()
+            # Use previous step's messages (one-step communication delay)
+            for i in range(self.n_agents):
+                observations[f"agent_{i}"][
+                    error_comm_end : error_comm_end + self.age_comm_obs_dim
+                ] = self._prev_age_comm[i]
+            self._prev_age_comm = routed_age
 
         if self.cevat_state:
             joint_obs = np.concatenate(
