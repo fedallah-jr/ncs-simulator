@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
                         help="QMIX mixing network hidden dim")
     parser.add_argument("--qmix-hypernet-hidden-dim", type=int, default=64,
                         help="QMIX hypernetwork hidden dim")
-    parser.add_argument("--td-lambda", type=float, default=0.0,
+    parser.add_argument("--td-lambda", type=float, default=0.6,
                         help="TD(lambda) mixing parameter in [0, 1] (0 = 1-step TD).")
     return parser.parse_args()
 
