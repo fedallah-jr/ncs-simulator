@@ -15,6 +15,8 @@ EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-$((TOTAL_TIMESTEPS * 60 / 100))}"
 HANDCRAFTED_COMM_BITS="${HANDCRAFTED_COMM_BITS:-4}"
 AGE_COMM="${AGE_COMM:-0}"
 AGE_COMM_BITS="${AGE_COMM_BITS:-4}"
+STATE_COMM="${STATE_COMM:-0}"
+BROADCAST_PENALTY_ALPHA="${BROADCAST_PENALTY_ALPHA:-0.0}"
 # Set VOU_QUANTILE_EDGES=1 to auto-search the threshold and compute
 # equal-probability quantile bin edges instead of geometric bins.
 VOU_QUANTILE_EDGES="${VOU_QUANTILE_EDGES:-0}"
@@ -164,6 +166,17 @@ if [[ "${AGE_COMM}" == "1" ]]; then
   )
 fi
 
+# ------------------------------------------------------------------
+# State broadcast communication (opt-in)
+# ------------------------------------------------------------------
+state_comm_args=()
+if [[ "${STATE_COMM}" == "1" ]]; then
+  state_comm_args=(
+    --state_comm
+    --set "reward.broadcast_penalty_alpha=${BROADCAST_PENALTY_ALPHA}"
+  )
+fi
+
 run_one "algorithms.marl_vdn" "vdn" "vdn_doubleq" \
   --double-q --batch-size 512 --learning-rate 2.5e-5 \
   --epsilon-decay-steps "${EPS_DECAY_STEPS}" \
@@ -172,7 +185,8 @@ run_one "algorithms.marl_vdn" "vdn" "vdn_doubleq" \
   --feature-norm \
   --layer-norm \
   "${hcomm_args[@]+${hcomm_args[@]}}" \
-  "${age_comm_args[@]+${age_comm_args[@]}}"
+  "${age_comm_args[@]+${age_comm_args[@]}}" \
+  "${state_comm_args[@]+${state_comm_args[@]}}"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then
