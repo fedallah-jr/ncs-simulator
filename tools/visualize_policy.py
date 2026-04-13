@@ -159,7 +159,7 @@ def run_episode_multi_agent(
                 rng = np.random.default_rng()
             for key in action_dict:
                 if rng.random() < epsilon:
-                    action_dict[key] = rng.integers(0, 2)
+                    action_dict[key] = rng.integers(0, env.action_space[key].n)
         actions[t] = np.asarray([action_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.int64)
         obs_dict, rewards_dict, terminated, truncated, info = env.step(action_dict)
         rewards[t] = np.asarray([rewards_dict[f"agent_{i}"] for i in range(n_agents)], dtype=np.float32)

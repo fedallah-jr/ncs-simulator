@@ -41,7 +41,8 @@ The input config file is divided into sections; each key controls a specific asp
   - `"kf_q_noise"`: Reward equals `r_t = -e_t^T Q e_t` where `e_t = x_t - x_hat_t` (Q-weighted actual estimation error; realized counterpart of `kf_q`).
 - `comm_recent_window`: Short window (steps) used to count how many recent transmission attempts (`p>0`) an agent has initiated.
 - `comm_throughput_window`: Long window (steps) used to estimate per-agent throughput from ACKed packets and their delays.
-- `comm_penalty_alpha`: Scalar multiplier (`alpha`) used in the communication penalty `R_{a,comm} = -alpha * N_recent / T`, applied only when `action=1` and the network is not set to `perfect_communication`.
+- `comm_penalty_alpha`: Scalar multiplier (`alpha`) used in the communication penalty `R_{a,comm} = -alpha * N_recent / T`, applied when an action uses the shared packet channel (`1` or `3`) and the network is not set to `perfect_communication`.
+- `broadcast_penalty_alpha`: Flat penalty applied when an agent chooses a broadcast action (`2` or `3`). Defaults to `0.0`.
 - `normalize`: Explicit flag (default: `false`) for reward normalization in multi-agent runs. When `true`, running normalization scales the per-step reward.
 - `no_normalization_scale`: Scalar divisor applied to rewards when normalization is disabled (default `1.0`).
 - `reward_clip_min` / `reward_clip_max`: Optional bounds applied to rewards after scaling/normalization.
@@ -69,10 +70,14 @@ When `perfect_communication=true`, the whole communication logic is bypassed dir
 - `error_comm_enabled`: When `true`, append a routed all-to-all handcrafted communication block to each local observation. Defaults to `false`.
 - `error_comm_bits`: Number of binary communication features per sender when `error_comm_enabled=true`. Defaults to `1`.
 - `error_comm_threshold`: Positive threshold used to quantize the control-aware predicted-gap score when `error_comm_enabled=true`. There is no implicit default when enabled; set it explicitly from config or `--set`.
+- `age_comm_enabled`: When `true`, append an all-to-all time-since-last-send communication block to each local observation. Defaults to `false`.
+- `age_comm_bits`: Number of quantized age features per sender when `age_comm_enabled=true`. Defaults to `1`.
+- `state_comm_enabled`: When `true`, append a sender-slot state-estimate block of size `n_agents * state_dim` to each local observation and expand the action space from 2 to 4 so agents can choose packet send, state broadcast, both, or neither. Defaults to `false`.
 - `cevat_state` and `error_comm_enabled` are mutually exclusive.
+- `cevat_state` is also mutually exclusive with `age_comm_enabled` and `state_comm_enabled`.
 - Local observer features are always included as three per-agent blocks, each of size `state_dim`: first the local sensor Kalman estimate `x_hat_sensor_local`, then the prediction gap `x_hat_sensor_local - x_hat_controller_local`, then the diagonal of the sensor-local Kalman covariance `diag(P_sensor_local)`. The sensor-local tracker updates on every local measurement, while the shadow controller tracker updates only after the matching app ACK is observed.
 
-Observations are laid out as `[current_state, local_kf_prediction, local_estimation_gap, local_sensor_covariance_diag, current_throughput(s)?, prev_states..., prev_statuses..., prev_throughputs..., error_comm?]`. The `current_throughput(s)` block is present when `include_current_throughput=true`. The optional trailing `error_comm` block has size `n_agents * error_comm_bits`, uses a fixed sender-slot layout, and zeroes the receiver's own slot. Each "prev" block holds `history_window` entries except `prev_states`, which uses `state_history_window`. `current_state` is the quantized plant state.
+Observations are laid out as `[current_state, local_kf_prediction, local_estimation_gap, local_sensor_covariance_diag, current_throughput(s)?, prev_states..., prev_statuses..., prev_throughputs..., error_comm?, age_comm?, state_comm?]`. The `current_throughput(s)` block is present when `include_current_throughput=true`. The optional trailing `error_comm` block has size `n_agents * error_comm_bits`, the optional `age_comm` block has size `n_agents`, and the optional `state_comm` block has size `n_agents * state_dim`; all three use a fixed sender-slot layout and zero the receiver's own slot. `error_comm` and `age_comm` are exposed with a one-step delay, while `state_comm` reflects the broadcast controller estimates after one-step-delayed delivery and prediction. Each "prev" block holds `history_window` entries except `prev_states`, which uses `state_history_window`. `current_state` is the quantized plant state.
 
 `history_window` and `state_history_window` are separate on purpose. Past state vectors are much more expensive in observation size than past status or throughput scalars, so you may want longer network/status history without also appending as many previous state vectors.
 

@@ -95,11 +95,15 @@ DEFAULT_EVAL_SEED_START = 100
 
 REWARD_COMPARISON_KEYS: Sequence[str] = (
     "comm_penalty_alpha",
+    "broadcast_penalty_alpha",
     "simple_comm_penalty_alpha",
     "simple_freshness_decay",
     "comm_recent_window",
     "comm_throughput_window",
     "comm_throughput_floor",
+)
+OBSERVATION_COMPARISON_KEYS: Sequence[str] = (
+    "state_comm_enabled",
 )
 
 NON_DYNAMICS_CONFIG_KEYS: Sequence[str] = (
@@ -780,9 +784,10 @@ def _strip_non_dynamics_config_fields(value: Any) -> Any:
 
 def _extract_env_signature(config: Dict[str, Any]) -> Dict[str, Any]:
     # Batch evaluation runs each checkpoint with its own config path, so
-    # observation-shape settings do not need to match across model folders.
-    # Keep the compatibility check focused on environment dynamics and reward-
-    # affecting settings that would make leaderboard rows incomparable.
+    # observation-shape settings usually do not need to match across model
+    # folders. Keep the compatibility check focused on environment dynamics,
+    # reward-affecting settings, and observation flags that also change action
+    # semantics (for example state_comm_enabled).
     signature: Dict[str, Any] = {}
     for key in ("system", "lqr", "network", "termination", "controller"):
         if key in config:
@@ -790,6 +795,14 @@ def _extract_env_signature(config: Dict[str, Any]) -> Dict[str, Any]:
     reward_cfg = config.get("reward", {})
     signature["reward"] = _strip_non_dynamics_config_fields(
         {key: reward_cfg.get(key) for key in REWARD_COMPARISON_KEYS if key in reward_cfg}
+    )
+    observation_cfg = config.get("observation", {})
+    signature["observation"] = _strip_non_dynamics_config_fields(
+        {
+            key: observation_cfg.get(key)
+            for key in OBSERVATION_COMPARISON_KEYS
+            if key in observation_cfg
+        }
     )
     return signature
 

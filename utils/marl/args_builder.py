@@ -46,6 +46,16 @@ def _add_age_comm_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_state_comm_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--state_comm",
+        action="append_const",
+        const="observation.state_comm_enabled=true",
+        dest="set_overrides",
+        help="Enable state broadcast communication and expand the action space to 4.",
+    )
+
+
 def build_base_qlearning_parser(
     description: str,
     *,
@@ -103,6 +113,7 @@ def build_base_qlearning_parser(
     _add_cevat_state_argument(parser)
     _add_error_comm_argument(parser)
     _add_age_comm_argument(parser)
+    _add_state_comm_argument(parser)
     parser.set_defaults(normalize_obs=True)
     return parser
 
@@ -184,6 +195,7 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
     _add_cevat_state_argument(parser)
     _add_error_comm_argument(parser)
     _add_age_comm_argument(parser)
+    _add_state_comm_argument(parser)
     parser.set_defaults(normalize_obs=True, lr_decay=False)
     return parser
 
@@ -302,6 +314,7 @@ def build_hasac_parser(description: str) -> argparse.ArgumentParser:
     _add_cevat_state_argument(parser)
     _add_error_comm_argument(parser)
     _add_age_comm_argument(parser)
+    _add_state_comm_argument(parser)
     parser.set_defaults(
         normalize_obs=True,
         auto_alpha=False,
@@ -407,5 +420,6 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     _add_cevat_state_argument(parser)
     _add_error_comm_argument(parser)
     _add_age_comm_argument(parser)
+    _add_state_comm_argument(parser)
     parser.set_defaults(normalize_obs=True, lr_decay=False)
     return parser
