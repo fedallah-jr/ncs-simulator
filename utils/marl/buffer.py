@@ -558,3 +558,122 @@ class DialRNNEpisodeCollector:
     def load_state_dict(self, d: dict) -> None:
         self._buffers = d.get("buffers", [[] for _ in range(self.n_envs)])
         self._completed = d.get("completed", [])
+
+
+# ---------------------------------------------------------------------------
+# Episode replay buffer (circular, uniform random sampling)
+# ---------------------------------------------------------------------------
+
+class EpisodeReplayBuffer:
+    """Circular episode replay buffer with uniform random sampling.
+
+    Stores finalized episode dicts (as produced by ``DialRNNEpisodeCollector._finalize``)
+    and samples random batches, returning ``DialRNNEpisodeBatch`` with padding and masking.
+    """
+
+    def __init__(
+        self,
+        capacity: int,
+        device: torch.device,
+        rng: Optional[np.random.Generator] = None,
+    ) -> None:
+        if capacity <= 0:
+            raise ValueError("capacity must be positive")
+        self.capacity = int(capacity)
+        self.device = device
+        self.rng = rng if rng is not None else np.random.default_rng()
+        self._storage: List[dict] = []
+        self._ptr: int = 0
+
+    def __len__(self) -> int:
+        return len(self._storage)
+
+    def add(self, episode: dict) -> None:
+        """Insert a finalized episode dict into the circular buffer."""
+        if len(self._storage) < self.capacity:
+            self._storage.append(episode)
+        else:
+            self._storage[self._ptr] = episode
+        self._ptr = (self._ptr + 1) % self.capacity
+
+    def add_episodes(self, episodes: List[dict]) -> None:
+        """Insert multiple finalized episodes."""
+        for ep in episodes:
+            self.add(ep)
+
+    def can_sample(self, batch_size: int) -> bool:
+        return len(self._storage) >= batch_size
+
+    def sample(
+        self,
+        batch_size: int,
+        obs_normalizer: Optional[RunningObsNormalizer] = None,
+    ) -> DialRNNEpisodeBatch:
+        """Sample a random batch of episodes, pad to max length, return as batch."""
+        if not self.can_sample(batch_size):
+            raise RuntimeError(
+                f"Cannot sample {batch_size} episodes from buffer with {len(self._storage)}"
+            )
+        indices = self.rng.choice(len(self._storage), size=batch_size, replace=False)
+        episodes = [self._storage[i] for i in indices]
+
+        lengths = [ep["obs"].shape[0] for ep in episodes]
+        max_T = max(lengths)
+        B = len(episodes)
+
+        sample_ep = episodes[0]
+        N, obs_dim = sample_ep["obs"].shape[1], sample_ep["obs"].shape[2]
+
+        obs = np.zeros((B, max_T, N, obs_dim), dtype=np.float32)
+        actions = np.zeros((B, max_T, N), dtype=np.int64)
+        rewards = np.zeros((B, max_T, N), dtype=np.float32)
+        terminated = np.zeros((B, max_T), dtype=np.float32)
+        mask = np.zeros((B, max_T), dtype=np.float32)
+        next_obs = np.stack([ep["next_obs"] for ep in episodes])
+
+        has_dru_noise = "dru_noise" in sample_ep
+        if has_dru_noise:
+            comm_dim = sample_ep["dru_noise"].shape[2]
+            dru_noise = np.zeros((B, max_T, N, comm_dim), dtype=np.float32)
+
+        for i, ep in enumerate(episodes):
+            T = lengths[i]
+            obs[i, :T] = ep["obs"]
+            actions[i, :T] = ep["actions"]
+            rewards[i, :T] = ep["rewards"]
+            terminated[i, :T] = ep["terminated"]
+            mask[i, :T] = 1.0
+            if has_dru_noise:
+                dru_noise[i, :T] = ep["dru_noise"]
+
+        if obs_normalizer is not None:
+            obs = obs_normalizer.normalize(
+                obs.reshape(B * max_T * N, obs_dim), update=False,
+            ).reshape(B, max_T, N, obs_dim)
+            next_obs = obs_normalizer.normalize(
+                next_obs.reshape(B * N, obs_dim), update=False,
+            ).reshape(B, N, obs_dim)
+
+        return DialRNNEpisodeBatch(
+            obs=torch.as_tensor(obs, device=self.device, dtype=torch.float32),
+            actions=torch.as_tensor(actions, device=self.device, dtype=torch.long),
+            rewards=torch.as_tensor(rewards, device=self.device, dtype=torch.float32),
+            terminated=torch.as_tensor(terminated, device=self.device, dtype=torch.float32),
+            mask=torch.as_tensor(mask, device=self.device, dtype=torch.float32),
+            next_obs=torch.as_tensor(next_obs, device=self.device, dtype=torch.float32),
+            dru_noise=torch.as_tensor(dru_noise, device=self.device, dtype=torch.float32)
+            if has_dru_noise
+            else torch.zeros(B, max_T, N, 0, device=self.device),
+        )
+
+    def state_dict(self) -> dict:
+        serialized = []
+        for ep in self._storage:
+            serialized.append(
+                {k: v.copy() if isinstance(v, np.ndarray) else v for k, v in ep.items()}
+            )
+        return {"storage": serialized, "ptr": self._ptr}
+
+    def load_state_dict(self, d: dict) -> None:
+        self._storage = d.get("storage", [])
+        self._ptr = int(d.get("ptr", 0)) % max(self.capacity, 1)

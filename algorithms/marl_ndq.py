@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from utils.marl.networks import NDQRNNAgent, NDQCommEncoder, ndq_rnn_forward_batched
 from utils.marl.learners import MARLNDQLearner
 from utils.marl.common import run_evaluation_vectorized_seeded, ndq_rnn_collect_transition
-from utils.marl.buffer import DialRNNEpisodeCollector
+from utils.marl.buffer import DialRNNEpisodeCollector, EpisodeReplayBuffer
 from utils.marl.args_builder import build_base_qlearning_parser
 from utils.marl.checkpoint_utils import (
     save_ndq_checkpoint,
@@ -60,6 +60,8 @@ def parse_args() -> argparse.Namespace:
         epsilon_end=0.05,
         epsilon_decay_steps=50_000,
     )
+    parser.add_argument("--buffer-size", type=int, default=5000,
+                        help="Episode replay buffer capacity (reference: 5000)")
     parser.add_argument("--comm-embed-dim", type=int, default=3)
     parser.add_argument("--c-beta", type=float, default=1.0)
     parser.add_argument("--comm-beta", type=float, default=0.001)
@@ -67,7 +69,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rnn-hidden-dim", type=int, default=64)
     parser.add_argument("--rnn-layers", type=int, default=1)
     parser.add_argument("--batch-episodes", type=int, default=32)
-    parser.add_argument("--target-update-steps", type=int, default=200)
+    parser.add_argument("--target-update-steps", type=int, default=25,
+                        help="Target net sync every N training steps "
+                             "(reference: 200 episodes / batch_size_run=8 = 25 steps)")
     parser.add_argument("--momentum", type=float, default=0.0)
     parser.add_argument("--rmsprop-alpha", type=float, default=0.99)
     parser.add_argument("--rmsprop-eps", type=float, default=1e-5)
@@ -397,6 +401,10 @@ def main() -> None:
     )
 
     best_model_tracker = BestModelTracker()
+    replay_buffer = EpisodeReplayBuffer(
+        capacity=args.buffer_size, device=device,
+        rng=np.random.default_rng(args.seed),
+    )
     global_step = 0
     episode = 0
     last_eval_step = 0
@@ -409,12 +417,13 @@ def main() -> None:
             raise FileNotFoundError(f"No training_state.pt found in {run_dir}")
         counters = load_ndq_training_state(
             training_state_path, learner, obs_normalizer, best_model_tracker,
+            replay_buffer=replay_buffer,
         )
         global_step = counters["global_step"]
         episode = counters["episode"]
         last_eval_step = counters["last_eval_step"]
         vector_step = counters["vector_step"]
-        print(f"Resumed from {run_dir} at step {global_step}")
+        print(f"Resumed from {run_dir} at step {global_step} (buffer: {len(replay_buffer)} episodes)")
 
     learner.agent.train()
     learner.comm_encoder.train()
@@ -444,6 +453,7 @@ def main() -> None:
             episode,
             last_eval_step,
             vector_step,
+            replay_buffer=replay_buffer,
         )
 
     csv_mode = "a" if resuming else "w"
@@ -512,11 +522,19 @@ def main() -> None:
                 total_timesteps=args.total_timesteps,
             )
 
-            if collector.has_episodes(args.batch_episodes):
-                batch = collector.pop_batch(
-                    args.batch_episodes, obs_normalizer=obs_normalizer,
-                )
-                learner.update(batch)
+            # Drain completed episodes from collector into replay buffer.
+            # Train once per insertion pass (reference: one update per
+            # collected episode batch, not per env step).
+            new_episodes = collector._completed
+            if new_episodes:
+                replay_buffer.add_episodes(new_episodes)
+                collector._completed = []
+
+                if replay_buffer.can_sample(args.batch_episodes):
+                    batch = replay_buffer.sample(
+                        args.batch_episodes, obs_normalizer=obs_normalizer,
+                    )
+                    learner.update(batch)
 
             if global_step - last_eval_step >= args.eval_freq:
                 _evaluate_and_log_ndq(
@@ -571,6 +589,7 @@ def main() -> None:
         "rnn_hidden_dim": args.rnn_hidden_dim,
         "rnn_layers": args.rnn_layers,
         "batch_episodes": args.batch_episodes,
+        "buffer_size": args.buffer_size,
         "comm_embed_dim": args.comm_embed_dim,
         "c_beta": args.c_beta,
         "comm_beta": args.comm_beta,

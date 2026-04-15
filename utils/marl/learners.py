@@ -911,7 +911,7 @@ class MARLNDQLearner:
         obs_dim: int = 0,
         qmix_mixing_hidden_dim: int = 32,
         qmix_hypernet_hidden_dim: int = 64,
-        target_update_steps: int = 200,
+        target_update_steps: int = 25,
         grad_clip_norm: Optional[float] = 10.0,
         td_lambda: float = 0.0,
         double_q: bool = True,

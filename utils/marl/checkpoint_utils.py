@@ -416,6 +416,7 @@ def save_ndq_training_state(
     episode: int,
     last_eval_step: int,
     vector_step: int,
+    replay_buffer: Any = None,
 ) -> None:
     state: Dict[str, Any] = {
         "learner": learner.state_dict(),
@@ -426,6 +427,8 @@ def save_ndq_training_state(
         "last_eval_step": last_eval_step,
         "vector_step": vector_step,
     }
+    if replay_buffer is not None:
+        state["replay_buffer"] = replay_buffer.state_dict()
     torch.save(state, path)
 
 
@@ -434,6 +437,7 @@ def load_ndq_training_state(
     learner: Any,
     obs_normalizer: Any,
     best_model_tracker: Any,
+    replay_buffer: Any = None,
 ) -> Dict[str, Any]:
     state = torch.load(path, map_location="cpu", weights_only=False)
     learner.load_state_dict(state["learner"])
@@ -444,6 +448,8 @@ def load_ndq_training_state(
         obs_normalizer.m2 = restored.m2
         obs_normalizer.count = restored.count
     best_model_tracker._best = dict(state["best_model_tracker"])
+    if replay_buffer is not None and "replay_buffer" in state:
+        replay_buffer.load_state_dict(state["replay_buffer"])
     return {
         "global_step": int(state["global_step"]),
         "episode": int(state["episode"]),
