@@ -10,7 +10,22 @@ from torch import nn
 from torch.nn import functional as F
 
 from utils.marl.buffer import MARLBatch, DialRNNEpisodeBatch
-from utils.marl.networks import MLPAgent, DuelingMLPAgent, DialRNNAgent, DRU, QMixer, QPLEXMixer, VDNMixer, TwinQNetwork, append_agent_id, route_messages, dial_rnn_forward_batched
+from utils.marl.networks import (
+    MLPAgent,
+    DuelingMLPAgent,
+    DialRNNAgent,
+    DRU,
+    NDQRNNAgent,
+    NDQCommEncoder,
+    QMixer,
+    QPLEXMixer,
+    VDNMixer,
+    TwinQNetwork,
+    append_agent_id,
+    route_messages,
+    dial_rnn_forward_batched,
+    ndq_rnn_forward_batched,
+)
 from utils.marl.value_norm import ValueNorm
 
 
@@ -869,6 +884,431 @@ class MARLDIALLearner:
     def load_state_dict(self, d: dict) -> None:
         self.agent.load_state_dict(d["agent"])
         self.target_agent.load_state_dict(d["target_agent"])
+        self.optimizer.load_state_dict(d["optimizer"])
+        self.episodes_seen = int(d["episodes_seen"])
+        self._train_steps = int(d.get("train_steps", 0))
+        if self.mixer is not None and "mixer" in d:
+            self.mixer.load_state_dict(d["mixer"])
+            self.target_mixer.load_state_dict(d["target_mixer"])
+
+
+class MARLNDQLearner:
+    """Recurrent NDQ learner with information-bottleneck communication loss."""
+
+    def __init__(
+        self,
+        agent: NDQRNNAgent,
+        comm_encoder: NDQCommEncoder,
+        n_agents: int,
+        n_actions: int,
+        comm_embed_dim: int,
+        gamma: float,
+        lr: float,
+        c_beta: float = 1.0,
+        comm_beta: float = 0.001,
+        comm_entropy_beta: float = 1e-6,
+        mixer_type: str = "qmix",
+        obs_dim: int = 0,
+        qmix_mixing_hidden_dim: int = 32,
+        qmix_hypernet_hidden_dim: int = 64,
+        target_update_steps: int = 200,
+        grad_clip_norm: Optional[float] = 10.0,
+        td_lambda: float = 0.0,
+        double_q: bool = True,
+        device: Optional[torch.device] = None,
+        optimizer_type: str = "rmsprop",
+        momentum: float = 0.0,
+        rmsprop_alpha: float = 0.99,
+        rmsprop_eps: float = 1e-5,
+    ) -> None:
+        td_lambda = float(td_lambda)
+        if not 0.0 <= td_lambda <= 1.0:
+            raise ValueError("td_lambda must be in [0, 1]")
+
+        self.agent = agent
+        self.target_agent = copy.deepcopy(agent)
+        for p in self.target_agent.parameters():
+            p.requires_grad = False
+
+        self.comm_encoder = comm_encoder
+        self.target_comm_encoder = copy.deepcopy(comm_encoder)
+        for p in self.target_comm_encoder.parameters():
+            p.requires_grad = False
+
+        self.n_agents = int(n_agents)
+        self.n_actions = int(n_actions)
+        self.comm_embed_dim = int(comm_embed_dim)
+        self.gamma = float(gamma)
+        self.c_beta = float(c_beta)
+        self.comm_beta = float(comm_beta)
+        self.comm_entropy_beta = float(comm_entropy_beta)
+        self.mixer_type = str(mixer_type)
+        self.grad_clip_norm = grad_clip_norm
+        self.target_update_steps = int(target_update_steps)
+        self.td_lambda = td_lambda
+        self.double_q = bool(double_q)
+
+        self.device = device if device is not None else torch.device("cpu")
+        self.agent.to(self.device)
+        self.target_agent.to(self.device)
+        self.comm_encoder.to(self.device)
+        self.target_comm_encoder.to(self.device)
+
+        self.mixer: Optional[nn.Module] = None
+        self.target_mixer: Optional[nn.Module] = None
+        if self.mixer_type == "vdn":
+            self.mixer = VDNMixer().to(self.device)
+            self.target_mixer = VDNMixer().to(self.device)
+        elif self.mixer_type == "qmix":
+            state_dim = self.n_agents * int(obs_dim)
+            self.mixer = QMixer(
+                n_agents=self.n_agents,
+                state_dim=state_dim,
+                mixing_hidden_dim=qmix_mixing_hidden_dim,
+                hypernet_hidden_dim=qmix_hypernet_hidden_dim,
+            ).to(self.device)
+            self.target_mixer = copy.deepcopy(self.mixer).to(self.device)
+            for p in self.target_mixer.parameters():
+                p.requires_grad = False
+        elif self.mixer_type != "none":
+            raise ValueError("mixer_type must be one of: none, vdn, qmix")
+
+        self._all_params = list(self.agent.parameters()) + list(self.comm_encoder.parameters())
+        if self.mixer is not None:
+            self._all_params += list(self.mixer.parameters())
+        self.optimizer = _make_optimizer(
+            self._all_params,
+            lr=float(lr),
+            optimizer_type=optimizer_type,
+            rmsprop_alpha=float(rmsprop_alpha),
+            rmsprop_eps=float(rmsprop_eps),
+            momentum=float(momentum),
+        )
+
+        self.s_mu = torch.zeros(1, device=self.device)
+        self.s_sigma = torch.ones(1, device=self.device)
+        self.episodes_seen = 0
+        self._train_steps = 0
+
+    def _forward_trace(
+        self,
+        agent: NDQRNNAgent,
+        comm_encoder: NDQCommEncoder,
+        batch: DialRNNEpisodeBatch,
+    ) -> tuple[
+        list[torch.Tensor], torch.Tensor, list[torch.Tensor], list[torch.Tensor], list[torch.Tensor],
+    ]:
+        batch_size, max_t, n_agents = batch.obs.shape[:3]
+        hidden = agent.init_hidden(batch_size * n_agents).to(self.device)
+        prev_action = torch.full(
+            (batch_size, n_agents), self.n_actions, dtype=torch.long, device=self.device,
+        )
+
+        all_q: list[torch.Tensor] = []
+        all_mu: list[torch.Tensor] = []
+        all_m_sample: list[torch.Tensor] = []
+        all_logits: list[torch.Tensor] = []
+        for t in range(max_t):
+            q_t, mu_t, m_t, logits_t, new_hidden = ndq_rnn_forward_batched(
+                agent,
+                comm_encoder,
+                batch.obs[:, t],
+                prev_action,
+                hidden,
+                n_actions=self.n_actions,
+                comm_embed_dim=self.comm_embed_dim,
+            )
+            all_q.append(q_t)
+            all_mu.append(mu_t)
+            all_m_sample.append(m_t)
+            all_logits.append(logits_t)
+
+            valid = batch.mask[:, t].bool()
+            valid_bn = valid.unsqueeze(1).expand(batch_size, n_agents).reshape(batch_size * n_agents)
+            v_h = valid_bn.view(1, batch_size * n_agents, 1).expand_as(new_hidden)
+            hidden = torch.where(v_h, new_hidden, hidden)
+            v_a = valid.unsqueeze(1).expand(batch_size, n_agents)
+            prev_action = torch.where(v_a, batch.actions[:, t], prev_action)
+
+        q_boot, _, _, _, _ = ndq_rnn_forward_batched(
+            agent,
+            comm_encoder,
+            batch.next_obs,
+            prev_action,
+            hidden,
+            n_actions=self.n_actions,
+            comm_embed_dim=self.comm_embed_dim,
+        )
+        return all_q, q_boot, all_mu, all_m_sample, all_logits
+
+    def update(self, batch: DialRNNEpisodeBatch) -> None:
+        batch_size = batch.obs.shape[0]
+
+        online_q, online_q_boot, online_mu, online_m_sample, online_logits = self._forward_trace(
+            self.agent, self.comm_encoder, batch,
+        )
+        with torch.no_grad():
+            target_q, target_q_boot, _, _, _ = self._forward_trace(
+                self.target_agent, self.target_comm_encoder, batch,
+            )
+
+        td_loss = self._compute_td_loss(
+            batch, online_q, online_q_boot, target_q, target_q_boot,
+        )
+        comm_loss = self._compute_comm_loss(
+            batch, online_mu, online_m_sample, online_logits, target_q,
+        )
+        loss = td_loss + self.c_beta * comm_loss
+
+        self.optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        if self.grad_clip_norm is not None:
+            nn.utils.clip_grad_norm_(self._all_params, float(self.grad_clip_norm))
+        self.optimizer.step()
+
+        self.episodes_seen += batch_size
+        self._train_steps += 1
+        if self._train_steps % self.target_update_steps == 0:
+            _hard_update(self.target_agent, self.agent)
+            _hard_update(self.target_comm_encoder, self.comm_encoder)
+            if self.target_mixer is not None and self.mixer is not None:
+                _hard_update(self.target_mixer, self.mixer)
+
+    def _compute_td_loss(
+        self,
+        batch: DialRNNEpisodeBatch,
+        online_q_list: list[torch.Tensor],
+        online_q_boot: torch.Tensor,
+        target_q_list: list[torch.Tensor],
+        target_q_boot: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.mixer_type == "vdn":
+            return self._compute_vdn_td_loss(
+                batch, online_q_list, online_q_boot, target_q_list, target_q_boot,
+            )
+        if self.mixer_type == "qmix":
+            return self._compute_qmix_td_loss(
+                batch, online_q_list, online_q_boot, target_q_list, target_q_boot,
+            )
+        return self._compute_iql_td_loss(
+            batch, online_q_list, online_q_boot, target_q_list, target_q_boot,
+        )
+
+    def _compute_iql_td_loss(
+        self,
+        batch: DialRNNEpisodeBatch,
+        online_q_list: list[torch.Tensor],
+        online_q_boot: torch.Tensor,
+        target_q_list: list[torch.Tensor],
+        target_q_boot: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, max_t = batch.obs.shape[:2]
+        n_agents = self.n_agents
+
+        with torch.no_grad():
+            if self.double_q:
+                boot_actions = online_q_boot.argmax(dim=-1, keepdim=True)
+                boot_q = target_q_boot.gather(-1, boot_actions).squeeze(-1)
+            else:
+                boot_q = target_q_boot.max(dim=-1).values
+
+            targets: list[torch.Tensor] = []
+            rewards: list[torch.Tensor] = []
+            for t in range(max_t):
+                if t < max_t - 1:
+                    has_next = batch.mask[:, t + 1].bool()
+                    if self.double_q:
+                        next_actions = online_q_list[t + 1].argmax(dim=-1, keepdim=True)
+                        next_q_vals = target_q_list[t + 1].gather(-1, next_actions).squeeze(-1)
+                    else:
+                        next_q_vals = target_q_list[t + 1].max(dim=-1).values
+                    bootstrap_q = torch.where(
+                        has_next.unsqueeze(1).expand(batch_size, n_agents),
+                        next_q_vals,
+                        boot_q,
+                    )
+                else:
+                    bootstrap_q = boot_q
+                rewards.append(batch.rewards[:, t])
+                not_done = (1.0 - batch.terminated[:, t]).unsqueeze(-1)
+                targets.append(rewards[-1] + self.gamma * not_done * bootstrap_q)
+            if self.td_lambda > 0:
+                targets = MARLDIALLearner._apply_td_lambda(
+                    targets, rewards, batch.mask, batch.terminated, self.gamma, self.td_lambda,
+                )
+
+        total_loss = torch.tensor(0.0, device=self.device)
+        for t in range(max_t):
+            q_taken = online_q_list[t].gather(-1, batch.actions[:, t].unsqueeze(-1)).squeeze(-1)
+            td_error = (q_taken - targets[t]) ** 2
+            total_loss = total_loss + (td_error * batch.mask[:, t].unsqueeze(-1)).sum()
+        return total_loss / (batch.mask.sum() * float(n_agents)).clamp_min(1.0)
+
+    def _compute_vdn_td_loss(
+        self,
+        batch: DialRNNEpisodeBatch,
+        online_q_list: list[torch.Tensor],
+        online_q_boot: torch.Tensor,
+        target_q_list: list[torch.Tensor],
+        target_q_boot: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, max_t = batch.obs.shape[:2]
+
+        with torch.no_grad():
+            if self.double_q:
+                boot_actions = online_q_boot.argmax(dim=-1, keepdim=True)
+                boot_q = target_q_boot.gather(-1, boot_actions).squeeze(-1)
+            else:
+                boot_q = target_q_boot.max(dim=-1).values
+
+            targets: list[torch.Tensor] = []
+            rewards: list[torch.Tensor] = []
+            for t in range(max_t):
+                if t < max_t - 1:
+                    has_next = batch.mask[:, t + 1].bool()
+                    if self.double_q:
+                        next_actions = online_q_list[t + 1].argmax(dim=-1, keepdim=True)
+                        next_q_vals = target_q_list[t + 1].gather(-1, next_actions).squeeze(-1)
+                    else:
+                        next_q_vals = target_q_list[t + 1].max(dim=-1).values
+                    bootstrap_q = torch.where(
+                        has_next.unsqueeze(1).expand(batch_size, self.n_agents),
+                        next_q_vals,
+                        boot_q,
+                    )
+                else:
+                    bootstrap_q = boot_q
+                next_q_tot = self.target_mixer(bootstrap_q)
+                r_tot = batch.rewards[:, t].sum(dim=-1, keepdim=True)
+                rewards.append(r_tot)
+                not_done = (1.0 - batch.terminated[:, t]).unsqueeze(-1)
+                targets.append(r_tot + self.gamma * not_done * next_q_tot)
+            if self.td_lambda > 0:
+                targets = MARLDIALLearner._apply_td_lambda(
+                    targets, rewards, batch.mask, batch.terminated, self.gamma, self.td_lambda,
+                )
+
+        total_loss = torch.tensor(0.0, device=self.device)
+        for t in range(max_t):
+            q_taken = online_q_list[t].gather(-1, batch.actions[:, t].unsqueeze(-1)).squeeze(-1)
+            q_tot = self.mixer(q_taken)
+            td_error = (q_tot - targets[t]) ** 2
+            total_loss = total_loss + (td_error * batch.mask[:, t].unsqueeze(-1)).sum()
+        return total_loss / batch.mask.sum().clamp_min(1.0)
+
+    def _compute_qmix_td_loss(
+        self,
+        batch: DialRNNEpisodeBatch,
+        online_q_list: list[torch.Tensor],
+        online_q_boot: torch.Tensor,
+        target_q_list: list[torch.Tensor],
+        target_q_boot: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, max_t, n_agents, obs_dim = batch.obs.shape
+        states = batch.obs.view(batch_size, max_t, n_agents * obs_dim)
+        boot_state = batch.next_obs.view(batch_size, n_agents * obs_dim)
+
+        with torch.no_grad():
+            if self.double_q:
+                boot_actions = online_q_boot.argmax(dim=-1, keepdim=True)
+                boot_q = target_q_boot.gather(-1, boot_actions).squeeze(-1)
+            else:
+                boot_q = target_q_boot.max(dim=-1).values
+
+            targets: list[torch.Tensor] = []
+            rewards: list[torch.Tensor] = []
+            for t in range(max_t):
+                if t < max_t - 1:
+                    has_next = batch.mask[:, t + 1].bool()
+                    if self.double_q:
+                        next_actions = online_q_list[t + 1].argmax(dim=-1, keepdim=True)
+                        next_q_vals = target_q_list[t + 1].gather(-1, next_actions).squeeze(-1)
+                    else:
+                        next_q_vals = target_q_list[t + 1].max(dim=-1).values
+                    bootstrap_q = torch.where(
+                        has_next.unsqueeze(1).expand(batch_size, self.n_agents),
+                        next_q_vals,
+                        boot_q,
+                    )
+                    next_state = torch.where(
+                        has_next.view(batch_size, 1).expand(batch_size, n_agents * obs_dim),
+                        states[:, t + 1],
+                        boot_state,
+                    )
+                else:
+                    bootstrap_q = boot_q
+                    next_state = boot_state
+                next_q_tot = self.target_mixer(bootstrap_q, next_state)
+                r_tot = batch.rewards[:, t].sum(dim=-1, keepdim=True)
+                rewards.append(r_tot)
+                not_done = (1.0 - batch.terminated[:, t]).unsqueeze(-1)
+                targets.append(r_tot + self.gamma * not_done * next_q_tot)
+            if self.td_lambda > 0:
+                targets = MARLDIALLearner._apply_td_lambda(
+                    targets, rewards, batch.mask, batch.terminated, self.gamma, self.td_lambda,
+                )
+
+        total_loss = torch.tensor(0.0, device=self.device)
+        for t in range(max_t):
+            q_taken = online_q_list[t].gather(-1, batch.actions[:, t].unsqueeze(-1)).squeeze(-1)
+            q_tot = self.mixer(q_taken, states[:, t])
+            td_error = (q_tot - targets[t]) ** 2
+            total_loss = total_loss + (td_error * batch.mask[:, t].unsqueeze(-1)).sum()
+        return total_loss / batch.mask.sum().clamp_min(1.0)
+
+    def _compute_comm_loss(
+        self,
+        batch: DialRNNEpisodeBatch,
+        mu_list: list[torch.Tensor],
+        m_sample_list: list[torch.Tensor],
+        logits_list: list[torch.Tensor],
+        target_q_list: list[torch.Tensor],
+    ) -> torch.Tensor:
+        mask = batch.mask
+        mask_sum = mask.sum().clamp_min(1.0)
+        mask_bt = mask.unsqueeze(-1).unsqueeze(-1)
+
+        mu_out = torch.stack(mu_list, dim=1)
+        m_sample_out = torch.stack(m_sample_list, dim=1)
+        logits_out = torch.stack(logits_list, dim=1)
+        target_q = torch.stack(target_q_list, dim=1)
+
+        label_target_actions = target_q.max(dim=3, keepdim=True)[1]
+        label_prob = logits_out.gather(3, label_target_actions).squeeze(3)
+        expressiveness_loss = ((-torch.log(label_prob + 1e-6)) * mask.unsqueeze(-1)).sum() / mask_sum
+
+        kl = torch.distributions.kl_divergence(
+            torch.distributions.Normal(mu_out, torch.ones_like(mu_out)),
+            torch.distributions.Normal(self.s_mu, self.s_sigma),
+        )
+        compactness_loss = (kl * mask_bt).sum() / mask_sum
+
+        entropy = -torch.distributions.Normal(self.s_mu, self.s_sigma).log_prob(m_sample_out)
+        entropy_loss = (entropy * mask_bt).sum() / mask_sum
+
+        return expressiveness_loss + self.comm_beta * compactness_loss + self.comm_entropy_beta * entropy_loss
+
+    def state_dict(self) -> dict:
+        state = {
+            "agent": self.agent.state_dict(),
+            "target_agent": self.target_agent.state_dict(),
+            "comm_encoder": self.comm_encoder.state_dict(),
+            "target_comm_encoder": self.target_comm_encoder.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "episodes_seen": self.episodes_seen,
+            "train_steps": self._train_steps,
+            "mixer_type": self.mixer_type,
+        }
+        if self.mixer is not None:
+            state["mixer"] = self.mixer.state_dict()
+            state["target_mixer"] = self.target_mixer.state_dict()
+        return state
+
+    def load_state_dict(self, d: dict) -> None:
+        self.agent.load_state_dict(d["agent"])
+        self.target_agent.load_state_dict(d["target_agent"])
+        self.comm_encoder.load_state_dict(d["comm_encoder"])
+        self.target_comm_encoder.load_state_dict(d["target_comm_encoder"])
         self.optimizer.load_state_dict(d["optimizer"])
         self.episodes_seen = int(d["episodes_seen"])
         self._train_steps = int(d.get("train_steps", 0))

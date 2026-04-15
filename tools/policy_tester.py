@@ -102,9 +102,7 @@ REWARD_COMPARISON_KEYS: Sequence[str] = (
     "comm_throughput_window",
     "comm_throughput_floor",
 )
-OBSERVATION_COMPARISON_KEYS: Sequence[str] = (
-    "state_comm_enabled",
-)
+OBSERVATION_COMPARISON_KEYS: Sequence[str] = ()
 
 NON_DYNAMICS_CONFIG_KEYS: Sequence[str] = (
     "use_agent_id",
@@ -127,6 +125,7 @@ _PER_SEED_FIELDS_CORE: Tuple[str, ...] = (
     "total_lqr_cost",
     "mean_lqr_cost",
     "send_rate",
+    "state_send_rates",
     "mean_true_goodput_kbps",
     "steps",
     "n_agents",
@@ -170,6 +169,7 @@ _SUMMARY_FIELDS_CORE: Tuple[str, ...] = (
     "std_lqr_cost",
     "mean_send_rate",
     "std_send_rate",
+    "mean_state_send_rates",
     "mean_true_goodput_kbps",
     "std_true_goodput_kbps",
     "mean_steps",
@@ -233,6 +233,7 @@ _LEADERBOARD_FIELDS: Tuple[str, ...] = (
     "std_lqr_cost",
     "mean_send_rate",
     "std_send_rate",
+    "mean_state_send_rates",
     "mean_steps",
     "std_steps",
     "mean_reward_per_step",
@@ -264,6 +265,7 @@ _REPLAYBOARD_FIELDS: Tuple[str, ...] = (
     "std_lqr_cost",
     "mean_send_rate",
     "std_send_rate",
+    "mean_state_send_rates",
     "mean_steps",
     "std_steps",
     "mean_reward_per_step",
@@ -291,6 +293,7 @@ class EpisodeResult:
     total_lqr_cost: float
     mean_lqr_cost: float
     send_rate: float
+    state_send_rates: List[float]
     mean_true_goodput_kbps: float
     steps: int
     n_agents: int
@@ -352,6 +355,7 @@ def _episode_result_to_seed_row(
         "total_lqr_cost": result.total_lqr_cost,
         "mean_lqr_cost": result.mean_lqr_cost,
         "send_rate": result.send_rate,
+        "state_send_rates": json.dumps([round(r, 4) for r in result.state_send_rates]),
         "mean_true_goodput_kbps": result.mean_true_goodput_kbps,
         "steps": result.steps,
         "n_agents": result.n_agents,
@@ -645,6 +649,7 @@ def _run_multi_agent_episode(
     total_state_error = 0.0
     total_lqr_cost = 0.0
     send_count = 0
+    per_agent_state_send_count = [0] * n_agents
     steps = 0
     true_goodput_sum = 0.0
     true_goodput_steps = 0
@@ -653,7 +658,12 @@ def _run_multi_agent_episode(
         action_dict = policy.act(obs_dict)
         obs_dict, rewards, terminated, truncated, info = env.step(action_dict)
         total_reward += float(sum(rewards.values()))
-        send_count += int(sum(action_dict.values()))
+        for i in range(n_agents):
+            a = int(action_dict[f"agent_{i}"])
+            if a in (1, 3):
+                send_count += 1
+            if a in (2, 3):
+                per_agent_state_send_count[i] += 1
         if "lqr_cost_total" in info:
             total_lqr_cost += float(info["lqr_cost_total"])
 
@@ -681,6 +691,9 @@ def _run_multi_agent_episode(
     mean_state_error = total_state_error / float(max(1, steps * n_agents))
     mean_lqr_cost = total_lqr_cost / float(max(1, steps * n_agents))
     send_rate = float(send_count) / float(max(1, steps * n_agents))
+    state_send_rates = [
+        float(c) / float(max(1, steps)) for c in per_agent_state_send_count
+    ]
     mean_true_goodput_kbps = true_goodput_sum / float(max(1, true_goodput_steps))
     network_totals = _extract_network_totals(last_info)
     return EpisodeResult(
@@ -694,6 +707,7 @@ def _run_multi_agent_episode(
         total_lqr_cost=total_lqr_cost,
         mean_lqr_cost=mean_lqr_cost,
         send_rate=send_rate,
+        state_send_rates=state_send_rates,
         mean_true_goodput_kbps=mean_true_goodput_kbps,
         steps=steps,
         n_agents=n_agents,
@@ -743,12 +757,19 @@ def _summarize_results(results: List[EpisodeResult]) -> Dict[str, float]:
         ("ack_timeout_rate", np.array([_safe_rate(r.ack_timeouts, r.tx_attempts) for r in results], dtype=float)),
     )
 
-    out: Dict[str, float] = {}
+    out: Dict[str, Any] = {}
     for key, arr in direct_fields:
         m, s = _mean_std(arr, has_data)
         out[f"mean_{key}"] = m
         out[f"std_{key}"] = s
     out["completion_rate"] = completion_rate
+    # Per-agent state broadcast rates averaged across seeds
+    if has_data:
+        rates_matrix = np.array([r.state_send_rates for r in results], dtype=float)
+        mean_rates = np.mean(rates_matrix, axis=0).tolist()
+    else:
+        mean_rates = []
+    out["mean_state_send_rates"] = json.dumps([round(r, 4) for r in mean_rates])
     return out
 
 
@@ -793,15 +814,22 @@ def _extract_env_signature(config: Dict[str, Any]) -> Dict[str, Any]:
         if key in config:
             signature[key] = _strip_non_dynamics_config_fields(config.get(key))
     reward_cfg = config.get("reward", {})
+    _REWARD_DEFAULTS = {"broadcast_penalty_alpha": 0.0}
     signature["reward"] = _strip_non_dynamics_config_fields(
-        {key: reward_cfg.get(key) for key in REWARD_COMPARISON_KEYS if key in reward_cfg}
+        {
+            key: reward_cfg.get(key, _REWARD_DEFAULTS.get(key))
+            for key in REWARD_COMPARISON_KEYS
+            if key in reward_cfg or key in _REWARD_DEFAULTS
+        }
     )
     observation_cfg = config.get("observation", {})
+    # Use explicit defaults so absent keys match the environment defaults
+    # rather than causing spurious signature mismatches.
+    _OBS_DEFAULTS = {"state_comm_enabled": False}
     signature["observation"] = _strip_non_dynamics_config_fields(
         {
-            key: observation_cfg.get(key)
+            key: observation_cfg.get(key, _OBS_DEFAULTS.get(key))
             for key in OBSERVATION_COMPARISON_KEYS
-            if key in observation_cfg
         }
     )
     return signature
@@ -1856,20 +1884,11 @@ def main() -> int:
         )
 
     reference_config = load_config(str(runs[0].config_path))
+    if config_overrides:
+        deep_merge(reference_config, config_overrides)
     termination_override = reference_config.get("termination", {}).get("evaluation")
     if not isinstance(termination_override, dict):
         termination_override = None
-    if config_overrides:
-        deep_merge(reference_config, config_overrides)
-        eval_config_path: Optional[Path] = models_root / "overridden_config.json"
-        eval_config_path.parent.mkdir(parents=True, exist_ok=True)
-        with eval_config_path.open("w") as handle:
-            json.dump(reference_config, handle, indent=2, sort_keys=True, ensure_ascii=True)
-        termination_override = reference_config.get("termination", {}).get("evaluation")
-        if not isinstance(termination_override, dict):
-            termination_override = None
-    else:
-        eval_config_path = None
     model_specs_by_run: Dict[str, List[Tuple[str, PolicySpec]]] = {}
     run_lookup = {run.name: run for run in runs}
     policy_types: List[str] = []
@@ -1944,11 +1963,19 @@ def main() -> int:
         run = run_lookup[model_name]
         training_stats = _compute_training_stats(run.path)
         evaluation_stats = _compute_evaluation_stats(run.path)
+        if config_overrides:
+            model_config_path: Path = apply_config_overrides(
+                run.config_path,
+                config_overrides,
+                run.path / "policy_tests" / "overridden_config.json",
+            )
+        else:
+            model_config_path = run.config_path
         for checkpoint_name, spec in specs:
             _log(f"  checkpoint: {checkpoint_name} ({spec.policy_type})")
             results = _evaluate_policy(
                 spec,
-                config_path=eval_config_path or run.config_path,
+                config_path=model_config_path,
                 episode_length=int(args.episode_length),
                 n_agents=resolved_n_agents,
                 seeds=seeds,
@@ -1970,7 +1997,7 @@ def main() -> int:
 
                 # Load policy for recording
                 env_for_loading = _build_env(
-                    eval_config_path or run.config_path,
+                    model_config_path,
                     int(args.episode_length),
                     resolved_n_agents,
                     args.replay_recording_seed,
@@ -1986,7 +2013,7 @@ def main() -> int:
                 # Record actions
                 recorded_actions = _record_policy_actions(
                     policy_for_recording,
-                    eval_config_path or run.config_path,
+                    model_config_path,
                     int(args.episode_length),
                     resolved_n_agents,
                     args.replay_recording_seed,
@@ -1999,7 +2026,7 @@ def main() -> int:
                 for seed in seeds:
                     replay_policy = ReplayPolicy(recorded_actions, resolved_n_agents)
                     env = _build_env(
-                        eval_config_path or run.config_path,
+                        model_config_path,
                         int(args.episode_length),
                         resolved_n_agents,
                         seed,
@@ -2067,7 +2094,14 @@ def main() -> int:
             for path in plotted_paths:
                 _log(path, indent=4)
 
-    heuristic_config_path = eval_config_path or runs[0].config_path
+    if config_overrides:
+        heuristic_config_path = apply_config_overrides(
+            runs[0].config_path,
+            config_overrides,
+            models_root / "overridden_config.json",
+        )
+    else:
+        heuristic_config_path = runs[0].config_path
     _log("Heuristics:")
     for heuristic_name in HEURISTIC_POLICY_NAMES:
         _log(f"- {heuristic_name}", indent=2)

@@ -8,7 +8,17 @@ import numpy as np
 import torch
 
 from utils.marl.common import select_actions, stack_obs
-from utils.marl.networks import MLPAgent, DuelingMLPAgent, DialRNNAgent, DRU, route_messages, dial_rnn_forward_batched
+from utils.marl.networks import (
+    MLPAgent,
+    DuelingMLPAgent,
+    DialRNNAgent,
+    DRU,
+    NDQRNNAgent,
+    NDQCommEncoder,
+    route_messages,
+    dial_rnn_forward_batched,
+    ndq_rnn_forward_batched,
+)
 from utils.marl.obs_normalization import RunningObsNormalizer
 
 
@@ -265,4 +275,107 @@ class MARLDialRNNTorchPolicy:
         self.hidden = new_hidden
         self.prev_action = torch.as_tensor(actions, device=self.device, dtype=torch.long)
         self.prev_msg_logits = msg_logits.squeeze(0)
+        return {f"agent_{i}": int(actions[i]) for i in range(n_agents)}
+
+
+def load_ndq_agent_from_checkpoint(
+    model_path: Path,
+) -> Tuple[NDQRNNAgent, NDQCommEncoder, MARLTorchCheckpointMetadata, int]:
+    """Load a recurrent NDQ agent and comm encoder from checkpoint."""
+    ckpt = _load_checkpoint_dict(model_path)
+
+    n_agents = int(ckpt.get("n_agents", 1))
+    obs_dim = int(ckpt.get("obs_dim", 0))
+    n_actions = int(ckpt.get("n_actions", 0))
+    comm_embed_dim = int(ckpt.get("comm_embed_dim", 1))
+    rnn_hidden_dim = int(ckpt.get("rnn_hidden_dim", 64))
+    rnn_layers = int(ckpt.get("rnn_layers", 1))
+
+    obs_normalizer: Optional[RunningObsNormalizer] = None
+    obs_norm_state = ckpt.get("obs_normalization", None)
+    if isinstance(obs_norm_state, dict) and bool(obs_norm_state.get("enabled", False)):
+        obs_normalizer = RunningObsNormalizer.from_state_dict(obs_norm_state)
+
+    agent = NDQRNNAgent(
+        obs_dim=obs_dim,
+        n_agents=n_agents,
+        n_actions=n_actions,
+        comm_embed_dim=comm_embed_dim,
+        rnn_hidden_dim=rnn_hidden_dim,
+        rnn_layers=rnn_layers,
+    )
+    agent.load_state_dict(ckpt["agent_state_dict"])
+
+    comm_encoder = NDQCommEncoder(
+        input_dim=obs_dim + n_actions + n_agents,
+        n_agents=n_agents,
+        comm_embed_dim=comm_embed_dim,
+        n_actions=n_actions,
+        hidden_dim=rnn_hidden_dim,
+    )
+    comm_encoder.load_state_dict(ckpt["comm_encoder_state_dict"])
+
+    metadata = MARLTorchCheckpointMetadata(
+        algorithm=str(ckpt.get("algorithm", "marl_ndq")),
+        n_agents=n_agents,
+        obs_dim=obs_dim,
+        n_actions=n_actions,
+        use_agent_id=True,
+        parameter_sharing=True,
+        agent_hidden_dims=(),
+        agent_activation="relu",
+        obs_normalizer=obs_normalizer,
+    )
+    return agent, comm_encoder, metadata, comm_embed_dim
+
+
+class MARLNDQTorchPolicy:
+    """Stateful recurrent NDQ policy for inference."""
+
+    def __init__(
+        self,
+        agent: NDQRNNAgent,
+        comm_encoder: NDQCommEncoder,
+        metadata: MARLTorchCheckpointMetadata,
+        comm_embed_dim: int,
+        *,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        self.agent = agent
+        self.comm_encoder = comm_encoder
+        self.metadata = metadata
+        self.comm_embed_dim = int(comm_embed_dim)
+        self.device = device or torch.device("cpu")
+        self.agent.to(self.device)
+        self.comm_encoder.to(self.device)
+
+        n_agents = metadata.n_agents
+        self.hidden = agent.init_hidden(n_agents).to(self.device)
+        self.prev_action = torch.full(
+            (1, n_agents), agent.n_actions, dtype=torch.long, device=self.device,
+        )
+
+    def reset(self) -> None:
+        self.hidden.zero_()
+        self.prev_action.fill_(self.agent.n_actions)
+
+    @torch.no_grad()
+    def act(self, obs_dict: Mapping[str, Any]) -> Dict[str, int]:
+        n_agents = self.metadata.n_agents
+        obs = stack_obs(dict(obs_dict), n_agents)
+        if self.metadata.obs_normalizer is not None:
+            obs = self.metadata.obs_normalizer.normalize(obs, update=False)
+
+        q_values, _, _, _, new_hidden = ndq_rnn_forward_batched(
+            self.agent,
+            self.comm_encoder,
+            torch.as_tensor(obs, device=self.device, dtype=torch.float32).unsqueeze(0),
+            self.prev_action,
+            self.hidden,
+            n_actions=self.metadata.n_actions,
+            comm_embed_dim=self.comm_embed_dim,
+        )
+        actions = q_values.squeeze(0).argmax(dim=-1).cpu().numpy().astype(np.int64)
+        self.hidden = new_hidden
+        self.prev_action = torch.as_tensor(actions, device=self.device, dtype=torch.long).unsqueeze(0)
         return {f"agent_{i}": int(actions[i]) for i in range(n_agents)}

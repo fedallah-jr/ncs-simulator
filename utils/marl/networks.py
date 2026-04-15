@@ -483,6 +483,174 @@ def dial_rnn_forward_batched(
     return q_values, msg_logits, h_out
 
 
+class NDQRNNAgent(nn.Module):
+    """GRU-based NDQ agent with separate communication encoder."""
+
+    def __init__(
+        self,
+        obs_dim: int,
+        n_agents: int,
+        n_actions: int,
+        comm_embed_dim: int,
+        rnn_hidden_dim: int = 64,
+        rnn_layers: int = 1,
+    ) -> None:
+        super().__init__()
+        self.obs_dim = int(obs_dim)
+        self.n_agents = int(n_agents)
+        self.n_actions = int(n_actions)
+        self.comm_embed_dim = int(comm_embed_dim)
+        self.rnn_hidden_dim = int(rnn_hidden_dim)
+        self.rnn_layers = int(rnn_layers)
+
+        self.obs_encoder = nn.Linear(obs_dim, rnn_hidden_dim)
+        self.agent_lookup = nn.Embedding(n_agents, rnn_hidden_dim)
+        self.prev_action_lookup = nn.Embedding(n_actions + 1, rnn_hidden_dim)
+        self.msg_encoder = nn.Sequential(
+            nn.Linear(n_agents * comm_embed_dim, rnn_hidden_dim),
+            nn.ReLU(),
+        )
+        self.rnn = nn.GRU(
+            input_size=rnn_hidden_dim,
+            hidden_size=rnn_hidden_dim,
+            num_layers=rnn_layers,
+            batch_first=True,
+        )
+        self.output_head = nn.Sequential(
+            nn.Linear(rnn_hidden_dim, rnn_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(rnn_hidden_dim, n_actions),
+        )
+
+    def forward(
+        self,
+        obs: torch.Tensor,
+        agent_idx: torch.Tensor,
+        prev_action: torch.Tensor,
+        recv_msg: torch.Tensor,
+        hidden: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        z = (
+            self.obs_encoder(obs)
+            + self.agent_lookup(agent_idx)
+            + self.prev_action_lookup(prev_action)
+            + self.msg_encoder(recv_msg)
+        )
+        rnn_out, h_out = self.rnn(z.unsqueeze(1), hidden)
+        q_values = self.output_head(rnn_out.squeeze(1))
+        return q_values, h_out
+
+    def init_hidden(self, batch_size: int) -> torch.Tensor:
+        return torch.zeros(self.rnn_layers, batch_size, self.rnn_hidden_dim)
+
+
+class NDQCommEncoder(nn.Module):
+    """Continuous communication encoder used by NDQ."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        n_agents: int,
+        comm_embed_dim: int,
+        n_actions: int,
+        hidden_dim: int,
+    ) -> None:
+        super().__init__()
+        self.input_dim = int(input_dim)
+        self.n_agents = int(n_agents)
+        self.comm_embed_dim = int(comm_embed_dim)
+        self.n_actions = int(n_actions)
+
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, n_agents * comm_embed_dim)
+        infer_hidden = 4 * n_agents * comm_embed_dim
+        self.inference_model = nn.Sequential(
+            nn.Linear(input_dim + n_agents * comm_embed_dim, infer_hidden),
+            nn.ReLU(),
+            nn.Linear(infer_hidden, infer_hidden),
+            nn.ReLU(),
+            nn.Linear(infer_hidden, n_actions),
+        )
+
+    def forward(self, base_input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        x = F.relu(self.fc1(base_input))
+        x = F.relu(self.fc2(x))
+        mu = self.fc3(x)
+        sigma = torch.ones_like(mu)
+        return mu, sigma
+
+    def infer(self, base_input: torch.Tensor, recv_msg: torch.Tensor) -> torch.Tensor:
+        logits = self.inference_model(torch.cat([base_input, recv_msg], dim=-1))
+        return F.softmax(logits, dim=-1)
+
+
+def route_ndq_messages(
+    messages: torch.Tensor, n_agents: int, comm_embed_dim: int,
+) -> torch.Tensor:
+    """Route NDQ messages from sender-major to receiver-major layout."""
+    batch_size = messages.shape[0]
+    msg = messages.view(batch_size, n_agents, n_agents, comm_embed_dim)
+    msg = msg.permute(0, 2, 1, 3).contiguous()
+    return msg.view(batch_size, n_agents, n_agents * comm_embed_dim)
+
+
+def ndq_rnn_forward_batched(
+    agent: NDQRNNAgent,
+    comm_encoder: NDQCommEncoder,
+    obs: torch.Tensor,
+    prev_action: torch.Tensor,
+    hidden: torch.Tensor,
+    *,
+    n_actions: int,
+    comm_embed_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run one NDQ recurrent step over a vectorized batch."""
+    if obs.ndim != 3:
+        raise ValueError("obs must have shape (B, N, obs_dim)")
+    if prev_action.shape != obs.shape[:2]:
+        raise ValueError("prev_action must have shape (B, N)")
+
+    batch_size, n_agents, _ = obs.shape
+    agent_ids_onehot = torch.eye(
+        n_agents, device=obs.device, dtype=obs.dtype,
+    ).unsqueeze(0).expand(batch_size, -1, -1)
+
+    prev_action_safe = prev_action.clamp(max=n_actions - 1)
+    prev_action_onehot = F.one_hot(prev_action_safe, n_actions).to(dtype=obs.dtype)
+    start_mask = prev_action >= n_actions
+    prev_action_onehot[start_mask] = 0.0
+
+    base_input = torch.cat([obs, prev_action_onehot, agent_ids_onehot], dim=-1)
+    base_flat = base_input.reshape(batch_size * n_agents, -1)
+    mu, _sigma = comm_encoder(base_flat)
+
+    m_sample = mu + torch.randn_like(mu)
+    messages = m_sample.view(batch_size, n_agents, n_agents * comm_embed_dim)
+    recv_msg = route_ndq_messages(messages, n_agents, comm_embed_dim)
+    recv_flat = recv_msg.reshape(batch_size * n_agents, -1)
+
+    agent_idx = torch.arange(
+        n_agents, device=obs.device, dtype=torch.long,
+    ).unsqueeze(0).expand(batch_size, -1).reshape(batch_size * n_agents)
+    q_values, h_out = agent(
+        obs.reshape(batch_size * n_agents, -1),
+        agent_idx,
+        prev_action.reshape(batch_size * n_agents),
+        recv_flat,
+        hidden,
+    )
+
+    logits = comm_encoder.infer(base_flat, recv_flat)
+    return (
+        q_values.view(batch_size, n_agents, -1),
+        mu.view(batch_size, n_agents, -1),
+        m_sample.view(batch_size, n_agents, -1),
+        logits.view(batch_size, n_agents, -1),
+        h_out,
+    )
+
+
 class VDNMixer(nn.Module):
     def __init__(self) -> None:
         super().__init__()

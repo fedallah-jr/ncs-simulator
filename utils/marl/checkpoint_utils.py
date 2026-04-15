@@ -373,6 +373,85 @@ def load_dial_rnn_training_state(
     }
 
 
+def save_ndq_checkpoint(
+    path: Path,
+    n_agents: int,
+    obs_dim: int,
+    n_actions: int,
+    agent: torch.nn.Module,
+    comm_encoder: torch.nn.Module,
+    obs_normalizer: Optional["RunningObsNormalizer"],
+    comm_embed_dim: int,
+    rnn_hidden_dim: int = 64,
+    rnn_layers: int = 1,
+    mixer_type: str = "qmix",
+) -> None:
+    ckpt: Dict[str, Any] = {
+        "algorithm": "marl_ndq",
+        "ndq": True,
+        "n_agents": n_agents,
+        "obs_dim": obs_dim,
+        "n_actions": n_actions,
+        "use_agent_id": True,
+        "parameter_sharing": True,
+        "comm_embed_dim": comm_embed_dim,
+        "rnn_hidden_dim": rnn_hidden_dim,
+        "rnn_layers": rnn_layers,
+        "mixer_type": mixer_type,
+        "agent_state_dict": agent.state_dict(),
+        "comm_encoder_state_dict": comm_encoder.state_dict(),
+    }
+    ckpt["obs_normalization"] = (
+        obs_normalizer.state_dict() if obs_normalizer is not None else {"enabled": False}
+    )
+    torch.save(ckpt, path)
+
+
+def save_ndq_training_state(
+    path: Path,
+    learner: Any,
+    obs_normalizer: Any,
+    best_model_tracker: Any,
+    global_step: int,
+    episode: int,
+    last_eval_step: int,
+    vector_step: int,
+) -> None:
+    state: Dict[str, Any] = {
+        "learner": learner.state_dict(),
+        "obs_normalizer": obs_normalizer.state_dict() if obs_normalizer is not None else None,
+        "best_model_tracker": dict(best_model_tracker._best),
+        "global_step": global_step,
+        "episode": episode,
+        "last_eval_step": last_eval_step,
+        "vector_step": vector_step,
+    }
+    torch.save(state, path)
+
+
+def load_ndq_training_state(
+    path: Path,
+    learner: Any,
+    obs_normalizer: Any,
+    best_model_tracker: Any,
+) -> Dict[str, Any]:
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    learner.load_state_dict(state["learner"])
+    if state["obs_normalizer"] is not None and obs_normalizer is not None:
+        from utils.marl.obs_normalization import RunningObsNormalizer
+        restored = RunningObsNormalizer.from_state_dict(state["obs_normalizer"])
+        obs_normalizer.mean = restored.mean
+        obs_normalizer.m2 = restored.m2
+        obs_normalizer.count = restored.count
+    best_model_tracker._best = dict(state["best_model_tracker"])
+    return {
+        "global_step": int(state["global_step"]),
+        "episode": int(state["episode"]),
+        "last_eval_step": int(state["last_eval_step"]),
+        "vector_step": int(state["vector_step"]),
+    }
+
+
 def build_qlearning_hyperparams(
     algorithm: str, args: Any, n_agents: int, use_agent_id: bool,
     device: torch.device, mixer_params: Optional[Dict[str, Any]] = None,

@@ -326,6 +326,20 @@ def load_marl_torch_multi_agent_policy(model_path: str, env: NCS_Env):
             raise ValueError(f"Env obs_dim={env_obs_dim} does not match checkpoint obs_dim={meta.obs_dim}")
         dru = DRU(sigma=dru_sigma)
         return MARLDialRNNTorchPolicy(agent, meta, dru, comm_dim, device=torch.device("cpu"))
+    if isinstance(ckpt, dict) and ckpt.get("ndq", False):
+        from utils.marl.torch_policy import MARLNDQTorchPolicy, load_ndq_agent_from_checkpoint
+
+        agent, comm_encoder, meta, comm_embed_dim = load_ndq_agent_from_checkpoint(Path(model_path))
+        if int(getattr(env, "n_agents", 0)) != meta.n_agents:
+            raise ValueError(
+                f"Env n_agents={getattr(env, 'n_agents', None)} does not match checkpoint n_agents={meta.n_agents}."
+            )
+        env_obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
+        if env_obs_dim != meta.obs_dim:
+            raise ValueError(f"Env obs_dim={env_obs_dim} does not match checkpoint obs_dim={meta.obs_dim}")
+        return MARLNDQTorchPolicy(
+            agent, comm_encoder, meta, comm_embed_dim, device=torch.device("cpu"),
+        )
 
     from utils.marl.torch_policy import MARLTorchMultiAgentPolicy, load_marl_torch_agents_from_checkpoint
 
