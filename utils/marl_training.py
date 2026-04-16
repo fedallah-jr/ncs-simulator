@@ -379,6 +379,7 @@ def evaluate_and_log(
     eval_baseline: Dict[str, Any],
     start_time: Optional[float] = None,
     total_timesteps: Optional[int] = None,
+    action_mask: Optional[torch.Tensor] = None,
 ) -> None:
     """Run paired-seed evaluation, write CSV row, update best model, and print."""
     from utils.marl.common import run_evaluation_vectorized_seeded
@@ -403,6 +404,7 @@ def evaluate_and_log(
         device=device,
         episode_seeds=episode_seeds,
         obs_normalizer=obs_normalizer,
+        action_mask=action_mask,
     )
 
     baseline_label = str(eval_baseline.get("label", "perfect_comm"))

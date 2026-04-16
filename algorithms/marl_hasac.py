@@ -30,6 +30,7 @@ from utils.marl import (
     select_actions_batched,
     append_agent_id,
 )
+from utils.marl.common import compute_broadcast_curriculum_mask, curriculum_n_valid_actions
 from utils.marl_training import (
     setup_device_and_rng,
     load_config_with_overrides,
@@ -59,6 +60,7 @@ def _select_actions_stochastic(
     n_agents: int,
     n_actions: int,
     device: torch.device,
+    action_mask: Optional[torch.Tensor] = None,
 ) -> np.ndarray:
     """Sample actions from actor policies (Categorical)."""
     obs_t = torch.as_tensor(obs, device=device, dtype=torch.float32)
@@ -66,6 +68,8 @@ def _select_actions_stochastic(
     with torch.no_grad():
         for i, actor in enumerate(actors):
             logits_i = actor(obs_t[:, i, :])
+            if action_mask is not None:
+                logits_i = logits_i + action_mask
             dist = Categorical(logits=logits_i)
             actions[:, i] = dist.sample().cpu().numpy()
     return actions
@@ -130,6 +134,17 @@ def main() -> None:
 
     obs_dim = int(env.single_observation_space.spaces["agent_0"].shape[0])
     n_actions = int(env.single_action_space.spaces["agent_0"].n)
+
+    broadcast_curriculum = bool(args.broadcast_curriculum)
+    if broadcast_curriculum:
+        if n_actions != 4:
+            raise ValueError(
+                "--broadcast-curriculum requires state_comm (4-action space), "
+                f"but the resolved config gives n_actions={n_actions}"
+            )
+        if not (0.0 < args.curriculum_phase1_ratio < 1.0):
+            raise ValueError("--curriculum-phase1-ratio must be in (0, 1)")
+
     obs_normalizer = create_obs_normalizer(
         obs_dim, args.normalize_obs, args.obs_norm_clip, args.obs_norm_eps
     )
@@ -275,6 +290,21 @@ def main() -> None:
         start_time = time.time()
 
         while global_step < args.total_timesteps:
+            # Compute curriculum mask for this step.
+            if broadcast_curriculum:
+                step_mask = compute_broadcast_curriculum_mask(
+                    global_step, args.total_timesteps, n_actions,
+                    args.curriculum_phase1_ratio, device,
+                )
+                learner.update_target_entropy(
+                    curriculum_n_valid_actions(
+                        global_step, args.total_timesteps, n_actions,
+                        args.curriculum_phase1_ratio,
+                    )
+                )
+            else:
+                step_mask = None
+
             # Normalize obs
             if obs_normalizer is not None:
                 obs = obs_normalizer.normalize(obs_raw, update=True)
@@ -283,10 +313,15 @@ def main() -> None:
 
             # Action selection: warmup -> random, after -> stochastic from actors
             if global_step < args.start_learning:
-                actions = rng.integers(0, n_actions, size=(args.n_envs, n_agents))
+                if step_mask is not None:
+                    valid_actions = np.array([2, 3])
+                    actions = rng.choice(valid_actions, size=(args.n_envs, n_agents))
+                else:
+                    actions = rng.integers(0, n_actions, size=(args.n_envs, n_agents))
             else:
                 actions = _select_actions_stochastic(
                     learner.actors, obs, args.n_envs, n_agents, n_actions, device,
+                    action_mask=step_mask,
                 )
 
             # Step environment
@@ -337,7 +372,7 @@ def main() -> None:
                 n_updates = int(args.update_per_train * args.train_interval)
                 for _ in range(n_updates):
                     batch = buffer.sample(args.batch_size, obs_normalizer=obs_normalizer)
-                    learner.update(batch)
+                    learner.update(batch, action_mask=step_mask)
 
             if global_step - last_eval_step >= args.eval_freq:
                 # For evaluation, wrap actors in a ModuleList so select_actions_batched works
@@ -353,6 +388,7 @@ def main() -> None:
                     algo_name="HASAC",
                     eval_baseline=eval_baseline,
                     start_time=start_time, total_timesteps=args.total_timesteps,
+                    action_mask=step_mask,
                 )
                 eval_seed += args.n_eval_episodes
                 last_eval_step = global_step

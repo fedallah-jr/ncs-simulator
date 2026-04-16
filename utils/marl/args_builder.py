@@ -196,6 +196,10 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
     _add_error_comm_argument(parser)
     _add_age_comm_argument(parser)
     _add_state_comm_argument(parser)
+    parser.add_argument("--broadcast-curriculum", action="store_true",
+                        help="Two-phase curriculum: force broadcast in Phase 1, unlock all actions in Phase 2.")
+    parser.add_argument("--curriculum-phase1-ratio", type=float, default=0.5,
+                        help="Fraction of total_timesteps for Phase 1 (broadcast forced). Must be in (0, 1).")
     parser.set_defaults(normalize_obs=True, lr_decay=False)
     return parser
 
@@ -223,6 +227,8 @@ def build_happo_hyperparams(
         "activation": args.activation, "feature_norm": args.feature_norm,
         "layer_norm": args.layer_norm,
         "fixed_order": args.fixed_order, "parameter_sharing": False,
+        "broadcast_curriculum": args.broadcast_curriculum,
+        "curriculum_phase1_ratio": args.curriculum_phase1_ratio,
         "eval_freq": args.eval_freq,
         "n_eval_episodes": args.n_eval_episodes, "n_eval_envs": args.n_eval_envs,
         "device": str(device), "seed": args.seed,
@@ -315,6 +321,10 @@ def build_hasac_parser(description: str) -> argparse.ArgumentParser:
     _add_error_comm_argument(parser)
     _add_age_comm_argument(parser)
     _add_state_comm_argument(parser)
+    parser.add_argument("--broadcast-curriculum", action="store_true",
+                        help="Two-phase curriculum: force broadcast in Phase 1, unlock all actions in Phase 2.")
+    parser.add_argument("--curriculum-phase1-ratio", type=float, default=0.5,
+                        help="Fraction of total_timesteps for Phase 1 (broadcast forced). Must be in (0, 1).")
     parser.set_defaults(
         normalize_obs=True,
         auto_alpha=False,
@@ -352,6 +362,8 @@ def build_hasac_hyperparams(
         "critic_hidden_dims": list(args.critic_hidden_dims),
         "activation": args.activation, "feature_norm": args.feature_norm,
         "layer_norm": args.layer_norm,
+        "broadcast_curriculum": args.broadcast_curriculum,
+        "curriculum_phase1_ratio": args.curriculum_phase1_ratio,
         "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip, "obs_norm_eps": args.obs_norm_eps,
         "eval_freq": args.eval_freq,

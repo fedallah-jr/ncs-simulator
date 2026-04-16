@@ -27,6 +27,47 @@ from utils.marl.obs_normalization import RunningObsNormalizer
 from utils.marl.vector_env import stack_vector_obs
 
 
+def compute_broadcast_curriculum_mask(
+    global_step: int,
+    total_timesteps: int,
+    n_actions: int,
+    phase1_ratio: float,
+    device: torch.device,
+) -> Optional[torch.Tensor]:
+    """Return a logit mask for broadcast curriculum, or None when unneeded.
+
+    During Phase 1 (``global_step < phase1_ratio * total_timesteps``), actions
+    0 and 1 (the non-broadcast actions) are masked to ``-inf`` so agents are
+    forced to broadcast.  During Phase 2 (remainder) no masking is applied and
+    the function returns ``None``.
+
+    The caller adds the returned tensor to raw logits before creating a
+    ``Categorical`` or computing ``log_softmax``.
+    """
+    if n_actions != 4:
+        return None
+    if global_step >= phase1_ratio * total_timesteps:
+        return None
+    mask = torch.zeros(n_actions, device=device)
+    mask[0] = float("-inf")
+    mask[1] = float("-inf")
+    return mask
+
+
+def curriculum_n_valid_actions(
+    global_step: int,
+    total_timesteps: int,
+    n_actions: int,
+    phase1_ratio: float,
+) -> int:
+    """Return the number of valid (unmasked) actions for the current phase."""
+    if n_actions != 4:
+        return n_actions
+    if global_step < phase1_ratio * total_timesteps:
+        return 2
+    return n_actions
+
+
 def select_device(device_str: str) -> torch.device:
     """Select torch device based on string specification."""
     if device_str == "cpu":
@@ -110,6 +151,7 @@ def select_actions_batched(
     rng: np.random.Generator,
     device: torch.device,
     use_agent_id: bool,
+    action_mask: Optional[torch.Tensor] = None,
 ) -> np.ndarray:
     """
     Select actions using epsilon-greedy policy for batched vector environments.
@@ -124,6 +166,8 @@ def select_actions_batched(
         rng: Random number generator
         device: Torch device
         use_agent_id: Whether to append agent ID to observations
+        action_mask: Optional logit-space mask (shape ``(n_actions,)``).
+            ``-inf`` entries suppress the corresponding actions.
 
     Returns:
         Actions array of shape (n_envs, n_agents)
@@ -148,13 +192,23 @@ def select_actions_batched(
             q_per_agent.append(agent_net(obs_t[:, agent_idx, :]))
         q = torch.stack(q_per_agent, dim=1)
 
+    if action_mask is not None:
+        q = q + action_mask
+
     greedy = q.argmax(dim=-1).cpu().numpy().astype(np.int64)
     actions = greedy.copy()
     explore_mask = rng.random((n_envs, n_agents)) < float(epsilon)
     if np.any(explore_mask):
-        random_actions = rng.integers(
-            0, n_actions, size=int(explore_mask.sum()), endpoint=False, dtype=np.int64
-        )
+        if action_mask is not None:
+            valid = torch.isfinite(action_mask).cpu().numpy()
+            valid_indices = np.where(valid)[0]
+            random_actions = rng.choice(
+                valid_indices, size=int(explore_mask.sum()),
+            ).astype(np.int64)
+        else:
+            random_actions = rng.integers(
+                0, n_actions, size=int(explore_mask.sum()), endpoint=False, dtype=np.int64
+            )
         actions[explore_mask] = random_actions
     return actions
 
@@ -294,6 +348,7 @@ def run_evaluation_vectorized_seeded(
     heuristic_deterministic: bool = True,
     fixed_action: Optional[int] = None,
     action_selector: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    action_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[float, float, List[float]]:
     """Run vectorized evaluation on an explicit seed list (paired-seed friendly).
 
@@ -396,6 +451,7 @@ def run_evaluation_vectorized_seeded(
                     rng=dummy_rng,
                     device=device,
                     use_agent_id=use_agent_id,
+                    action_mask=action_mask,
                 )
 
             action_dict = {f"agent_{i}": actions[:, i] for i in range(n_agents)}
