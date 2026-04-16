@@ -27,6 +27,13 @@ from utils.marl.obs_normalization import RunningObsNormalizer
 from utils.marl.vector_env import stack_vector_obs
 
 
+# Large finite negative value used for action masking.  ``exp(-1e9)`` underflows
+# to exactly 0 in float32, so softmax probabilities on masked entries are 0 and
+# argmax never picks them -- but unlike ``-inf``, ``0 * -1e9 = 0`` (not NaN), so
+# expressions like ``(action_onehot * log_probs).sum(-1)`` stay well-defined.
+CURRICULUM_MASK_NEG = -1e9
+
+
 def compute_broadcast_curriculum_mask(
     global_step: int,
     total_timesteps: int,
@@ -37,9 +44,9 @@ def compute_broadcast_curriculum_mask(
     """Return a logit mask for broadcast curriculum, or None when unneeded.
 
     During Phase 1 (``global_step < phase1_ratio * total_timesteps``), actions
-    0 and 1 (the non-broadcast actions) are masked to ``-inf`` so agents are
-    forced to broadcast.  During Phase 2 (remainder) no masking is applied and
-    the function returns ``None``.
+    0 and 1 (the non-broadcast actions) are masked to ``CURRICULUM_MASK_NEG``
+    so agents are forced to broadcast.  During Phase 2 (remainder) no masking
+    is applied and the function returns ``None``.
 
     The caller adds the returned tensor to raw logits before creating a
     ``Categorical`` or computing ``log_softmax``.
@@ -49,8 +56,8 @@ def compute_broadcast_curriculum_mask(
     if global_step >= phase1_ratio * total_timesteps:
         return None
     mask = torch.zeros(n_actions, device=device)
-    mask[0] = float("-inf")
-    mask[1] = float("-inf")
+    mask[0] = CURRICULUM_MASK_NEG
+    mask[1] = CURRICULUM_MASK_NEG
     return mask
 
 
@@ -200,7 +207,9 @@ def select_actions_batched(
     explore_mask = rng.random((n_envs, n_agents)) < float(epsilon)
     if np.any(explore_mask):
         if action_mask is not None:
-            valid = torch.isfinite(action_mask).cpu().numpy()
+            # Valid actions are those whose mask entry is 0; masked entries
+            # hold a large negative value (see CURRICULUM_MASK_NEG).
+            valid = (action_mask >= 0.0).cpu().numpy()
             valid_indices = np.where(valid)[0]
             random_actions = rng.choice(
                 valid_indices, size=int(explore_mask.sum()),
