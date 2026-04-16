@@ -16,6 +16,8 @@ AGE_COMM="${AGE_COMM:-0}"
 AGE_COMM_BITS="${AGE_COMM_BITS:-4}"
 STATE_COMM="${STATE_COMM:-0}"
 BROADCAST_PENALTY_ALPHA="${BROADCAST_PENALTY_ALPHA:-0.0}"
+BROADCAST_CURRICULUM="${BROADCAST_CURRICULUM:-0}"
+CURRICULUM_PHASE1_RATIO="${CURRICULUM_PHASE1_RATIO:-0.5}"
 # Set VOU_QUANTILE_EDGES=1 to auto-search the threshold and compute
 # equal-probability quantile bin edges instead of geometric bins.
 VOU_QUANTILE_EDGES="${VOU_QUANTILE_EDGES:-0}"
@@ -175,6 +177,21 @@ if [[ "${STATE_COMM}" == "1" ]]; then
   )
 fi
 
+# ------------------------------------------------------------------
+# Broadcast curriculum (opt-in, requires STATE_COMM=1)
+# ------------------------------------------------------------------
+curriculum_args=()
+if [[ "${BROADCAST_CURRICULUM}" == "1" ]]; then
+  if [[ "${STATE_COMM}" != "1" ]]; then
+    echo "BROADCAST_CURRICULUM=1 requires STATE_COMM=1" >&2
+    exit 1
+  fi
+  curriculum_args=(
+    --broadcast-curriculum
+    --curriculum-phase1-ratio "${CURRICULUM_PHASE1_RATIO}"
+  )
+fi
+
 # Single-stage training: config-defined reward, reward normalization off.
 run_one "algorithms.marl_happo" "happo" "happo" \
   --no-normalize-obs \
@@ -182,7 +199,8 @@ run_one "algorithms.marl_happo" "happo" "happo" \
   --layer-norm \
   "${hcomm_args[@]+${hcomm_args[@]}}" \
   "${age_comm_args[@]+${age_comm_args[@]}}" \
-  "${state_comm_args[@]+${state_comm_args[@]}}"
+  "${state_comm_args[@]+${state_comm_args[@]}}" \
+  "${curriculum_args[@]+${curriculum_args[@]}}"
 
 zip_path="${run_root}.zip"
 if command -v zip >/dev/null 2>&1; then
