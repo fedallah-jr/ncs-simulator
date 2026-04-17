@@ -17,6 +17,7 @@ AGE_COMM="${AGE_COMM:-0}"
 AGE_COMM_BITS="${AGE_COMM_BITS:-4}"
 STATE_COMM="${STATE_COMM:-0}"
 BROADCAST_PENALTY_ALPHA="${BROADCAST_PENALTY_ALPHA:-0.0}"
+OMIT_REWARD_ALPHA="${OMIT_REWARD_ALPHA:-0.0}"
 BROADCAST_CURRICULUM="${BROADCAST_CURRICULUM:-0}"
 CURRICULUM_PHASE1_RATIO="${CURRICULUM_PHASE1_RATIO:-0.5}"
 # Set VOU_QUANTILE_EDGES=1 to auto-search the threshold and compute
@@ -175,6 +176,7 @@ if [[ "${STATE_COMM}" == "1" ]]; then
   state_comm_args=(
     --state_comm
     --set "reward.broadcast_penalty_alpha=${BROADCAST_PENALTY_ALPHA}"
+    --set "reward.omit_reward_alpha=${OMIT_REWARD_ALPHA}"
   )
 fi
 

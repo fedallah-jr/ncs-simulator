@@ -42,7 +42,8 @@ The input config file is divided into sections; each key controls a specific asp
 - `comm_recent_window`: Short window (steps) used to count how many recent transmission attempts (`p>0`) an agent has initiated.
 - `comm_throughput_window`: Long window (steps) used to estimate per-agent throughput from ACKed packets and their delays.
 - `comm_penalty_alpha`: Scalar multiplier (`alpha`) used in the communication penalty `R_{a,comm} = -alpha * N_recent / T`, applied when an action uses the shared packet channel (`1` or `3`) and the network is not set to `perfect_communication`.
-- `broadcast_penalty_alpha`: Flat penalty applied when an agent chooses a broadcast action (`2` or `3`). Defaults to `0.0`.
+- `broadcast_penalty_alpha`: Flat penalty applied when an agent chooses a broadcast action (`2` or `3`). Defaults to `0.0`. Requires `observation.state_comm_enabled=true`.
+- `omit_reward_alpha`: Flat reward added when an agent chooses a non-broadcast action (`0` or `1`). Defaults to `0.0`. Equivalent to `broadcast_penalty_alpha` up to a per-step constant, but during a forced-broadcast curriculum phase it contributes `0` instead of a constant penalty, leaving Phase 1 rewards aligned with the unpenalized baseline. Requires `observation.state_comm_enabled=true`.
 - `normalize`: Explicit flag (default: `false`) for reward normalization in multi-agent runs. When `true`, running normalization scales the per-step reward.
 - `no_normalization_scale`: Scalar divisor applied to rewards when normalization is disabled (default `1.0`).
 - `reward_clip_min` / `reward_clip_max`: Optional bounds applied to rewards after scaling/normalization.

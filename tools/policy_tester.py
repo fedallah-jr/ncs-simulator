@@ -96,6 +96,7 @@ DEFAULT_EVAL_SEED_START = 100
 REWARD_COMPARISON_KEYS: Sequence[str] = (
     "comm_penalty_alpha",
     "broadcast_penalty_alpha",
+    "omit_reward_alpha",
     "simple_comm_penalty_alpha",
     "simple_freshness_decay",
     "comm_recent_window",
@@ -814,7 +815,7 @@ def _extract_env_signature(config: Dict[str, Any]) -> Dict[str, Any]:
         if key in config:
             signature[key] = _strip_non_dynamics_config_fields(config.get(key))
     reward_cfg = config.get("reward", {})
-    _REWARD_DEFAULTS = {"broadcast_penalty_alpha": 0.0}
+    _REWARD_DEFAULTS = {"broadcast_penalty_alpha": 0.0, "omit_reward_alpha": 0.0}
     signature["reward"] = _strip_non_dynamics_config_fields(
         {
             key: reward_cfg.get(key, _REWARD_DEFAULTS.get(key))

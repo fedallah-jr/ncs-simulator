@@ -31,6 +31,7 @@ class RewardDefinition:
     mode: str
     comm_penalty_alpha: float
     broadcast_penalty_alpha: float = 0.0
+    omit_reward_alpha: float = 0.0
     normalize: bool = False  # Explicit flag; normalization is applied only when True.
     normalizer: Optional[RunningRewardNormalizer] = None
     no_normalization_scale: float = 1.0
@@ -546,6 +547,7 @@ class NCS_Env(gym.Env):
                 "curr_error_sum": 0.0,
                 "comm_penalty_sum": 0.0,
                 "broadcast_penalty_sum": 0.0,
+                "omit_reward_sum": 0.0,
                 "count": 0.0,
             }
             for i in range(self.n_agents)
@@ -555,6 +557,7 @@ class NCS_Env(gym.Env):
             "curr_error": 0.0,
             "comm_penalty": 0.0,
             "broadcast_penalty": 0.0,
+            "omit_reward": 0.0,
             "kf_info_gain": 0.0,
             "kf_info_gain_m": 0.0,
             "kf_info_gain_s": 0.0,
@@ -1005,6 +1008,7 @@ class NCS_Env(gym.Env):
             combined_reward = reward_value
             combined_comm_penalty = components.get("comm_penalty", 0.0)
             combined_broadcast_penalty = components.get("broadcast_penalty", 0.0)
+            combined_omit_reward = components.get("omit_reward", 0.0)
             reward_components = components
 
             reward = float(combined_reward)
@@ -1016,6 +1020,7 @@ class NCS_Env(gym.Env):
             stats["curr_error_sum"] += float(curr_error)
             stats["comm_penalty_sum"] += float(combined_comm_penalty)
             stats["broadcast_penalty_sum"] += float(combined_broadcast_penalty)
+            stats["omit_reward_sum"] += float(combined_omit_reward)
             stats["count"] += 1
             self.last_errors[i] = curr_error
 
@@ -1258,6 +1263,15 @@ class NCS_Env(gym.Env):
         base_broadcast_penalty_alpha = float(
             reward_cfg.get("broadcast_penalty_alpha", 0.0)
         )
+        base_omit_reward_alpha = float(reward_cfg.get("omit_reward_alpha", 0.0))
+        if (
+            base_broadcast_penalty_alpha > 0.0 or base_omit_reward_alpha > 0.0
+        ) and not self.state_comm_enabled:
+            raise ValueError(
+                "reward.broadcast_penalty_alpha and reward.omit_reward_alpha "
+                "require observation.state_comm_enabled=true (broadcast actions "
+                "2/3 only exist in state_comm mode)."
+            )
         no_normalization_scale = reward_cfg.get("no_normalization_scale", 1.0)
         if no_normalization_scale is None:
             no_normalization_scale = 1.0
@@ -1272,6 +1286,7 @@ class NCS_Env(gym.Env):
             mode=str(base_mode),
             comm_penalty_alpha=base_comm_penalty_alpha,
             broadcast_penalty_alpha=base_broadcast_penalty_alpha,
+            omit_reward_alpha=base_omit_reward_alpha,
             normalize=base_normalize,
             normalizer=None,
             no_normalization_scale=no_normalization_scale,
@@ -1598,6 +1613,7 @@ class NCS_Env(gym.Env):
             "normalization_gamma": float(self.reward_normalization_gamma),
             "comm_penalty_alpha": float(definition.comm_penalty_alpha),
             "broadcast_penalty_alpha": float(definition.broadcast_penalty_alpha),
+            "omit_reward_alpha": float(definition.omit_reward_alpha),
             "state_cost_matrix": np.asarray(self.state_cost_matrix).tolist(),
             "comm_recent_window": int(self.comm_recent_window),
             "comm_throughput_window": int(self.comm_throughput_window),
@@ -1679,6 +1695,9 @@ class NCS_Env(gym.Env):
         broadcast_penalty = 0.0
         if action in (2, 3) and definition.broadcast_penalty_alpha > 0:
             broadcast_penalty = definition.broadcast_penalty_alpha
+        omit_reward = 0.0
+        if action in (0, 1) and definition.omit_reward_alpha > 0:
+            omit_reward = definition.omit_reward_alpha
 
         if definition.mode == "absolute":
             error_reward = -curr_error
@@ -1699,7 +1718,7 @@ class NCS_Env(gym.Env):
         else:
             raise ValueError(f"Unsupported reward mode: {definition.mode}")
 
-        reward_value = float(error_reward - comm_penalty - broadcast_penalty)
+        reward_value = float(error_reward - comm_penalty - broadcast_penalty + omit_reward)
 
         if apply_normalization:
             reward_value = self._normalize_reward_value(agent_idx, reward_value)
@@ -1708,6 +1727,7 @@ class NCS_Env(gym.Env):
             "curr_error": float(curr_error),
             "comm_penalty": float(comm_penalty),
             "broadcast_penalty": float(broadcast_penalty),
+            "omit_reward": float(omit_reward),
             "kf_info_gain": float(info_gain),
             "reward": reward_value,
         }
