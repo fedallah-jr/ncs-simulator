@@ -380,8 +380,14 @@ def evaluate_and_log(
     start_time: Optional[float] = None,
     total_timesteps: Optional[int] = None,
     action_mask: Optional[torch.Tensor] = None,
+    skip_best_update: bool = False,
 ) -> None:
-    """Run paired-seed evaluation, write CSV row, update best model, and print."""
+    """Run paired-seed evaluation, write CSV row, update best model, and print.
+
+    When ``skip_best_update`` is True the eval CSV/drop stats are still written
+    but ``best_model.pt`` is not touched — used during curriculum Phase 1 to
+    keep the saved checkpoint a Phase-2 model.
+    """
     from utils.marl.common import run_evaluation_vectorized_seeded
 
     if n_episodes <= 0:
@@ -486,9 +492,10 @@ def evaluate_and_log(
     eval_writer.writerow([global_step, mean_eval_reward, std_eval_reward])
     eval_f.flush()
 
-    best_model_tracker.update(
-        "eval_drop_ratio", -mean_drop_ratio, run_dir / "best_model.pt", save_checkpoint
-    )
+    if not skip_best_update:
+        best_model_tracker.update(
+            "eval_drop_ratio", -mean_drop_ratio, run_dir / "best_model.pt", save_checkpoint
+        )
 
     eta_str = ""
     if start_time is not None and total_timesteps is not None and global_step > 0:
@@ -525,6 +532,7 @@ def log_completed_episodes(
     episode_lengths: Optional[np.ndarray] = None,
     start_time: Optional[float] = None,
     total_timesteps: Optional[int] = None,
+    skip_best_update: bool = False,
 ) -> int:
     """Log completed episodes to CSV, update best train model, and print.
 
@@ -552,12 +560,13 @@ def log_completed_episodes(
         train_writer.writerow(row)
         train_f.flush()
 
-        best_model_tracker.update(
-            "train",
-            float(episode_reward_sums[env_idx]),
-            run_dir / "best_train_model.pt",
-            save_checkpoint,
-        )
+        if not skip_best_update:
+            best_model_tracker.update(
+                "train",
+                float(episode_reward_sums[env_idx]),
+                run_dir / "best_train_model.pt",
+                save_checkpoint,
+            )
 
         if episode % log_interval == 0:
             eta_str = ""

@@ -366,6 +366,7 @@ def main() -> None:
                 save_checkpoint=save_checkpoint, log_interval=args.log_interval,
                 algo_name="HASAC",
                 start_time=start_time, total_timesteps=args.total_timesteps,
+                skip_best_update=step_mask is not None,
             )
 
             if len(buffer) >= args.start_learning and vector_step % args.train_interval == 0:
@@ -389,6 +390,7 @@ def main() -> None:
                     eval_baseline=eval_baseline,
                     start_time=start_time, total_timesteps=args.total_timesteps,
                     action_mask=step_mask,
+                    skip_best_update=step_mask is not None,
                 )
                 eval_seed += args.n_eval_episodes
                 last_eval_step = global_step

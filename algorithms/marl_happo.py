@@ -369,6 +369,7 @@ def main() -> None:
                     algo_name="HAPPO",
                     episode_lengths=episode_lengths,
                     start_time=start_time, total_timesteps=args.total_timesteps,
+                    skip_best_update=rollout_mask is not None,
                 )
 
                 obs_raw = next_obs_raw
@@ -387,6 +388,7 @@ def main() -> None:
                         action_mask=rollout_mask,
                         eval_baseline=eval_baseline,
                         start_time=start_time, total_timesteps=args.total_timesteps,
+                        skip_best_update=rollout_mask is not None,
                     )
                     eval_seed += args.n_eval_episodes
                     last_eval_step = global_step
