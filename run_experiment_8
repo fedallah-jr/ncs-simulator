@@ -15,6 +15,7 @@ TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-15000000}"
 N_ENVS="${N_ENVS:-8}"
 EPS_DECAY_STEPS="${EPS_DECAY_STEPS:-$((TOTAL_TIMESTEPS * 60 / 100))}"
 MIXER="${MIXER:-qmix}"
+COMM_EMBED_DIM="${COMM_EMBED_DIM:-3}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_root="${OUTPUT_ROOT}/exp_8_ndq_${MIXER}_${timestamp}_seed${SEED}"
@@ -119,7 +120,7 @@ run_one "algorithms.marl_ndq" "marl_ndq" "marl_ndq${mixer_suffix}" \
   --epsilon-decay-steps "${EPS_DECAY_STEPS}" \
   --no-normalize-obs \
   --double-q \
-  --comm-embed-dim 3 \
+  --comm-embed-dim "${COMM_EMBED_DIM}" \
   "${mixer_args[@]+${mixer_args[@]}}"
 
 zip_path="${run_root}.zip"
