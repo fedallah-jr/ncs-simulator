@@ -604,8 +604,21 @@ def ndq_rnn_forward_batched(
     *,
     n_actions: int,
     comm_embed_dim: int,
+    cut_mu_thres: float = 0.0,
+    comm_stats: Optional[dict] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Run one NDQ recurrent step over a vectorized batch."""
+    """Run one NDQ recurrent step over a vectorized batch.
+
+    When ``cut_mu_thres > 0``, message dimensions with ``|mu| < thres`` are
+    zeroed before routing — the inference-time gating from the NDQ paper
+    (``_cut_mu`` in ``cate_broadcast_comm_controller_full.py``). Self-slots
+    (sender i's own receiver slot) are always considered "not sent" since
+    they are overwritten during routing.
+
+    If ``comm_stats`` is provided, accumulates four integer keys:
+    ``total_dims``, ``dropped_dims``, ``total_messages``, ``silent_messages``
+    — counted over off-diagonal (sender, receiver, embed) triples.
+    """
     if obs.ndim != 3:
         raise ValueError("obs must have shape (B, N, obs_dim)")
     if prev_action.shape != obs.shape[:2]:
@@ -626,6 +639,30 @@ def ndq_rnn_forward_batched(
     mu, _sigma = comm_encoder(base_flat)
 
     m_sample = mu + torch.randn_like(mu)
+    if cut_mu_thres > 0.0 or comm_stats is not None:
+        mu_grid = mu.view(batch_size, n_agents, n_agents, comm_embed_dim)
+        diag = torch.eye(n_agents, device=mu.device, dtype=torch.bool)
+        off_diag = ~diag
+        if cut_mu_thres > 0.0:
+            keep_dim = mu_grid.abs() >= float(cut_mu_thres)
+            m_grid = m_sample.view(batch_size, n_agents, n_agents, comm_embed_dim)
+            m_grid = m_grid * keep_dim.to(m_sample.dtype)
+            m_sample = m_grid.view(batch_size * n_agents, n_agents * comm_embed_dim)
+        if comm_stats is not None:
+            if cut_mu_thres > 0.0:
+                kept = keep_dim
+            else:
+                kept = torch.ones_like(mu_grid, dtype=torch.bool)
+            off_mask = off_diag.view(1, n_agents, n_agents, 1)
+            total_dims = int(off_mask.expand_as(kept).sum().item())
+            dropped_dims = int(((~kept) & off_mask).sum().item())
+            pair_any_kept = (kept & off_mask).any(dim=-1)
+            total_messages = int(off_diag.sum().item()) * batch_size
+            silent_messages = int((~pair_any_kept & off_diag.view(1, n_agents, n_agents)).sum().item())
+            comm_stats["total_dims"] = comm_stats.get("total_dims", 0) + total_dims
+            comm_stats["dropped_dims"] = comm_stats.get("dropped_dims", 0) + dropped_dims
+            comm_stats["total_messages"] = comm_stats.get("total_messages", 0) + total_messages
+            comm_stats["silent_messages"] = comm_stats.get("silent_messages", 0) + silent_messages
     messages = m_sample.view(batch_size, n_agents, n_agents * comm_embed_dim)
     recv_msg = route_ndq_messages(messages, n_agents, comm_embed_dim)
     recv_flat = recv_msg.reshape(batch_size * n_agents, -1)

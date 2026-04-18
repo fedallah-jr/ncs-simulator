@@ -178,6 +178,13 @@ _SUMMARY_FIELDS_CORE: Tuple[str, ...] = (
     "mean_reward_per_step",
     "std_reward_per_step",
     "completion_rate",
+    "comm_dims_sent_frac",
+    "comm_dims_dropped_frac",
+    "comm_msg_silent_frac",
+    "comm_dims_total",
+    "comm_dims_dropped",
+    "comm_messages_total",
+    "comm_messages_silent",
 )
 
 _SUMMARY_FIELDS_NETWORK: Tuple[str, ...] = (
@@ -240,6 +247,9 @@ _LEADERBOARD_FIELDS: Tuple[str, ...] = (
     "mean_reward_per_step",
     "std_reward_per_step",
     "completion_rate",
+    "comm_dims_sent_frac",
+    "comm_dims_dropped_frac",
+    "comm_msg_silent_frac",
 )
 
 _NETWORK_LEADERBOARD_FIELDS: Tuple[str, ...] = (
@@ -280,6 +290,7 @@ class PolicySpec:
     label: str
     policy_type: str
     policy_path: str
+    ndq_cut_mu_thres: float = 0.0
 
 
 @dataclass
@@ -308,6 +319,10 @@ class EpisodeResult:
     mac_ack_sent: int
     mac_ack_collisions: int
     ack_timeouts: int
+    comm_total_dims: int = 0
+    comm_dropped_dims: int = 0
+    comm_total_messages: int = 0
+    comm_silent_messages: int = 0
 
 
 @dataclass(frozen=True)
@@ -630,7 +645,10 @@ def _load_policy(
     if policy_type in {"es", "openai_es"}:
         return load_es_policy(spec.policy_path, env)
     if policy_type == "marl_torch":
-        return load_marl_torch_multi_agent_policy(spec.policy_path, env)
+        return load_marl_torch_multi_agent_policy(
+            spec.policy_path, env,
+            ndq_cut_mu_thres=float(spec.ndq_cut_mu_thres),
+        )
     raise ValueError(f"Unknown policy type: {spec.policy_type}")
 
 
@@ -697,6 +715,16 @@ def _run_multi_agent_episode(
     ]
     mean_true_goodput_kbps = true_goodput_sum / float(max(1, true_goodput_steps))
     network_totals = _extract_network_totals(last_info)
+    comm_stats = getattr(policy, "comm_stats", None)
+    if isinstance(comm_stats, dict):
+        comm_kwargs = {
+            "comm_total_dims": int(comm_stats.get("total_dims", 0)),
+            "comm_dropped_dims": int(comm_stats.get("dropped_dims", 0)),
+            "comm_total_messages": int(comm_stats.get("total_messages", 0)),
+            "comm_silent_messages": int(comm_stats.get("silent_messages", 0)),
+        }
+    else:
+        comm_kwargs = {}
     return EpisodeResult(
         policy_label="",
         policy_type="",
@@ -714,6 +742,7 @@ def _run_multi_agent_episode(
         n_agents=n_agents,
         episode_length=episode_length,
         **network_totals,
+        **comm_kwargs,
     )
 
 
@@ -721,6 +750,41 @@ def _mean_std(arr: np.ndarray, has_data: bool) -> Tuple[float, float]:
     if not has_data:
         return 0.0, 0.0
     return float(np.mean(arr)), float(np.std(arr))
+
+
+def _summarize_comm_stats(results: List[EpisodeResult]) -> Dict[str, float]:
+    """Aggregate NDQ comm gating counts into per-row summary fields.
+
+    Returns NaNs for policies that never emitted comm stats (non-NDQ runs),
+    so a single leaderboard can mix communicating and non-communicating rows.
+    """
+    total_dims = sum(int(r.comm_total_dims) for r in results)
+    dropped_dims = sum(int(r.comm_dropped_dims) for r in results)
+    total_messages = sum(int(r.comm_total_messages) for r in results)
+    silent_messages = sum(int(r.comm_silent_messages) for r in results)
+    if total_dims == 0:
+        return {
+            "comm_dims_dropped_frac": float("nan"),
+            "comm_dims_sent_frac": float("nan"),
+            "comm_msg_silent_frac": float("nan"),
+            "comm_dims_total": 0,
+            "comm_dims_dropped": 0,
+            "comm_messages_total": 0,
+            "comm_messages_silent": 0,
+        }
+    dropped_frac = float(dropped_dims) / float(total_dims)
+    silent_frac = (
+        float(silent_messages) / float(total_messages) if total_messages > 0 else float("nan")
+    )
+    return {
+        "comm_dims_dropped_frac": dropped_frac,
+        "comm_dims_sent_frac": 1.0 - dropped_frac,
+        "comm_msg_silent_frac": silent_frac,
+        "comm_dims_total": int(total_dims),
+        "comm_dims_dropped": int(dropped_dims),
+        "comm_messages_total": int(total_messages),
+        "comm_messages_silent": int(silent_messages),
+    }
 
 
 def _summarize_results(results: List[EpisodeResult]) -> Dict[str, float]:
@@ -771,6 +835,7 @@ def _summarize_results(results: List[EpisodeResult]) -> Dict[str, float]:
     else:
         mean_rates = []
     out["mean_state_send_rates"] = json.dumps([round(r, 4) for r in mean_rates])
+    out.update(_summarize_comm_stats(results))
     return out
 
 
@@ -1532,6 +1597,16 @@ def main() -> int:
         default=1e-6,
         help="Tolerance for considering rewards as matching (default: 1e-6)",
     )
+    parser.add_argument(
+        "--ndq-cut-mu-thres",
+        type=float,
+        default=0.0,
+        help=(
+            "NDQ only: zero message dimensions with |mu| < THRES at inference "
+            "time (paper eq. _cut_mu). Non-NDQ checkpoints are unaffected. "
+            "Default 0.0 disables gating."
+        ),
+    )
     add_set_override_argument(parser)
     args = parser.parse_args()
 
@@ -1608,7 +1683,12 @@ def main() -> int:
             target_label = args.policy_label or _sanitize_filename(
                 Path(args.policy).name if policy_type != "heuristic" else args.policy
             )
-            policy_specs.append(PolicySpec(label=target_label, policy_type=policy_type, policy_path=args.policy))
+            policy_specs.append(PolicySpec(
+                label=target_label,
+                policy_type=policy_type,
+                policy_path=args.policy,
+                ndq_cut_mu_thres=float(args.ndq_cut_mu_thres),
+            ))
 
         for heuristic_name in HEURISTIC_POLICY_NAMES:
             policy_specs.append(
@@ -1737,6 +1817,7 @@ def main() -> int:
                     label=target_label,
                     policy_type=policy_type,
                     policy_path=args.policy,
+                    ndq_cut_mu_thres=float(args.ndq_cut_mu_thres),
                 )
                 original_policy = _load_policy(target_spec, env_for_loading, seed=args.replay_recording_seed)
             finally:
@@ -1910,7 +1991,12 @@ def main() -> int:
             policy_types.append(policy_type)
             label = f"{run.name}/{checkpoint_name}"
             specs.append(
-                (checkpoint_name, PolicySpec(label=label, policy_type=policy_type, policy_path=str(model_path)))
+                (checkpoint_name, PolicySpec(
+                    label=label,
+                    policy_type=policy_type,
+                    policy_path=str(model_path),
+                    ndq_cut_mu_thres=float(args.ndq_cut_mu_thres),
+                ))
             )
         if specs:
             model_specs_by_run[run.name] = specs

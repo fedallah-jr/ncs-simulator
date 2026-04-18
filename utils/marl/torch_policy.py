@@ -340,6 +340,7 @@ class MARLNDQTorchPolicy:
         comm_embed_dim: int,
         *,
         device: Optional[torch.device] = None,
+        cut_mu_thres: float = 0.0,
     ) -> None:
         self.agent = agent
         self.comm_encoder = comm_encoder
@@ -348,6 +349,13 @@ class MARLNDQTorchPolicy:
         self.device = device or torch.device("cpu")
         self.agent.to(self.device)
         self.comm_encoder.to(self.device)
+        self.cut_mu_thres = float(cut_mu_thres)
+        self.comm_stats: Dict[str, int] = {
+            "total_dims": 0,
+            "dropped_dims": 0,
+            "total_messages": 0,
+            "silent_messages": 0,
+        }
 
         n_agents = metadata.n_agents
         self.hidden = agent.init_hidden(n_agents).to(self.device)
@@ -358,6 +366,12 @@ class MARLNDQTorchPolicy:
     def reset(self) -> None:
         self.hidden.zero_()
         self.prev_action.fill_(self.agent.n_actions)
+        self.comm_stats = {
+            "total_dims": 0,
+            "dropped_dims": 0,
+            "total_messages": 0,
+            "silent_messages": 0,
+        }
 
     @torch.no_grad()
     def act(self, obs_dict: Mapping[str, Any]) -> Dict[str, int]:
@@ -374,6 +388,8 @@ class MARLNDQTorchPolicy:
             self.hidden,
             n_actions=self.metadata.n_actions,
             comm_embed_dim=self.comm_embed_dim,
+            cut_mu_thres=self.cut_mu_thres,
+            comm_stats=self.comm_stats,
         )
         actions = q_values.squeeze(0).argmax(dim=-1).cpu().numpy().astype(np.int64)
         self.hidden = new_hidden

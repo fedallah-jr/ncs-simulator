@@ -307,7 +307,12 @@ def load_es_policy(model_path: str, env: NCS_Env):
     )
 
 
-def load_marl_torch_multi_agent_policy(model_path: str, env: NCS_Env):
+def load_marl_torch_multi_agent_policy(
+    model_path: str,
+    env: NCS_Env,
+    *,
+    ndq_cut_mu_thres: float = 0.0,
+):
     import torch
 
     # Check if this is a DIAL checkpoint
@@ -338,7 +343,9 @@ def load_marl_torch_multi_agent_policy(model_path: str, env: NCS_Env):
         if env_obs_dim != meta.obs_dim:
             raise ValueError(f"Env obs_dim={env_obs_dim} does not match checkpoint obs_dim={meta.obs_dim}")
         return MARLNDQTorchPolicy(
-            agent, comm_encoder, meta, comm_embed_dim, device=torch.device("cpu"),
+            agent, comm_encoder, meta, comm_embed_dim,
+            device=torch.device("cpu"),
+            cut_mu_thres=float(ndq_cut_mu_thres),
         )
 
     from utils.marl.torch_policy import MARLTorchMultiAgentPolicy, load_marl_torch_agents_from_checkpoint
