@@ -51,6 +51,7 @@ def parse_args() -> argparse.Namespace:
     add_qmix_args(parser)
     parser.add_argument("--n-step", type=int, default=3,
                         help="N-step returns horizon (1 = standard TD, >1 = n-step).")
+    parser.set_defaults(hidden_dims=[128, 128], activation="relu")
     return parser.parse_args()
 
 
