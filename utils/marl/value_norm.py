@@ -85,25 +85,10 @@ class ValueNorm:
         }
 
     def load_state_dict(self, d: dict) -> None:
-        if "beta" in d:
-            self.beta = float(d["beta"])
-        elif "step" in d:
-            # Legacy checkpoints did not persist beta and defaulted to 0.999.
-            self.beta = 0.999
-        if "per_element_update" in d:
-            self.per_element_update = bool(d["per_element_update"])
-
+        self.beta = float(d["beta"])
+        self.per_element_update = bool(d["per_element_update"])
         self.mean = d["mean"].to(device=self.device, dtype=torch.float32)
         self.mean_sq = d["mean_sq"].to(device=self.device, dtype=torch.float32)
-        if "debiasing_term" in d:
-            self.debiasing_term = d["debiasing_term"].to(
-                device=self.device, dtype=torch.float32
-            )
-        elif "step" in d:
-            step = int(d["step"])
-            debias = 1.0 - self.beta ** step
-            self.debiasing_term = torch.tensor(
-                debias, dtype=torch.float32, device=self.device
-            )
-        else:
-            raise KeyError("ValueNorm state_dict must include debiasing_term or step")
+        self.debiasing_term = d["debiasing_term"].to(
+            device=self.device, dtype=torch.float32
+        )

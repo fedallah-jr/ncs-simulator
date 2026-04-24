@@ -78,8 +78,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-update-steps", type=int, default=100,
                         help="Target net sync every N optimizer steps (reference: step_target)")
     parser.add_argument("--momentum", type=float, default=0.05, help="RMSprop momentum")
-    parser.add_argument("--use-vdn-mixer", action="store_true",
-                        help="(legacy) Equivalent to --mixer vdn")
     parser.add_argument("--mixer", type=str, default="none", choices=["none", "vdn", "qmix"],
                         help="Value decomposition mixer for joint TD loss (default: none = per-agent IQL)")
     parser.add_argument("--qmix-mixing-hidden-dim", type=int, default=32,
@@ -397,11 +395,6 @@ def main() -> None:
 
     dru = DRU(sigma=args.dru_sigma)
 
-    # Resolve mixer: --use-vdn-mixer (legacy) or --mixer vdn/qmix
-    mixer_type = args.mixer
-    if args.use_vdn_mixer and mixer_type == "none":
-        mixer_type = "vdn"
-
     learner = MARLDIALLearner(
         agent=agent,
         n_agents=n_agents,
@@ -415,7 +408,7 @@ def main() -> None:
         device=device,
         momentum=args.momentum,
         optimizer_type=args.optimizer,
-        mixer_type=mixer_type,
+        mixer_type=args.mixer,
         state_dim=state_dim,
         qmix_mixing_hidden_dim=args.qmix_mixing_hidden_dim,
         qmix_hypernet_hidden_dim=args.qmix_hypernet_hidden_dim,

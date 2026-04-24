@@ -505,7 +505,6 @@ class MARLDIALLearner:
         device: Optional[torch.device] = None,
         momentum: float = 0.05,
         optimizer_type: str = "rmsprop",
-        use_vdn_mixer: bool = False,
         mixer_type: str = "none",
         state_dim: int = 0,
         qmix_mixing_hidden_dim: int = 32,
@@ -530,9 +529,6 @@ class MARLDIALLearner:
         self.target_update_steps = int(target_update_steps)
         self.grad_clip_norm = grad_clip_norm
 
-        # Resolve mixer type: --use-vdn-mixer (legacy) or --mixer vdn/qmix
-        if use_vdn_mixer and mixer_type == "none":
-            mixer_type = "vdn"
         self.mixer_type = mixer_type
 
         self.device = device if device is not None else torch.device("cpu")
@@ -1623,11 +1619,7 @@ class HASACLearner:
         self.critic_optimizer.load_state_dict(d["critic_optimizer"])
         for i, val in enumerate(d["log_alphas"]):
             self.log_alphas[i].data.fill_(float(val))
-        if "log_alpha_critic" in d:
-            self.log_alpha_critic.data.fill_(float(d["log_alpha_critic"]))
-        elif len(d.get("log_alphas", [])) > 0:
-            # Backward compatibility for old checkpoints without critic alpha state.
-            self.log_alpha_critic.data.fill_(float(d["log_alphas"][0]))
+        self.log_alpha_critic.data.fill_(float(d["log_alpha_critic"]))
         self.train_steps = int(d["train_steps"])
         if self.auto_alpha and "alpha_optimizers" in d:
             for i, opt in enumerate(self.alpha_optimizers):

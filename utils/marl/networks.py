@@ -825,29 +825,6 @@ class TwinQNetwork(nn.Module):
             x = self.q1_feature_norm_layer(x)
         return self.q1(x).squeeze(-1)
 
-    def load_state_dict(self, state_dict, strict: bool = True):
-        """Load current checkpoints and older ones with a shared input LayerNorm."""
-        if self.q1_feature_norm_layer is not None and self.q2_feature_norm_layer is not None:
-            legacy_weight = state_dict.get("feature_norm_layer.weight")
-            legacy_bias = state_dict.get("feature_norm_layer.bias")
-            if legacy_weight is not None and legacy_bias is not None:
-                state_dict = dict(state_dict)
-                state_dict.pop("feature_norm_layer.weight", None)
-                state_dict.pop("feature_norm_layer.bias", None)
-                state_dict.setdefault(
-                    "q1_feature_norm_layer.weight", legacy_weight.clone()
-                )
-                state_dict.setdefault(
-                    "q1_feature_norm_layer.bias", legacy_bias.clone()
-                )
-                state_dict.setdefault(
-                    "q2_feature_norm_layer.weight", legacy_weight.clone()
-                )
-                state_dict.setdefault(
-                    "q2_feature_norm_layer.bias", legacy_bias.clone()
-                )
-        return super().load_state_dict(state_dict, strict=strict)
-
 
 class QPLEXSIWeight(nn.Module):
     def __init__(

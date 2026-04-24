@@ -324,7 +324,7 @@ class MARLReplayBuffer:
                                    e_done, e_st, e_nst, e_gamma_n)
             return
 
-        # Standard 1-step path (backward compatible)
+        # Standard 1-step path
         idx = self._ptr
         end = idx + batch_size
         gamma_n_arr = np.full((batch_size,), self.gamma, dtype=np.float32)
@@ -389,11 +389,7 @@ class MARLReplayBuffer:
         self._dones[:n] = d["dones"][:n]
         self._states[:n] = d["states"][:n]
         self._next_states[:n] = d["next_states"][:n]
-        # Backward compat: old checkpoints won't have gamma_n
-        if "gamma_n" in d:
-            self._gamma_n[:n] = d["gamma_n"][:n]
-        else:
-            self._gamma_n[:n] = self.gamma
+        self._gamma_n[:n] = d["gamma_n"][:n]
         self._ptr = int(d["_ptr"])
         self._size = n
         # Restore NStepHelper if present

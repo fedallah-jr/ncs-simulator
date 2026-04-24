@@ -74,39 +74,6 @@ def compute_discrete_lqr_solution(
     return K, P
 
 
-def compute_discrete_lqr_gain(
-    A: np.ndarray,
-    B: np.ndarray,
-    Q: np.ndarray,
-    R: np.ndarray,
-) -> np.ndarray:
-    """
-    Compute the optimal LQR gain matrix using scipy's DARE solver.
-
-    Solves the discrete-time algebraic Riccati equation (DARE) and computes
-    the optimal feedback gain:
-        K = (R + B^T P B)^{-1} (B^T P A)
-
-    Parameters
-    ----------
-    A : np.ndarray
-        State transition matrix
-    B : np.ndarray
-        Control input matrix
-    Q : np.ndarray
-        State cost matrix
-    R : np.ndarray
-        Control cost matrix
-
-    Returns
-    -------
-    K : np.ndarray
-        Optimal LQR feedback gain matrix
-    """
-    K, _ = compute_discrete_lqr_solution(A, B, Q, R)
-    return K
-
-
 def compute_finite_horizon_lqr_solution(
     A: np.ndarray,
     B: np.ndarray,
@@ -178,23 +145,6 @@ def compute_finite_horizon_lqr_solution(
     costs.reverse()
 
     return gains, costs
-
-
-def compute_finite_horizon_lqr_gains(
-    A: np.ndarray,
-    B: np.ndarray,
-    Q: np.ndarray,
-    R: np.ndarray,
-    horizon: int,
-) -> List[np.ndarray]:
-    """
-    Compute finite-horizon LQR gains using backward dynamic Riccati recursion.
-
-    Solves the discrete-time dynamic Riccati equation (DRE) backward from
-    terminal time k=N to k=0.
-    """
-    gains, _ = compute_finite_horizon_lqr_solution(A, B, Q, R, horizon)
-    return gains
 
 
 class KalmanStateTracker:
@@ -314,8 +264,7 @@ class Controller:
         # Process noise covariance
         self.kf.Q = process_noise_cov.copy()
 
-        # Measurement noise covariance
-        # Defaults to zero (perfect measurements) for backward compatibility.
+        # Measurement noise covariance (defaults to zero = perfect measurements).
         if measurement_noise_cov is None:
             self.kf.R = np.zeros((state_dim, state_dim))
         else:

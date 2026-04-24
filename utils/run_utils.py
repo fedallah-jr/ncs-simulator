@@ -38,7 +38,7 @@ def save_config_with_hyperparameters(
     algorithm: str,
     hyperparams: Mapping[str, Any],
     *,
-    resolved_config: Optional[Mapping[str, Any]] = None,
+    resolved_config: Mapping[str, Any],
     set_overrides: Optional[Sequence[str]] = None,
 ) -> None:
     """
@@ -52,30 +52,16 @@ def save_config_with_hyperparameters(
         config_path: Path to the original config file (or None for default)
         algorithm: Algorithm name (e.g., 'iql', 'mappo')
         hyperparams: Dictionary of hyperparameters for this run
-        resolved_config: Effective config used by training (for example, after
-            applying CLI ``--set`` overrides). If omitted, the config is loaded
-            from ``config_path``.
+        resolved_config: Effective config used by training (after applying CLI
+            ``--set`` overrides).
         set_overrides: Raw ``--set key=value`` entries applied for this run.
             Stored in ``training_run`` metadata for traceability.
     """
-    from ncs_env.config import load_config, DEFAULT_CONFIG_PATH
+    from ncs_env.config import DEFAULT_CONFIG_PATH
     import json
 
-    # Load the effective config.
     resolved_config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
-    if resolved_config is not None:
-        config = copy.deepcopy(dict(resolved_config))
-    else:
-        config = load_config(str(resolved_config_path))
-
-        # Backward-compatible fallback: apply --set overrides if provided and
-        # caller did not pass a pre-resolved config.
-        if set_overrides:
-            from tools._common import deep_merge, parse_set_overrides
-
-            overrides = parse_set_overrides(list(set_overrides))
-            if overrides:
-                deep_merge(config, overrides)
+    config = copy.deepcopy(dict(resolved_config))
 
     output_path = run_dir / "config.json"
 
