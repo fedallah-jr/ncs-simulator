@@ -351,6 +351,7 @@ def main() -> None:
         episode_length=args.episode_length,
         config_path_str=config_path_str,
         seed=args.seed,
+        global_state_enabled=True,
         shared_reward_normalizer=shared_reward_normalizer,
         observation_override=observation_override,
         network_override=network_override,
@@ -363,6 +364,7 @@ def main() -> None:
         episode_length=args.episode_length,
         config_path_str=config_path_str,
         seed=args.seed,
+        global_state_enabled=True,
         observation_override=observation_override,
         reward_override=eval_reward_override,
         termination_override=eval_termination_override,
@@ -374,6 +376,15 @@ def main() -> None:
     obs_normalizer = create_obs_normalizer(
         obs_dim, args.normalize_obs, args.obs_norm_clip, args.obs_norm_eps,
     )
+
+    # Reset once up front so we can derive state_dim from the env's global_state
+    # channel. The obs/state arrays are reused as the first training step's inputs.
+    obs_dict, info = env.reset(seed=env_seeds)
+    obs_raw = stack_vector_obs(obs_dict, n_agents)
+    global_state_raw = np.asarray(info.get("global_state"), dtype=np.float32)
+    if global_state_raw.ndim != 2:
+        raise ValueError("global_state must have shape (n_envs, state_dim)")
+    state_dim = int(global_state_raw.shape[-1])
 
     agent = DialRNNAgent(
         obs_dim=obs_dim,
@@ -405,7 +416,7 @@ def main() -> None:
         momentum=args.momentum,
         optimizer_type=args.optimizer,
         mixer_type=mixer_type,
-        obs_dim=obs_dim,
+        state_dim=state_dim,
         qmix_mixing_hidden_dim=args.qmix_mixing_hidden_dim,
         qmix_hypernet_hidden_dim=args.qmix_hypernet_hidden_dim,
         td_lambda=args.td_lambda,
@@ -464,8 +475,8 @@ def main() -> None:
             train_writer.writerow(["episode", "reward_sum", "epsilon", "steps"])
             eval_writer.writerow(["step", "mean_reward", "std_reward"])
 
-        obs_dict, _info = env.reset(seed=env_seeds)
-        obs_raw = stack_vector_obs(obs_dict, n_agents)
+        # obs_raw / global_state_raw were populated by the earlier reset used
+        # to derive state_dim; reuse them as the first step's inputs.
         episode_reward_sums = np.zeros((args.n_envs,), dtype=np.float32)
         start_time = time.time()
 
@@ -487,6 +498,7 @@ def main() -> None:
                 env=env,
                 agent=learner.agent,
                 obs_raw=obs_raw,
+                global_state_raw=global_state_raw,
                 obs_normalizer=obs_normalizer,
                 global_step=global_step,
                 epsilon_start=args.epsilon_start,
@@ -509,6 +521,7 @@ def main() -> None:
             team_rewards = step_result.rewards_arr.sum(axis=1)
             episode_reward_sums += team_rewards
             obs_raw = step_result.next_obs_raw
+            global_state_raw = step_result.next_global_state_raw
             global_step += args.n_envs
             vector_step += 1
 

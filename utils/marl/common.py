@@ -609,6 +609,7 @@ class DialRNNStepResult(NamedTuple):
     epsilon: float
     actions: np.ndarray
     next_obs_raw: np.ndarray
+    next_global_state_raw: np.ndarray
     rewards_arr: np.ndarray
     terminated: np.ndarray
     done_reset: np.ndarray
@@ -621,6 +622,7 @@ class NDQRNNStepResult(NamedTuple):
     epsilon: float
     actions: np.ndarray
     next_obs_raw: np.ndarray
+    next_global_state_raw: np.ndarray
     rewards_arr: np.ndarray
     terminated: np.ndarray
     done_reset: np.ndarray
@@ -672,6 +674,7 @@ def dial_rnn_collect_transition(
     env: Any,
     agent: "DialRNNAgent",
     obs_raw: np.ndarray,
+    global_state_raw: np.ndarray,
     obs_normalizer: Optional[RunningObsNormalizer],
     global_step: int,
     epsilon_start: float,
@@ -721,30 +724,37 @@ def dial_rnn_collect_transition(
     action_dict = {f"agent_{i}": actions[:, i] for i in range(n_agents)}
     next_obs_dict, rewards_arr, terminated, truncated, infos = env.step(action_dict)
     next_obs_raw = stack_vector_obs(next_obs_dict, n_agents)
+    next_global_state_raw = np.asarray(infos.get("global_state"), dtype=np.float32)
+    if next_global_state_raw.ndim != 2:
+        raise ValueError("global_state must have shape (n_envs, state_dim)")
 
     terminated_any = np.asarray(terminated, dtype=np.bool_)
     truncated_any = np.asarray(truncated, dtype=np.bool_)
     done_reset = np.logical_or(terminated_any, truncated_any)
 
-    next_obs_for_buffer, _ = patch_autoreset_final_obs(
+    next_obs_for_buffer, next_state_for_buffer = patch_autoreset_final_obs(
         next_obs_raw, infos, done_reset, n_agents,
+        next_global_state_raw=next_global_state_raw,
     )
+    if next_state_for_buffer is None:
+        next_state_for_buffer = next_global_state_raw
 
     rewards_np = np.asarray(rewards_arr, dtype=np.float32)
     team_rewards = rewards_np.sum(axis=1, keepdims=True)
     rewards_team = np.repeat(team_rewards, n_agents, axis=1).astype(np.float32)
 
     for e in range(n_envs):
-        transition = {
+        collector.add(e, {
             "obs": obs_raw[e],
             "actions": actions[e],
             "rewards": rewards_team[e],
             "next_obs": next_obs_for_buffer[e],
+            "state": global_state_raw[e],
+            "next_state": next_state_for_buffer[e],
             "done": float(terminated_any[e]),
             "reset": bool(done_reset[e]),
             "dru_noise": dru_noise_np[e],
-        }
-        collector.add(e, transition)
+        })
 
     # Update state
     prev_msg_logits[:] = new_msg_logits
@@ -766,6 +776,7 @@ def dial_rnn_collect_transition(
         epsilon=eps,
         actions=actions,
         next_obs_raw=next_obs_raw,
+        next_global_state_raw=next_global_state_raw,
         rewards_arr=rewards_np,
         terminated=terminated_any,
         done_reset=done_reset,
@@ -780,6 +791,7 @@ def ndq_rnn_collect_transition(
     agent: NDQRNNAgent,
     comm_encoder: NDQCommEncoder,
     obs_raw: np.ndarray,
+    global_state_raw: np.ndarray,
     obs_normalizer: Optional[RunningObsNormalizer],
     global_step: int,
     epsilon_start: float,
@@ -795,7 +807,13 @@ def ndq_rnn_collect_transition(
     hidden_states: torch.Tensor,
     collector: Any,
 ) -> NDQRNNStepResult:
-    """Collect a single vectorized recurrent NDQ transition."""
+    """Collect a single vectorized recurrent NDQ transition.
+
+    ``global_state_raw`` is the env's global state at step ``t``; the next
+    state is pulled from ``infos["global_state"]`` and patched through
+    :func:`patch_autoreset_final_obs` so episode boundaries carry the true
+    terminal state.
+    """
     if obs_normalizer is not None:
         obs = obs_normalizer.normalize(obs_raw, update=True)
     else:
@@ -827,14 +845,20 @@ def ndq_rnn_collect_transition(
     action_dict = {f"agent_{i}": actions[:, i] for i in range(n_agents)}
     next_obs_dict, rewards_arr, terminated, truncated, infos = env.step(action_dict)
     next_obs_raw = stack_vector_obs(next_obs_dict, n_agents)
+    next_global_state_raw = np.asarray(infos.get("global_state"), dtype=np.float32)
+    if next_global_state_raw.ndim != 2:
+        raise ValueError("global_state must have shape (n_envs, state_dim)")
 
     terminated_any = np.asarray(terminated, dtype=np.bool_)
     truncated_any = np.asarray(truncated, dtype=np.bool_)
     done_reset = np.logical_or(terminated_any, truncated_any)
 
-    next_obs_for_buffer, _ = patch_autoreset_final_obs(
+    next_obs_for_buffer, next_state_for_buffer = patch_autoreset_final_obs(
         next_obs_raw, infos, done_reset, n_agents,
+        next_global_state_raw=next_global_state_raw,
     )
+    if next_state_for_buffer is None:
+        next_state_for_buffer = next_global_state_raw
 
     rewards_np = np.asarray(rewards_arr, dtype=np.float32)
     team_rewards = rewards_np.sum(axis=1, keepdims=True)
@@ -846,6 +870,8 @@ def ndq_rnn_collect_transition(
             "actions": actions[env_idx],
             "rewards": rewards_team[env_idx],
             "next_obs": next_obs_for_buffer[env_idx],
+            "state": global_state_raw[env_idx],
+            "next_state": next_state_for_buffer[env_idx],
             "done": float(terminated_any[env_idx]),
             "reset": bool(done_reset[env_idx]),
         })
@@ -864,6 +890,7 @@ def ndq_rnn_collect_transition(
         epsilon=eps,
         actions=actions,
         next_obs_raw=next_obs_raw,
+        next_global_state_raw=next_global_state_raw,
         rewards_arr=rewards_np,
         terminated=terminated_any,
         done_reset=done_reset,

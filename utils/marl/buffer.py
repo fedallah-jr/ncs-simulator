@@ -446,7 +446,9 @@ class DialRNNEpisodeBatch:
     terminated: torch.Tensor     # (B, max_T)              float32
     mask: torch.Tensor           # (B, max_T)              float32
     next_obs: torch.Tensor       # (B, N, obs_dim)         bootstrap obs
-    dru_noise: torch.Tensor      # (B, max_T, N, comm_dim) float32
+    dru_noise: torch.Tensor      # (B, max_T, N, comm_dim) float32; zero-width when unused
+    states: torch.Tensor         # (B, max_T, state_dim)   env global state
+    next_states: torch.Tensor    # (B, state_dim)          bootstrap state
 
 
 class DialRNNEpisodeCollector:
@@ -472,6 +474,8 @@ class DialRNNEpisodeCollector:
             "rewards": np.stack([t["rewards"] for t in buf]),
             "terminated": np.array([t["done"] for t in buf], dtype=np.float32),
             "next_obs": buf[-1]["next_obs"],
+            "states": np.stack([t["state"] for t in buf]),
+            "next_state": buf[-1]["next_state"],
         }
         if "dru_noise" in buf[0]:
             result["dru_noise"] = np.stack([t["dru_noise"] for t in buf])
@@ -511,6 +515,10 @@ class DialRNNEpisodeCollector:
             comm_dim = sample["dru_noise"].shape[2]
             dru_noise = np.zeros((B, max_T, N, comm_dim), dtype=np.float32)
 
+        state_dim = sample["states"].shape[-1]
+        states = np.zeros((B, max_T, state_dim), dtype=np.float32)
+        next_states = np.stack([ep["next_state"] for ep in episodes])
+
         for i, ep in enumerate(episodes):
             T = lengths[i]
             obs[i, :T] = ep["obs"]
@@ -520,6 +528,7 @@ class DialRNNEpisodeCollector:
             mask[i, :T] = 1.0
             if has_dru_noise:
                 dru_noise[i, :T] = ep["dru_noise"]
+            states[i, :T] = ep["states"]
 
         if obs_normalizer is not None:
             obs = obs_normalizer.normalize(
@@ -539,6 +548,8 @@ class DialRNNEpisodeCollector:
             dru_noise=torch.as_tensor(dru_noise, device=self.device, dtype=torch.float32)
             if has_dru_noise
             else torch.zeros(B, max_T, N, 0, device=self.device),
+            states=torch.as_tensor(states, device=self.device, dtype=torch.float32),
+            next_states=torch.as_tensor(next_states, device=self.device, dtype=torch.float32),
         )
 
     def state_dict(self) -> dict:
@@ -636,6 +647,10 @@ class EpisodeReplayBuffer:
             comm_dim = sample_ep["dru_noise"].shape[2]
             dru_noise = np.zeros((B, max_T, N, comm_dim), dtype=np.float32)
 
+        state_dim = sample_ep["states"].shape[-1]
+        states = np.zeros((B, max_T, state_dim), dtype=np.float32)
+        next_states = np.stack([ep["next_state"] for ep in episodes])
+
         for i, ep in enumerate(episodes):
             T = lengths[i]
             obs[i, :T] = ep["obs"]
@@ -645,6 +660,7 @@ class EpisodeReplayBuffer:
             mask[i, :T] = 1.0
             if has_dru_noise:
                 dru_noise[i, :T] = ep["dru_noise"]
+            states[i, :T] = ep["states"]
 
         if obs_normalizer is not None:
             obs = obs_normalizer.normalize(
@@ -664,6 +680,8 @@ class EpisodeReplayBuffer:
             dru_noise=torch.as_tensor(dru_noise, device=self.device, dtype=torch.float32)
             if has_dru_noise
             else torch.zeros(B, max_T, N, 0, device=self.device),
+            states=torch.as_tensor(states, device=self.device, dtype=torch.float32),
+            next_states=torch.as_tensor(next_states, device=self.device, dtype=torch.float32),
         )
 
     def state_dict(self) -> dict:

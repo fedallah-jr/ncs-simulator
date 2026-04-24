@@ -507,7 +507,7 @@ class MARLDIALLearner:
         optimizer_type: str = "rmsprop",
         use_vdn_mixer: bool = False,
         mixer_type: str = "none",
-        obs_dim: int = 0,
+        state_dim: int = 0,
         qmix_mixing_hidden_dim: int = 32,
         qmix_hypernet_hidden_dim: int = 64,
         td_lambda: float = 0.0,
@@ -545,9 +545,10 @@ class MARLDIALLearner:
             self.mixer = VDNMixer().to(self.device)
             self.target_mixer = VDNMixer().to(self.device)
         elif self.mixer_type == "qmix":
-            state_dim = n_agents * obs_dim
+            if int(state_dim) <= 0:
+                raise ValueError("QMIX mixer requires state_dim > 0 (env global_state channel)")
             self.mixer = QMixer(
-                n_agents=n_agents, state_dim=state_dim,
+                n_agents=n_agents, state_dim=int(state_dim),
                 mixing_hidden_dim=qmix_mixing_hidden_dim,
                 hypernet_hidden_dim=qmix_hypernet_hidden_dim,
             ).to(self.device)
@@ -814,10 +815,9 @@ class MARLDIALLearner:
         target_q_boot: torch.Tensor, B: int, max_T: int, N: int,
     ) -> None:
         """QMIX-mixed loss: TD error on Q_tot from state-conditioned hypernetwork."""
-        # Global state = concatenated per-agent observations: (B, T, N*obs_dim)
-        obs_dim = batch.obs.shape[-1]
-        states = batch.obs.view(B, max_T, N * obs_dim)
-        boot_state = batch.next_obs.view(B, N * obs_dim)
+        states = batch.states                      # (B, T, state_dim)
+        boot_state = batch.next_states             # (B, state_dim)
+        state_dim = states.shape[-1]
 
         with torch.no_grad():
             boot_max = target_q_boot.max(-1).values  # (B, N)
@@ -831,7 +831,7 @@ class MARLDIALLearner:
                         has_next.unsqueeze(1).expand(B, N), next_max, boot_max,
                     )
                     next_state = torch.where(
-                        has_next.view(B, 1).expand(B, N * obs_dim),
+                        has_next.view(B, 1).expand(B, state_dim),
                         states[:, t + 1], boot_state,
                     )
                 else:
@@ -908,7 +908,7 @@ class MARLNDQLearner:
         comm_beta: float = 0.001,
         comm_entropy_beta: float = 1e-6,
         mixer_type: str = "qmix",
-        obs_dim: int = 0,
+        state_dim: int = 0,
         qmix_mixing_hidden_dim: int = 32,
         qmix_hypernet_hidden_dim: int = 64,
         target_update_steps: int = 25,
@@ -960,10 +960,11 @@ class MARLNDQLearner:
             self.mixer = VDNMixer().to(self.device)
             self.target_mixer = VDNMixer().to(self.device)
         elif self.mixer_type == "qmix":
-            state_dim = self.n_agents * int(obs_dim)
+            if int(state_dim) <= 0:
+                raise ValueError("QMIX mixer requires state_dim > 0 (env global_state channel)")
             self.mixer = QMixer(
                 n_agents=self.n_agents,
-                state_dim=state_dim,
+                state_dim=int(state_dim),
                 mixing_hidden_dim=qmix_mixing_hidden_dim,
                 hypernet_hidden_dim=qmix_hypernet_hidden_dim,
             ).to(self.device)
@@ -1204,9 +1205,10 @@ class MARLNDQLearner:
         target_q_list: list[torch.Tensor],
         target_q_boot: torch.Tensor,
     ) -> torch.Tensor:
-        batch_size, max_t, n_agents, obs_dim = batch.obs.shape
-        states = batch.obs.view(batch_size, max_t, n_agents * obs_dim)
-        boot_state = batch.next_obs.view(batch_size, n_agents * obs_dim)
+        batch_size, max_t = batch.obs.shape[:2]
+        states = batch.states                    # (B, max_T, state_dim)
+        boot_state = batch.next_states           # (B, state_dim)
+        state_dim = states.shape[-1]
 
         with torch.no_grad():
             if self.double_q:
@@ -1231,7 +1233,7 @@ class MARLNDQLearner:
                         boot_q,
                     )
                     next_state = torch.where(
-                        has_next.view(batch_size, 1).expand(batch_size, n_agents * obs_dim),
+                        has_next.view(batch_size, 1).expand(batch_size, state_dim),
                         states[:, t + 1],
                         boot_state,
                     )
