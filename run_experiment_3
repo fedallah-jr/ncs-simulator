@@ -178,7 +178,7 @@ if [[ "${STATE_COMM}" == "1" ]]; then
 fi
 
 run_one "algorithms.marl_vdn" "vdn" "vdn_doubleq" \
-  --double-q --batch-size 512 --learning-rate 2.5e-5 \
+  --double-q --batch-size 512 --learning-rate 5e-4 \
   --epsilon-decay-steps "${EPS_DECAY_STEPS}" \
   --eval-freq 40000 \
   --no-normalize-obs \
