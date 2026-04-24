@@ -619,7 +619,7 @@ def main() -> None:
 
                             actor_optimizers[agent_id].zero_grad(set_to_none=True)
                             actor_loss.backward()
-                            nn.utils.clip_grad_norm_(actors[agent_id].parameters(), float(args.max_grad_norm))
+                            nn.utils.clip_grad_norm_(actors[agent_id].parameters(), float(args.grad_clip_norm))
                             actor_optimizers[agent_id].step()
 
                 # ---- Critic update (scalar team value) ----
@@ -667,7 +667,7 @@ def main() -> None:
 
                         critic_optimizer.zero_grad(set_to_none=True)
                         value_loss.backward()
-                        nn.utils.clip_grad_norm_(critic.parameters(), float(args.max_grad_norm))
+                        nn.utils.clip_grad_norm_(critic.parameters(), float(args.grad_clip_norm))
                         critic_optimizer.step()
             else:
                 # ---- Shared-parameter actor update (original MAPPO) ----
@@ -723,7 +723,7 @@ def main() -> None:
 
                         actor_optimizer.zero_grad(set_to_none=True)
                         actor_loss.backward()
-                        nn.utils.clip_grad_norm_(actor.parameters(), float(args.max_grad_norm))
+                        nn.utils.clip_grad_norm_(actor.parameters(), float(args.grad_clip_norm))
                         actor_optimizer.step()
 
                 raw_returns_flat = returns_t.reshape(-1, value_dim)
@@ -770,7 +770,7 @@ def main() -> None:
 
                         critic_optimizer.zero_grad(set_to_none=True)
                         value_loss.backward()
-                        nn.utils.clip_grad_norm_(critic.parameters(), float(args.max_grad_norm))
+                        nn.utils.clip_grad_norm_(critic.parameters(), float(args.grad_clip_norm))
                         critic_optimizer.step()
 
     latest_path = run_dir / "latest_model.pt"

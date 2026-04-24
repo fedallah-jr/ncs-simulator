@@ -505,7 +505,7 @@ def build_mappo_hyperparams(
         "popart_beta": args.popart_beta,
         "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip, "obs_norm_eps": args.obs_norm_eps,
-        "max_grad_norm": args.max_grad_norm, "hidden_dims": list(args.hidden_dims),
+        "grad_clip_norm": args.grad_clip_norm, "hidden_dims": list(args.hidden_dims),
         "activation": args.activation, "feature_norm": args.feature_norm,
         "layer_norm": getattr(args, "layer_norm", False),
         "use_agent_id": use_agent_id,

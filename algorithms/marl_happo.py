@@ -536,7 +536,7 @@ def main() -> None:
 
                         actor_optimizers[agent_id].zero_grad(set_to_none=True)
                         actor_loss.backward()
-                        nn.utils.clip_grad_norm_(actors[agent_id].parameters(), float(args.max_grad_norm))
+                        nn.utils.clip_grad_norm_(actors[agent_id].parameters(), float(args.grad_clip_norm))
                         actor_optimizers[agent_id].step()
 
                 # Post-update: compute exact factor for next agent (no clamping)
@@ -594,7 +594,7 @@ def main() -> None:
 
                     critic_optimizer.zero_grad(set_to_none=True)
                     value_loss.backward()
-                    nn.utils.clip_grad_norm_(critic.parameters(), float(args.max_grad_norm))
+                    nn.utils.clip_grad_norm_(critic.parameters(), float(args.grad_clip_norm))
                     critic_optimizer.step()
 
     latest_path = run_dir / "latest_model.pt"

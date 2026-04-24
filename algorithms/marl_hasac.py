@@ -214,7 +214,7 @@ def main() -> None:
         alpha_lr=args.alpha_lr,
         target_entropy=args.target_entropy,
         value_normalizer=value_normalizer,
-        grad_clip_norm=args.max_grad_norm,
+        grad_clip_norm=args.grad_clip_norm,
         fixed_order=args.fixed_order,
         use_huber_loss=args.use_huber_loss,
         huber_delta=args.huber_delta,

@@ -172,7 +172,7 @@ def build_happo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--popart", action="store_true",
                         help="Use PopArt value normalization (output-preserving weight correction)")
     parser.add_argument("--popart-beta", type=float, default=0.999)
-    parser.add_argument("--max-grad-norm", type=float, default=10.0)
+    parser.add_argument("--grad-clip-norm", type=float, default=10.0)
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[128, 128])
     parser.add_argument("--activation", type=str, default="relu", choices=["relu", "tanh", "elu"])
     parser.add_argument("--feature-norm", action="store_true",
@@ -223,7 +223,7 @@ def build_happo_hyperparams(
         "popart_beta": args.popart_beta,
         "normalize_obs": args.normalize_obs,
         "obs_norm_clip": args.obs_norm_clip, "obs_norm_eps": args.obs_norm_eps,
-        "max_grad_norm": args.max_grad_norm, "hidden_dims": list(args.hidden_dims),
+        "grad_clip_norm": args.grad_clip_norm, "hidden_dims": list(args.hidden_dims),
         "activation": args.activation, "feature_norm": args.feature_norm,
         "layer_norm": args.layer_norm,
         "fixed_order": args.fixed_order, "parameter_sharing": False,
@@ -279,7 +279,7 @@ def build_hasac_parser(description: str) -> argparse.ArgumentParser:
         action="store_true",
         help="Scale ValueNorm decay by batch element count (on-policy style).",
     )
-    parser.add_argument("--max-grad-norm", type=float, default=10.0)
+    parser.add_argument("--grad-clip-norm", type=float, default=10.0)
     parser.add_argument("--fixed-order", action="store_true",
                         help="Use fixed agent update order instead of random shuffle.")
     parser.add_argument("--use-huber-loss", action="store_true", dest="use_huber_loss",
@@ -354,7 +354,7 @@ def build_hasac_hyperparams(
         "value_norm": args.value_norm,
         "value_norm_beta": args.value_norm_beta,
         "value_norm_per_element_update": args.value_norm_per_element_update,
-        "max_grad_norm": args.max_grad_norm,
+        "grad_clip_norm": args.grad_clip_norm,
         "fixed_order": args.fixed_order,
         "use_huber_loss": args.use_huber_loss, "huber_delta": args.huber_delta,
         "n_step": args.n_step,
@@ -409,7 +409,7 @@ def build_mappo_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--popart", action="store_true",
                         help="Use PopArt value normalization (output-preserving weight correction)")
     parser.add_argument("--popart-beta", type=float, default=0.999)
-    parser.add_argument("--max-grad-norm", type=float, default=10.0)
+    parser.add_argument("--grad-clip-norm", type=float, default=10.0)
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[128, 128])
     parser.add_argument("--activation", type=str, default="relu", choices=["relu", "tanh", "elu"])
     parser.add_argument("--feature-norm", action="store_true",
