@@ -2,8 +2,10 @@
 Orchestrate the finalized experiment matrix in Python instead of bash.
 
 Replaces run_experiment_1..8 with a single numbered registry of 20 experiments
-that can be split across machines for parallel execution. Each ID is fully
-self-contained: train -> policy_tester -> rename -> zip.
+that can be split across machines for parallel execution. Each --ids invocation
+forms one *batch*: all selected experiments are trained into a single batch
+directory, then a single batch-mode tools.policy_tester run produces a
+cross-experiment leaderboard, then the entire batch directory is zipped.
 
 Usage
 -----
@@ -11,19 +13,20 @@ Usage
     # List all experiments and exit.
     python -m tools.run_experiments --list
 
-    # Run a specific subset (CSV or ranges).
+    # Run a specific subset (CSV or ranges). Each invocation = one batch.
     python -m tools.run_experiments --ids 1,2,3
     python -m tools.run_experiments --ids 7-12
-    python -m tools.run_experiments --ids 1,4-6,13
+    python -m tools.run_experiments --ids 1,4-6,9
 
     # Show the constructed commands without executing them.
     python -m tools.run_experiments --ids 1-3 --dry-run
 
     # Override defaults.
     python -m tools.run_experiments --ids 1-6 --seed 0 \
-        --output-root outputs --num-policy-test-seeds 250
+        --output-root outputs --num-policy-test-seeds 250 \
+        --batch-name cat1
 
-    # Skip the policy_tester and zip steps (e.g. when iterating).
+    # Skip the batch policy_tester and/or zip steps (e.g. when iterating).
     python -m tools.run_experiments --ids 1 --skip-policy-test --skip-zip
 
 Design notes
@@ -31,27 +34,41 @@ Design notes
 
 * All experiments use the heterogeneous config (configs/marl_absolute_plants_hetero.json)
   and seed 0 (override via --seed).
-* Cat 1 (IDs 1-6): IQL/QMIX/VDN/MAPPO/HAPPO/HASAC at 15M, mirroring run_experiment_{1..6}.
-  Q-learners get --double-q; --n-step 3 is the default for IQL/QMIX/VDN and is
-  set explicitly for HASAC (HASAC default is 20). MAPPO/HAPPO use GAE so n-step
-  does not apply; they rely on ValueNorm via the default code path.
+* Cat 1 (IDs 1-6): IQL/QMIX/VDN/MAPPO/HAPPO/HASAC at 15M, mirroring
+  run_experiment_{1..6}. Q-learners get --double-q; --n-step 3 is the default
+  for IQL/QMIX/VDN and is set explicitly for HASAC. MAPPO/HAPPO use GAE so
+  n-step does not apply; they rely on ValueNorm via the default code path.
 * Cat 2 (IDs 7-12): NDQ comm-embed-dim sweep {5,10,15} x {vdn,qmix} at 30M,
   mirroring run_experiment_8. NDQ does not expose --feature-norm/--layer-norm/--n-step.
 * Cat 3 (IDs 13-16): VDN/QMIX/HAPPO/HASAC + 8-bit hand-crafted error comm at 15M.
-* Cat 4 (IDs 17-20): VDN/QMIX/HAPPO/HASAC + 4-bit hand-crafted error comm + 4-bit age comm at 15M.
+* Cat 4 (IDs 17-20): VDN/QMIX/HAPPO/HASAC + 4-bit hand-crafted + 4-bit age comm at 15M.
 * The VoU (Value of Update) quantile search runs once and produces edges for
   bits_1 through bits_8 in a single output. Cached under
   outputs/_shared/vou_search/ and reused across all comm experiments.
-* Per-experiment layout:
-    outputs/experiments_<ID>/
-      <NAME>/                   # renamed from {algo}_0
-        best_model.pt, latest_model.pt, config.json, ...
-        policy_tests/           # policy_tester output
-      logs/
-        train.log
-        policy_test.log
-* Each experiment is zipped to outputs/experiments_<ID>.zip.
-* Failures in one experiment do not abort the rest; a summary is printed at the end.
+
+Per-batch layout
+----------------
+
+    outputs/experiments_<batch_name>/
+        <NAME_1>/                       # renamed from {algo}_0 after training
+            best_model.pt, latest_model.pt, config.json,
+            training_rewards.csv, evaluation_rewards.csv, ...
+            policy_tests/               # written by batch policy_tester per model
+        <NAME_2>/
+            ...
+        leaderboard.csv                 # written by batch policy_tester at root
+        leaderboard_network_stats.csv
+        perfect_comm_baseline/          # batch-mode also runs a reference baseline
+        logs/
+            train_<NAME_1>.log
+            train_<NAME_2>.log
+            policy_test_batch.log
+    outputs/experiments_<batch_name>.zip
+
+The batch_name defaults to a compact encoding of the IDs (e.g. "1-3", "1_4-6_9",
+"7-12"); override with --batch-name. Training failures don't abort the batch:
+remaining experiments still train, the batch policy_tester still runs against
+whatever models trained successfully, and the zip is still produced.
 """
 
 from __future__ import annotations
@@ -66,7 +83,7 @@ import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -155,7 +172,7 @@ VOU_SEARCH_DEFAULTS = {
 
 @dataclass
 class Experiment:
-    """One end-to-end experiment: train -> policy_test -> zip."""
+    """One end-to-end experiment definition."""
 
     id: int
     name: str                # human-readable folder name (e.g. "IQL_doubleq_15mil")
@@ -332,6 +349,24 @@ def parse_id_spec(spec: str) -> List[int]:
     return unique
 
 
+def derive_batch_name(ids: Sequence[int]) -> str:
+    """Compact encoding of an ID list: [1,2,3,5] -> '1-3_5'."""
+    if not ids:
+        return "empty"
+    sorted_ids = sorted(set(ids))
+    parts: List[str] = []
+    i = 0
+    while i < len(sorted_ids):
+        start = sorted_ids[i]
+        end = start
+        while i + 1 < len(sorted_ids) and sorted_ids[i + 1] == end + 1:
+            i += 1
+            end = sorted_ids[i]
+        parts.append(str(start) if start == end else f"{start}-{end}")
+        i += 1
+    return "_".join(parts)
+
+
 def print_registry() -> None:
     header = f"{'ID':<4}{'NAME':<38}{'MODULE':<28}{'STEPS':<14}{'COMM'}"
     print(header)
@@ -438,7 +473,7 @@ def load_edges_for_bits(edges_path: Path, bits: int) -> List[float]:
 
 
 # ---------------------------------------------------------------------------
-# Per-experiment pipeline
+# Per-experiment training
 # ---------------------------------------------------------------------------
 
 
@@ -477,17 +512,75 @@ def build_train_command(
     return cmd
 
 
-def build_policy_test_command(
-    config: str, run_dir: Path, num_seeds: int,
-) -> List[str]:
+def train_experiment(
+    exp: Experiment, *, config: str, batch_dir: Path, seed: int,
+    edges_path: Optional[Path], dry_run: bool,
+) -> Path:
+    """Train one experiment into batch_dir and rename to exp.name. Returns the model dir."""
+    edges: Optional[List[float]] = None
+    if exp.needs_vou_edges:
+        if edges_path is None:
+            raise RuntimeError(f"Experiment {exp.id} needs VoU edges but none available")
+        if dry_run and not edges_path.exists():
+            edges = [f"<bits_{exp.error_comm_bits}_edges_from_vou>"]  # type: ignore[list-item]
+        else:
+            edges = load_edges_for_bits(edges_path, exp.error_comm_bits)
+
+    expected_train_dir = find_next_run_dir(batch_dir, exp.algo_label)
+    train_cmd = build_train_command(
+        exp, config=config, run_root=batch_dir, seed=seed, edges=edges,
+    )
+    log_path = batch_dir / "logs" / f"train_{exp.name}.log"
+    rc = run_command(train_cmd, log_path, cwd=PROJECT_ROOT, dry_run=dry_run)
+    if rc != 0:
+        raise RuntimeError(f"Training exited with code {rc}")
+
+    if dry_run:
+        return expected_train_dir
+
+    if expected_train_dir.exists():
+        actual_dir = expected_train_dir
+    else:
+        located = find_existing_run_dir(batch_dir, exp.algo_label)
+        if located is None:
+            raise RuntimeError(
+                f"Could not locate trained run dir under {batch_dir} "
+                f"(expected prefix: {exp.algo_label}_*)"
+            )
+        actual_dir = located
+
+    final_dir = batch_dir / exp.name
+    if final_dir.exists():
+        raise RuntimeError(f"Target run dir already exists: {final_dir}")
+    actual_dir.rename(final_dir)
+    print(f"[{exp.name}] training dir: {final_dir}")
+    return final_dir
+
+
+# ---------------------------------------------------------------------------
+# Batch-mode policy_tester
+# ---------------------------------------------------------------------------
+
+
+def build_batch_policy_test_command(batch_dir: Path, num_seeds: int) -> List[str]:
     return [
         sys.executable, "-m", "tools.policy_tester",
-        "--config", config,
-        "--policy", str(run_dir / "best_model.pt"),
-        "--policy-type", "marl_torch",
+        "--models-root", str(batch_dir),
         "--num-seeds", str(num_seeds),
-        "--output-dir", str(run_dir / "policy_tests"),
     ]
+
+
+def run_batch_policy_test(
+    batch_dir: Path, num_seeds: int, *, dry_run: bool,
+) -> int:
+    cmd = build_batch_policy_test_command(batch_dir, num_seeds)
+    log_path = batch_dir / "logs" / "policy_test_batch.log"
+    return run_command(cmd, log_path, cwd=PROJECT_ROOT, dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
+# Zip
+# ---------------------------------------------------------------------------
 
 
 def zip_directory(src_dir: Path, zip_path: Path) -> None:
@@ -497,86 +590,6 @@ def zip_directory(src_dir: Path, zip_path: Path) -> None:
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for p in src_dir.rglob("*"):
             zf.write(p, p.relative_to(base))
-
-
-def run_experiment(
-    exp: Experiment, *, config: str, output_root: Path, seed: int,
-    num_policy_test_seeds: int, edges_path: Optional[Path],
-    skip_policy_test: bool, skip_zip: bool, dry_run: bool,
-) -> None:
-    """Train -> rename -> policy_test -> zip for a single experiment."""
-    run_root = output_root / f"experiments_{exp.id}"
-    if run_root.exists():
-        raise RuntimeError(
-            f"Output dir already exists: {run_root}. "
-            f"Move it aside or delete it before re-running."
-        )
-    run_root.mkdir(parents=True, exist_ok=True)
-    logs_dir = run_root / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-
-    # Resolve edges payload for this experiment, if needed.
-    edges: Optional[List[float]] = None
-    if exp.needs_vou_edges:
-        if edges_path is None:
-            raise RuntimeError(f"Experiment {exp.id} needs VoU edges but none available")
-        if dry_run and not edges_path.exists():
-            # VoU search hasn't actually run; inject a placeholder so the printed
-            # command is still representative.
-            edges = [f"<bits_{exp.error_comm_bits}_edges_from_vou>"]  # type: ignore[list-item]
-        else:
-            edges = load_edges_for_bits(edges_path, exp.error_comm_bits)
-
-    # Train.
-    expected_train_dir = find_next_run_dir(run_root, exp.algo_label)
-    train_cmd = build_train_command(
-        exp, config=config, run_root=run_root, seed=seed, edges=edges,
-    )
-    rc = run_command(train_cmd, logs_dir / "train.log", cwd=PROJECT_ROOT, dry_run=dry_run)
-    if rc != 0:
-        raise RuntimeError(f"Training exited with code {rc}")
-
-    # Rename {algo_label}_N -> exp.name.
-    actual_dir: Path
-    if dry_run:
-        actual_dir = expected_train_dir
-    else:
-        if expected_train_dir.exists():
-            actual_dir = expected_train_dir
-        else:
-            located = find_existing_run_dir(run_root, exp.algo_label)
-            if located is None:
-                raise RuntimeError(
-                    f"Could not locate trained run dir under {run_root} "
-                    f"(expected prefix: {exp.algo_label}_*)"
-                )
-            actual_dir = located
-        final_dir = run_root / exp.name
-        if final_dir.exists():
-            raise RuntimeError(f"Target run dir already exists: {final_dir}")
-        actual_dir.rename(final_dir)
-        actual_dir = final_dir
-    print(f"[{exp.name}] training dir: {actual_dir}")
-
-    # Policy testing.
-    if skip_policy_test:
-        print(f"[{exp.name}] skipping policy_tester (per --skip-policy-test)")
-    else:
-        pt_cmd = build_policy_test_command(config, actual_dir, num_policy_test_seeds)
-        rc = run_command(pt_cmd, logs_dir / "policy_test.log", cwd=PROJECT_ROOT, dry_run=dry_run)
-        if rc != 0:
-            raise RuntimeError(f"policy_tester exited with code {rc}")
-
-    # Zip.
-    if skip_zip:
-        print(f"[{exp.name}] skipping zip (per --skip-zip)")
-    else:
-        zip_path = output_root / f"experiments_{exp.id}.zip"
-        if dry_run:
-            print(f"[{exp.name}] would zip {run_root} -> {zip_path}")
-        else:
-            zip_directory(run_root, zip_path)
-            print(f"[{exp.name}] zipped -> {zip_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -596,11 +609,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--config", default=DEFAULT_CONFIG, help=f"Config path (default: {DEFAULT_CONFIG}).")
     p.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT,
                    help=f"Output root directory (default: {DEFAULT_OUTPUT_ROOT}).")
+    p.add_argument("--batch-name", default=None,
+                   help="Override the auto-derived batch directory name (default: encoded IDs).")
     p.add_argument("--seed", type=int, default=0, help="Training seed (default: 0).")
     p.add_argument("--num-policy-test-seeds", type=int, default=250,
                    help="Seeds passed to policy_tester (default: 250, the tool default).")
     p.add_argument("--skip-policy-test", action="store_true",
-                   help="Skip the post-training policy_tester step.")
+                   help="Skip the post-training batch policy_tester step.")
     p.add_argument("--skip-zip", action="store_true",
                    help="Skip the post-training zip step.")
     p.add_argument("--skip-vou", action="store_true",
@@ -639,8 +654,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     experiments = [by_id[i] for i in requested]
-    needs_edges = any(e.needs_vou_edges for e in experiments)
+    batch_name = args.batch_name or derive_batch_name(requested)
+    batch_dir = output_root / f"experiments_{batch_name}"
+    if batch_dir.exists():
+        print(
+            f"error: batch dir already exists: {batch_dir}. "
+            f"Move it aside or pick a different --batch-name.",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.dry_run:
+        batch_dir.mkdir(parents=True, exist_ok=False)
+        (batch_dir / "logs").mkdir(parents=True, exist_ok=True)
 
+    print(f"Batch dir: {batch_dir}")
+
+    # ---- VoU search (cached, shared across all comm experiments) ----
+    needs_edges = any(e.needs_vou_edges for e in experiments)
     edges_path: Optional[Path] = None
     if needs_edges:
         if args.skip_vou:
@@ -656,35 +686,82 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 force=args.force_vou, dry_run=args.dry_run,
             )
 
-    summary: List[tuple] = []  # (id, name, status, elapsed_sec, error)
+    # ---- Train each experiment into the batch dir ----
+    train_summary: List[Tuple[int, str, str, float, str]] = []  # id, name, status, secs, err
     for exp in experiments:
         print("\n" + "=" * 70)
-        print(f"== Experiment {exp.id}: {exp.name}")
+        print(f"== Train {exp.id}: {exp.name}")
         print("=" * 70)
         t0 = time.time()
         try:
-            run_experiment(
-                exp, config=str(config_path), output_root=output_root,
-                seed=args.seed,
-                num_policy_test_seeds=args.num_policy_test_seeds,
-                edges_path=edges_path,
-                skip_policy_test=args.skip_policy_test,
-                skip_zip=args.skip_zip, dry_run=args.dry_run,
+            train_experiment(
+                exp, config=str(config_path), batch_dir=batch_dir,
+                seed=args.seed, edges_path=edges_path, dry_run=args.dry_run,
             )
-            summary.append((exp.id, exp.name, "OK", time.time() - t0, ""))
+            train_summary.append((exp.id, exp.name, "OK", time.time() - t0, ""))
         except Exception as exc:  # noqa: BLE001 - surface to summary rather than crash
             err = f"{type(exc).__name__}: {exc}"
-            print(f"\n[ERROR] {exp.name}: {err}", file=sys.stderr)
-            summary.append((exp.id, exp.name, "FAIL", time.time() - t0, err))
+            print(f"\n[ERROR] Training {exp.name}: {err}", file=sys.stderr)
+            train_summary.append((exp.id, exp.name, "FAIL", time.time() - t0, err))
 
+    successful = [s for s in train_summary if s[2] == "OK"]
+
+    # ---- Batch policy_tester across all trained models ----
+    pt_status = "SKIP"
+    pt_err = ""
+    if args.skip_policy_test:
+        print("\n[policy_test] skipped per --skip-policy-test")
+    elif not successful and not args.dry_run:
+        print("\n[policy_test] no successful trainings; skipping batch policy_tester")
+        pt_status = "SKIP_NO_MODELS"
+    else:
+        print("\n" + "=" * 70)
+        print(f"== Batch policy_tester on {batch_dir}")
+        print("=" * 70)
+        try:
+            rc = run_batch_policy_test(
+                batch_dir, args.num_policy_test_seeds, dry_run=args.dry_run,
+            )
+            if rc != 0:
+                raise RuntimeError(f"policy_tester exited with code {rc}")
+            pt_status = "OK"
+        except Exception as exc:  # noqa: BLE001
+            pt_err = f"{type(exc).__name__}: {exc}"
+            print(f"\n[ERROR] Batch policy_tester: {pt_err}", file=sys.stderr)
+            pt_status = "FAIL"
+
+    # ---- Zip the entire batch directory ----
+    zip_path = output_root / f"experiments_{batch_name}.zip"
+    zip_status = "SKIP"
+    zip_err = ""
+    if args.skip_zip:
+        print("\n[zip] skipped per --skip-zip")
+    elif args.dry_run:
+        print(f"\n[zip] would zip {batch_dir} -> {zip_path}")
+        zip_status = "DRY"
+    else:
+        try:
+            zip_directory(batch_dir, zip_path)
+            print(f"\n[zip] wrote {zip_path}")
+            zip_status = "OK"
+        except Exception as exc:  # noqa: BLE001
+            zip_err = f"{type(exc).__name__}: {exc}"
+            print(f"\n[ERROR] zip: {zip_err}", file=sys.stderr)
+            zip_status = "FAIL"
+
+    # ---- Summary ----
     print("\n" + "=" * 70)
-    print("== Summary")
+    print(f"== Summary  (batch: experiments_{batch_name})")
     print("=" * 70)
-    print(f"{'ID':<4}{'NAME':<38}{'STATUS':<8}{'TIME':<12}{'ERROR'}")
-    for sid, sname, sstatus, selapsed, serr in summary:
+    print(f"{'ID':<4}{'NAME':<38}{'TRAIN':<8}{'TIME':<12}{'ERROR'}")
+    for sid, sname, sstatus, selapsed, serr in train_summary:
         print(f"{sid:<4}{sname:<38}{sstatus:<8}{selapsed:<12.1f}{serr}")
+    print(f"\npolicy_test: {pt_status}{(' — ' + pt_err) if pt_err else ''}")
+    print(f"zip:         {zip_status}{(' — ' + zip_err) if zip_err else ''}{'  -> ' + str(zip_path) if zip_status in ('OK', 'DRY') else ''}")
 
-    failures = sum(1 for s in summary if s[2] != "OK")
+    failures = sum(1 for s in train_summary if s[2] != "OK")
+    if pt_status == "FAIL" or zip_status == "FAIL":
+        return 1
     return 1 if failures > 0 else 0
 
 
