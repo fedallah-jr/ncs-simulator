@@ -562,6 +562,13 @@ class MARLDIALLearner:
         self.episodes_seen = 0
         self._train_steps = 0
 
+    @staticmethod
+    def _dial_team_reward(batch: DialRNNEpisodeBatch, t: int) -> torch.Tensor:
+        # dial_rnn_collect_transition stores the already-summed team reward
+        # repeated per agent so the IQL path can keep its existing per-agent
+        # target shape. Mixed VDN/QMIX losses must consume it once.
+        return batch.rewards[:, t, :1]
+
     # ------------------------------------------------------------------
     def _forward_trace(
         self,
@@ -776,7 +783,7 @@ class MARLDIALLearner:
                 else:
                     bootstrap_q = boot_max
                 next_q_tot = self.target_mixer(bootstrap_q)  # (B, 1)
-                r_tot = batch.rewards[:, t].sum(dim=-1, keepdim=True)  # (B, 1)
+                r_tot = self._dial_team_reward(batch, t)  # (B, 1)
                 not_done = (1.0 - batch.terminated[:, t]).unsqueeze(-1)  # (B, 1)
                 rewards.append(r_tot)
                 targets.append(r_tot + self.gamma * not_done * next_q_tot)
@@ -834,7 +841,7 @@ class MARLDIALLearner:
                     bootstrap_q = boot_max
                     next_state = boot_state
                 next_q_tot = self.target_mixer(bootstrap_q, next_state)  # (B, 1)
-                r_tot = batch.rewards[:, t].sum(dim=-1, keepdim=True)  # (B, 1)
+                r_tot = self._dial_team_reward(batch, t)  # (B, 1)
                 not_done = (1.0 - batch.terminated[:, t]).unsqueeze(-1)  # (B, 1)
                 rewards.append(r_tot)
                 targets.append(r_tot + self.gamma * not_done * next_q_tot)
@@ -986,6 +993,13 @@ class MARLNDQLearner:
         self.s_sigma = torch.ones(1, device=self.device)
         self.episodes_seen = 0
         self._train_steps = 0
+
+    @staticmethod
+    def _ndq_team_reward(batch: DialRNNEpisodeBatch, t: int) -> torch.Tensor:
+        # ndq_rnn_collect_transition stores the already-summed team reward
+        # repeated per agent so the IQL path can keep its existing per-agent
+        # target shape. Mixed VDN/QMIX losses must consume it once.
+        return batch.rewards[:, t, :1]
 
     def _forward_trace(
         self,
@@ -1176,7 +1190,7 @@ class MARLNDQLearner:
                 else:
                     bootstrap_q = boot_q
                 next_q_tot = self.target_mixer(bootstrap_q)
-                r_tot = batch.rewards[:, t].sum(dim=-1, keepdim=True)
+                r_tot = self._ndq_team_reward(batch, t)
                 rewards.append(r_tot)
                 not_done = (1.0 - batch.terminated[:, t]).unsqueeze(-1)
                 targets.append(r_tot + self.gamma * not_done * next_q_tot)
@@ -1237,7 +1251,7 @@ class MARLNDQLearner:
                     bootstrap_q = boot_q
                     next_state = boot_state
                 next_q_tot = self.target_mixer(bootstrap_q, next_state)
-                r_tot = batch.rewards[:, t].sum(dim=-1, keepdim=True)
+                r_tot = self._ndq_team_reward(batch, t)
                 rewards.append(r_tot)
                 not_done = (1.0 - batch.terminated[:, t]).unsqueeze(-1)
                 targets.append(r_tot + self.gamma * not_done * next_q_tot)

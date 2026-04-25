@@ -347,6 +347,21 @@ def load_marl_torch_multi_agent_policy(
             device=torch.device("cpu"),
             cut_mu_thres=float(ndq_cut_mu_thres),
         )
+    if isinstance(ckpt, dict) and ckpt.get("rnn_qmix", False):
+        from utils.marl_rnn_qmix import (
+            MARLRNNQMIXTorchPolicy,
+            load_rnn_qmix_agent_from_checkpoint,
+        )
+
+        agent, meta = load_rnn_qmix_agent_from_checkpoint(Path(model_path))
+        if int(getattr(env, "n_agents", 0)) != meta.n_agents:
+            raise ValueError(
+                f"Env n_agents={getattr(env, 'n_agents', None)} does not match checkpoint n_agents={meta.n_agents}."
+            )
+        env_obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
+        if env_obs_dim != meta.obs_dim:
+            raise ValueError(f"Env obs_dim={env_obs_dim} does not match checkpoint obs_dim={meta.obs_dim}")
+        return MARLRNNQMIXTorchPolicy(agent, meta, device=torch.device("cpu"))
 
     from utils.marl.torch_policy import MARLTorchMultiAgentPolicy, load_marl_torch_agents_from_checkpoint
 
