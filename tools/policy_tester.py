@@ -91,7 +91,7 @@ EVAL_REWARD_OVERRIDE: Dict[str, Any] = {
 
 # Keep evaluation seeds disjoint from training-time evaluation (0-10).
 TRAINING_EVAL_SEED_COUNT = 11
-DEFAULT_EVAL_SEED_START = 100
+DEFAULT_EVAL_SEED_START = 1234567890
 
 REWARD_COMPARISON_KEYS: Sequence[str] = (
     "comm_penalty_alpha",
@@ -1536,7 +1536,7 @@ def main() -> int:
         default=None,
         help="Optional override for agent count (default: read from checkpoint or config)",
     )
-    parser.add_argument("--num-seeds", type=int, default=50, help="Number of seeds to evaluate")
+    parser.add_argument("--num-seeds", type=int, default=250, help="Number of seeds to evaluate")
     default_workers = os.cpu_count() or 1
     parser.add_argument(
         "--num-workers",

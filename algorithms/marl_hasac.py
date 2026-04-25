@@ -53,6 +53,44 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _validate_training_schedule(args: argparse.Namespace) -> int:
+    """Validate scheduler knobs and return the integer update count per train event."""
+    if args.n_envs <= 0:
+        raise ValueError("n_envs must be positive")
+    if args.total_timesteps <= 0:
+        raise ValueError("total_timesteps must be positive")
+    if args.buffer_size <= 0:
+        raise ValueError("buffer_size must be positive")
+    if args.batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if args.start_learning < 0:
+        raise ValueError("start_learning must be non-negative")
+    if args.train_interval <= 0:
+        raise ValueError("train_interval must be positive")
+    if args.n_step <= 0:
+        raise ValueError("n_step must be positive")
+    if not np.isfinite(args.update_per_train) or args.update_per_train <= 0:
+        raise ValueError("update_per_train must be finite and positive")
+
+    n_updates_per_train = int(args.update_per_train * args.train_interval)
+    if n_updates_per_train <= 0:
+        raise ValueError(
+            "update_per_train * train_interval must produce at least one update; "
+            f"got update_per_train={args.update_per_train}, "
+            f"train_interval={args.train_interval}, "
+            f"int(product)={n_updates_per_train}"
+        )
+
+    if args.n_step > 1 and args.start_learning == 0 and args.train_interval < args.n_step:
+        raise ValueError(
+            "n-step replay would be empty at the first scheduled training event: "
+            f"n_step={args.n_step}, train_interval={args.train_interval}, "
+            "start_learning=0. Set start_learning > 0 or train_interval >= n_step."
+        )
+
+    return n_updates_per_train
+
+
 def _select_actions_stochastic(
     actors: list,
     obs: np.ndarray,
@@ -78,6 +116,7 @@ def _select_actions_stochastic(
 def main() -> None:
     reset_shared_running_normalizers()
     args = parse_args()
+    n_updates_per_train = _validate_training_schedule(args)
     device, rng = setup_device_and_rng(args.device, args.seed)
 
     # HASAC never uses agent_id for actors (independent per-agent networks)
@@ -97,13 +136,6 @@ def main() -> None:
         run_dir = prepare_run_directory("hasac", args.config, args.output_root)
     rewards_csv_path = run_dir / "training_rewards.csv"
     eval_csv_path = run_dir / "evaluation_rewards.csv"
-
-    if args.n_envs <= 0:
-        raise ValueError("n_envs must be positive")
-    if args.train_interval <= 0:
-        raise ValueError("train_interval must be positive")
-    if args.update_per_train <= 0:
-        raise ValueError("update_per_train must be positive")
 
     shared_reward_normalizer, _shared_reward_manager = setup_shared_reward_normalizer(
         cfg.get("reward", {}), run_dir
@@ -370,8 +402,7 @@ def main() -> None:
             )
 
             if len(buffer) >= args.start_learning and vector_step % args.train_interval == 0:
-                n_updates = int(args.update_per_train * args.train_interval)
-                for _ in range(n_updates):
+                for _ in range(n_updates_per_train):
                     batch = buffer.sample(args.batch_size, obs_normalizer=obs_normalizer)
                     learner.update(batch, action_mask=step_mask)
 

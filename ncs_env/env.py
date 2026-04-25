@@ -1891,21 +1891,7 @@ class NCS_Env(gym.Env):
         self.last_sensor_measurements = measurements
 
     def _get_global_state(self) -> np.ndarray:
-        perceived_goodput = np.asarray(
-            [self._compute_observed_goodput_kbps(i) for i in range(self.n_agents)],
-            dtype=np.float32,
-        )
-        true_goodput = np.asarray(
-            [self._compute_true_goodput_kbps(i) for i in range(self.n_agents)],
-            dtype=np.float32,
-        )
         channel_state = np.asarray([float(self.network.channel_state.value)], dtype=np.float32)
-        backoff_stage = np.zeros(self.n_agents, dtype=np.float32)
-        backoff_remaining = np.zeros(self.n_agents, dtype=np.float32)
-        for i in range(self.n_agents):
-            entity = self.network.entities[i]
-            backoff_stage[i] = float(entity.csma_backoffs + (1 if entity.pending_packet is not None else 0))
-            backoff_remaining[i] = float(entity.backoff_counter)
         per_agent_features: List[np.ndarray] = []
         for i in range(self.n_agents):
             e = self.plants[i].get_state().reshape(-1) - self.controllers[i].x_hat
@@ -1916,15 +1902,6 @@ class NCS_Env(gym.Env):
                         self.controllers[i].x_hat.astype(np.float32),
                         np.diag(self.controllers[i].P).astype(np.float32),
                         (e * e).astype(np.float32),
-                        np.asarray(
-                            [
-                                perceived_goodput[i],
-                                true_goodput[i],
-                                backoff_stage[i],
-                                backoff_remaining[i],
-                            ],
-                            dtype=np.float32,
-                        ),
                     ]
                 )
             )
