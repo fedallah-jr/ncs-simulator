@@ -155,13 +155,14 @@ HANDCRAFT_BITS_4 = 4
 AGE_BITS_4 = 4
 
 # VoU search defaults (mirror run_experiment_1..6 defaults).
+# collect_bits is computed per-batch from the requested experiments; the search
+# only produces edges for the bit widths explicitly passed in --collect-bits.
 VOU_SEARCH_DEFAULTS = {
     "iters": 12,
     "samples_per_iter": 8,
     "eval_num_seeds": 32,
     "threshold_min": 0.01,
     "threshold_max": 10.0,
-    "collect_bits": 8,  # produces edges for bits_1..bits_8 in a single search
 }
 
 
@@ -420,23 +421,54 @@ def run_command(cmd: Sequence[str], log_path: Path, *, cwd: Optional[Path] = Non
 # ---------------------------------------------------------------------------
 
 
+def _cached_edges_bits(edges_path: Path) -> List[int]:
+    """Return the list of bit widths present in a cached quantile_edges.json."""
+    if not edges_path.exists():
+        return []
+    try:
+        with edges_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    bits: List[int] = []
+    for key in data.get("edges", {}).keys():
+        if key.startswith("bits_"):
+            try:
+                bits.append(int(key.split("_", 1)[1]))
+            except ValueError:
+                continue
+    return sorted(set(bits))
+
+
 def ensure_vou_edges(
-    config: str, output_root: Path, *,
+    config: str, output_root: Path, required_bits: Sequence[int], *,
     force: bool = False, dry_run: bool = False,
 ) -> Optional[Path]:
     """
     Run tools.search_vou_threshold once and cache the result. Returns the path
     to quantile_edges.json. Reused across all comm experiments.
+
+    The search only produces edges for the bit widths in --collect-bits, so we
+    pass every bit width required by the current batch. If a cached result is
+    missing any required width, the search is re-run.
     """
     cache_dir = output_root / SHARED_DIR_NAME / VOU_CACHE_DIRNAME
     edges_path = cache_dir / "quantile_edges.json"
     summary_path = cache_dir / "search_summary.json"
+    required = sorted(set(required_bits))
 
     if not force and edges_path.exists() and summary_path.exists():
-        print(f"[vou] reusing cached search at {cache_dir}")
-        return edges_path
+        cached = _cached_edges_bits(edges_path)
+        missing = [b for b in required if b not in cached]
+        if not missing:
+            print(f"[vou] reusing cached search at {cache_dir} (bits: {cached})")
+            return edges_path
+        print(
+            f"[vou] cached search at {cache_dir} has bits {cached} but batch needs "
+            f"{required}; re-running search."
+        )
 
-    if force and cache_dir.exists():
+    if cache_dir.exists():
         shutil.rmtree(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -448,7 +480,7 @@ def ensure_vou_edges(
         "--iters", str(VOU_SEARCH_DEFAULTS["iters"]),
         "--samples-per-iter", str(VOU_SEARCH_DEFAULTS["samples_per_iter"]),
         "--eval-num-seeds", str(VOU_SEARCH_DEFAULTS["eval_num_seeds"]),
-        "--collect-bits", str(VOU_SEARCH_DEFAULTS["collect_bits"]),
+        "--collect-bits", *[str(b) for b in required],
         "--output-dir", str(cache_dir),
     ]
     log_path = cache_dir / "search.log"
@@ -670,19 +702,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Batch dir: {batch_dir}")
 
     # ---- VoU search (cached, shared across all comm experiments) ----
-    needs_edges = any(e.needs_vou_edges for e in experiments)
+    required_bits = sorted({e.error_comm_bits for e in experiments if e.error_comm_bits > 0})
     edges_path: Optional[Path] = None
-    if needs_edges:
+    if required_bits:
         if args.skip_vou:
             cache = output_root / SHARED_DIR_NAME / VOU_CACHE_DIRNAME / "quantile_edges.json"
             if not cache.exists():
                 print(f"error: --skip-vou set but cached edges missing: {cache}", file=sys.stderr)
                 return 2
+            cached = _cached_edges_bits(cache)
+            missing = [b for b in required_bits if b not in cached]
+            if missing:
+                print(
+                    f"error: --skip-vou set but cached edges {cache} missing required bits "
+                    f"{missing} (have {cached}). Drop --skip-vou or rerun with --force-vou.",
+                    file=sys.stderr,
+                )
+                return 2
             edges_path = cache
-            print(f"[vou] using cached edges at {edges_path}")
+            print(f"[vou] using cached edges at {edges_path} (bits: {cached})")
         else:
             edges_path = ensure_vou_edges(
-                str(config_path), output_root,
+                str(config_path), output_root, required_bits,
                 force=args.force_vou, dry_run=args.dry_run,
             )
 
