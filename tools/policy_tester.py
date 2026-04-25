@@ -228,11 +228,10 @@ _LEADERBOARD_FIELDS: Tuple[str, ...] = (
     "rank",
     "model_name",
     "checkpoint",
-    "policy_label",
-    "policy_type",
-    "num_seeds",
     "mean_total_reward",
     "std_total_reward",
+    "drop_ratio_mean",
+    "win_rate",
     "mean_state_error",
     "std_state_error",
     "mean_final_error",
@@ -250,16 +249,20 @@ _LEADERBOARD_FIELDS: Tuple[str, ...] = (
     "comm_dims_sent_frac",
     "comm_dims_dropped_frac",
     "comm_msg_silent_frac",
+    "policy_label",
+    "policy_type",
+    "num_seeds",
 )
 
 _NETWORK_LEADERBOARD_FIELDS: Tuple[str, ...] = (
     "rank",
     "model_name",
     "checkpoint",
+) + _SUMMARY_FIELDS_NETWORK + (
     "policy_label",
     "policy_type",
     "num_seeds",
-) + _SUMMARY_FIELDS_NETWORK
+)
 
 _REPLAYBOARD_FIELDS: Tuple[str, ...] = (
     "model_name",
@@ -450,6 +453,26 @@ def _safe_rate(numerator: float, denominator: float) -> float:
     if denominator <= 0:
         return 0.0
     return float(numerator) / float(denominator)
+
+
+def _compute_drop_ratio_stats(
+    policy_rewards: np.ndarray,
+    baseline_rewards: np.ndarray,
+) -> Tuple[float, float]:
+    """Per-seed drop-ratio mean and win rate vs a baseline.
+
+    Mirrors utils.marl_training: drop = (baseline - policy) / max(|baseline|, 1e-8).
+    Lower drop_ratio_mean is better; win_rate is the fraction of seeds with
+    policy_reward >= baseline_reward.
+    """
+    if policy_rewards.size == 0 or baseline_rewards.size == 0:
+        return float("nan"), float("nan")
+    n = min(policy_rewards.size, baseline_rewards.size)
+    p = policy_rewards[:n].astype(np.float64)
+    b = baseline_rewards[:n].astype(np.float64)
+    denom = np.maximum(np.abs(b), 1e-8)
+    drop_ratios = (b - p) / denom
+    return float(np.mean(drop_ratios)), float(np.mean(p >= b))
 
 
 def _record_policy_actions(
@@ -1607,6 +1630,15 @@ def main() -> int:
             "Default 0.0 disables gating."
         ),
     )
+    parser.add_argument(
+        "--drop-ratio-baseline",
+        default="perfect_sync_n2",
+        help=(
+            "Heuristic used as the drop-ratio/win-rate reference in batch "
+            "(--models-root) mode. Must be one of HEURISTIC_POLICY_NAMES "
+            "(default: perfect_sync_n2)."
+        ),
+    )
     add_set_override_argument(parser)
     args = parser.parse_args()
 
@@ -1614,6 +1646,11 @@ def main() -> int:
         raise ValueError("--num-seeds must be >= 1")
     if args.num_workers < 1:
         raise ValueError("--num-workers must be >= 1")
+    if args.drop_ratio_baseline not in HEURISTIC_POLICY_NAMES:
+        raise ValueError(
+            "--drop-ratio-baseline must be one of "
+            f"{list(HEURISTIC_POLICY_NAMES)}, got {args.drop_ratio_baseline!r}"
+        )
     config_overrides = parse_set_overrides(args.set_overrides)
     # Build reward override based on flags
     if args.no_override:
@@ -2044,6 +2081,7 @@ def main() -> int:
     else:
         clipping_status = "with clipping" if args.use_reward_clipping else "no clipping"
         _log(f"Evaluation: raw absolute reward; {clipping_status}; comm/termination from config.")
+    _log(f"Drop-ratio baseline: {args.drop_ratio_baseline}")
 
     for model_idx, (model_name, specs) in enumerate(model_specs_by_run.items(), start=1):
         _log(f"[{model_idx}/{total_models}] {model_name}")
@@ -2074,6 +2112,9 @@ def main() -> int:
             summary_row = _write_policy_results(run_dir, spec, results)
             summary_row["model_name"] = model_name
             summary_row["checkpoint"] = checkpoint_name
+            summary_row["_per_seed_rewards"] = np.asarray(
+                [r.total_reward for r in results], dtype=np.float64
+            )
             leaderboard_rows.append(summary_row)
             _write_reward_stats(run_dir, training_stats, evaluation_stats)
             _log(f"    results: {run_dir / 'summary_results.csv'}")
@@ -2207,6 +2248,9 @@ def main() -> int:
         summary_row = _write_policy_results(run_dir, spec, results)
         summary_row["model_name"] = "heuristics"
         summary_row["checkpoint"] = "n/a"
+        summary_row["_per_seed_rewards"] = np.asarray(
+            [r.total_reward for r in results], dtype=np.float64
+        )
         leaderboard_rows.append(summary_row)
         _log(f"results: {run_dir / 'summary_results.csv'}", indent=4)
 
@@ -2235,10 +2279,48 @@ def main() -> int:
     perfect_comm_summary = _write_policy_results(perfect_comm_dir, perfect_comm_spec, perfect_comm_results)
     perfect_comm_summary["model_name"] = "perfect_comm"
     perfect_comm_summary["checkpoint"] = "always_send"
+    perfect_comm_summary["_per_seed_rewards"] = np.asarray(
+        [r.total_reward for r in perfect_comm_results], dtype=np.float64
+    )
     leaderboard_rows.append(perfect_comm_summary)
     _log(f"results: {perfect_comm_dir / 'summary_results.csv'}", indent=2)
 
-    leaderboard_rows.sort(key=lambda row: float(row["mean_total_reward"]), reverse=True)
+    baseline_row = next(
+        (
+            row
+            for row in leaderboard_rows
+            if row.get("model_name") == "heuristics"
+            and row.get("policy_label") == args.drop_ratio_baseline
+        ),
+        None,
+    )
+    if baseline_row is None:
+        raise RuntimeError(
+            f"Drop-ratio baseline {args.drop_ratio_baseline!r} did not produce evaluation results."
+        )
+    baseline_rewards = baseline_row.get("_per_seed_rewards")
+    if baseline_rewards is None or len(baseline_rewards) == 0:
+        raise RuntimeError(
+            f"Drop-ratio baseline {args.drop_ratio_baseline!r} produced no per-seed rewards."
+        )
+    for row in leaderboard_rows:
+        policy_rewards = row.get("_per_seed_rewards")
+        if policy_rewards is None:
+            row["drop_ratio_mean"] = float("nan")
+            row["win_rate"] = float("nan")
+            continue
+        drop_mean, win_rate = _compute_drop_ratio_stats(policy_rewards, baseline_rewards)
+        row["drop_ratio_mean"] = drop_mean
+        row["win_rate"] = win_rate
+
+    def _drop_ratio_sort_key(row: Dict[str, Any]) -> float:
+        try:
+            value = float(row.get("drop_ratio_mean", float("inf")))
+        except (TypeError, ValueError):
+            return float("inf")
+        return value if np.isfinite(value) else float("inf")
+
+    leaderboard_rows.sort(key=_drop_ratio_sort_key)
     ranked_rows: List[Dict[str, Any]] = []
     for idx, row in enumerate(leaderboard_rows, start=1):
         ranked = dict(row)
