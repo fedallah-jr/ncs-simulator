@@ -20,3 +20,7 @@ vis/
 # Test files (development only)
 test_*.py
 !tests/test_*.py
+
+# Deprecated bash experiment runners (replaced by tools/run_experiments.py).
+# Kept locally for reference but no longer tracked.
+run_experiment_*
