@@ -56,9 +56,50 @@ CLI flags let you change environment parameters. Use `--output-root` (defaults t
 - `evaluation_drop_stats.csv`: Training-time baseline comparison stats per eval step: baseline policy, policy/baseline mean/std rewards, and drop-ratio mean/std used for `best_model.pt` selection.
 - **`config.json`**, which combines the effective environment configuration used by the run (including CLI `--set` overrides, when provided) with a `training_run` section containing the algorithm name, timestamp, source config path, and all hyperparameters from the run. 
 
-## Experiment Scripts
+## Experiment Runner
 
-Experiment batches live in the root `run_experiment_*` scripts. Each script writes to a timestamped `outputs/exp_*` folder and renames the per-run directories to match the experiment settings. All experiment scripts default to 15M timesteps. You can override common knobs via environment variables: `SEED`, `OUTPUT_ROOT`, `TOTAL_TIMESTEPS`, `EPS_DECAY_STEPS`. The current `run_experiment_{1,2,3}` scripts also pin `--batch-size 512` and `--learning-rate 2.5e-5` (half the MARL default).
+The finalized experiment matrix is orchestrated from `tools/run_experiments.py`, which replaces the legacy `run_experiment_*` bash scripts. It exposes a numbered registry of 20 experiments split across four categories:
+
+- **IDs 1-6** (Cat 1): IQL, QMIX, VDN, MAPPO, HAPPO, HASAC at 15M steps on the heterogeneous config. Q-learners get `--double-q`; n-step returns are 3 (the default for IQL/QMIX/VDN, set explicitly for HASAC). All six use `--no-normalize-obs --feature-norm --layer-norm`; HASAC additionally passes `--value-norm` (MAPPO/HAPPO use ValueNorm via the default code path).
+- **IDs 7-12** (Cat 2): NDQ at 30M steps, sweeping `--comm-embed-dim` ∈ {5, 10, 15} × `--mixer` ∈ {vdn, qmix}.
+- **IDs 13-16** (Cat 3): VDN, QMIX, HAPPO, HASAC at 15M with 8-bit hand-crafted error communication. Quantile bin edges are computed once via `tools.search_vou_threshold` and cached under `outputs/_shared/vou_search/`.
+- **IDs 17-20** (Cat 4): same four algorithms at 15M with 4-bit hand-crafted error comm + 4-bit age comm.
+
+List the registry with `python -m tools.run_experiments --list`. Run a subset (CSV or ranges) with `--ids`:
+
+```bash
+python -m tools.run_experiments --list                  # show ID -> name table
+python -m tools.run_experiments --ids 1-6               # one batch with all Cat 1 experiments
+python -m tools.run_experiments --ids 7-12              # NDQ sweep
+python -m tools.run_experiments --ids 1,4-6,9 --dry-run # preview commands without running
+```
+
+Each `--ids` invocation forms one **batch**. The orchestrator:
+
+1. Creates `outputs/experiments_<batch_name>/` (auto-named from the ID list, e.g. `experiments_1-6`, `experiments_1_4-6_9`; override with `--batch-name`).
+2. If any selected experiment needs hand-crafted comm, runs `tools.search_vou_threshold` once (cached at `outputs/_shared/vou_search/`, reused across batches).
+3. Trains each experiment **sequentially** into the batch dir, renaming the auto-numbered subfolder (`{algo}_0`, ...) to its full name (`IQL_doubleq_15mil`, `NDQ_5dim_vdn_30mil`, `HASAC_8bithand_15mil`, ...). A failing training does not abort siblings.
+4. Runs `tools.policy_tester --models-root <batch_dir>` once across the whole batch, producing a cross-experiment `leaderboard.csv` plus `leaderboard_network_stats.csv`, a `perfect_comm_baseline/` reference run, and per-model `<NAME>/policy_tests/` aggregates.
+5. Zips the entire batch directory to `outputs/experiments_<batch_name>.zip`.
+
+Resulting layout:
+
+```
+outputs/experiments_1-6/
+  IQL_doubleq_15mil/    best_model.pt, config.json, training_rewards.csv, policy_tests/, ...
+  QMIX_doubleq_15mil/   ...
+  VDN_doubleq_15mil/    ...
+  MAPPO_15mil/          ...
+  HAPPO_15mil/          ...
+  HASAC_15mil/          ...
+  leaderboard.csv
+  leaderboard_network_stats.csv
+  perfect_comm_baseline/
+  logs/                 train_<NAME>.log per experiment + policy_test_batch.log
+outputs/experiments_1-6.zip
+```
+
+To split the matrix across machines, give each box a disjoint slice of IDs (e.g. machine A `--ids 1-6`, machine B `--ids 7-12`, machine C `--ids 13-20`). Each machine produces its own batch zip independently. Other knobs: `--seed`, `--output-root`, `--num-policy-test-seeds`, `--skip-policy-test`, `--skip-zip`, `--skip-vou`, `--force-vou`, `--dry-run`.
 
 ## Visualization
 
