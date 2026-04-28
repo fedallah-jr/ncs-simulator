@@ -23,7 +23,7 @@ Usage
 
     # Override defaults.
     python -m tools.run_experiments --ids 1-6 --seed 0 \
-        --output-root outputs --num-policy-test-seeds 1264 \
+        --output-root outputs --num-policy-test-seeds 2604 \
         --batch-name cat1
 
     # Skip the batch policy_tester and/or zip steps (e.g. when iterating).
@@ -682,8 +682,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--batch-name", default=None,
                    help="Override the auto-derived batch directory name (default: encoded IDs).")
     p.add_argument("--seed", type=int, default=0, help="Training seed (default: 0).")
-    p.add_argument("--num-policy-test-seeds", type=int, default=1264,
-                   help="Seeds passed to policy_tester (default: 1264; tools.policy_tester default is 250).")
+    p.add_argument("--num-policy-test-seeds", type=int, default=2604,
+                   help="Seeds passed to policy_tester (default: 2604; tools.policy_tester default is 250).")
     p.add_argument("--skip-policy-test", action="store_true",
                    help="Skip the post-training batch policy_tester step.")
     p.add_argument("--skip-zip", action="store_true",
