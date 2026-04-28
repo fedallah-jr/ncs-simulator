@@ -449,7 +449,7 @@ def main() -> None:
             dru_sigma=args.dru_sigma,
             rnn_hidden_dim=args.rnn_hidden_dim,
             rnn_layers=args.rnn_layers,
-            mixer_type=mixer_type,
+            mixer_type=args.mixer,
         )
 
     def save_training_state() -> None:
@@ -590,7 +590,7 @@ def main() -> None:
         "n_eval_envs": args.n_eval_envs,
         "device": str(device),
         "seed": args.seed,
-        "mixer": mixer_type,
+        "mixer": args.mixer,
         "qmix_mixing_hidden_dim": args.qmix_mixing_hidden_dim,
         "qmix_hypernet_hidden_dim": args.qmix_hypernet_hidden_dim,
         "td_lambda": args.td_lambda,
