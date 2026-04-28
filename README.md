@@ -58,12 +58,13 @@ CLI flags let you change environment parameters. Use `--output-root` (defaults t
 
 ## Experiment Runner
 
-The finalized experiment matrix is orchestrated from `tools/run_experiments.py`, which replaces the legacy `run_experiment_*` bash scripts. It exposes a numbered registry of 20 experiments split across four categories:
+The finalized experiment matrix is orchestrated from `tools/run_experiments.py`, which replaces the legacy `run_experiment_*` bash scripts. It exposes a numbered registry of 23 experiments split across five categories:
 
 - **IDs 1-6** (Cat 1): IQL, QMIX, VDN, MAPPO, HAPPO, HASAC at 15M steps on the heterogeneous config. Q-learners get `--double-q`; n-step returns are 3 (the default for IQL/QMIX/VDN, set explicitly for HASAC). All six use `--no-normalize-obs --feature-norm --layer-norm`; HASAC additionally passes `--value-norm` (MAPPO/HAPPO use ValueNorm via the default code path).
 - **IDs 7-12** (Cat 2): NDQ at 30M steps, sweeping `--comm-embed-dim` ∈ {5, 10, 15} × `--mixer` ∈ {vdn, qmix}.
 - **IDs 13-16** (Cat 3): VDN, QMIX, HAPPO, HASAC at 15M with 8-bit hand-crafted error communication. Quantile bin edges are computed once via `tools.search_vou_threshold` and cached under `outputs/_shared/vou_search/`.
 - **IDs 17-20** (Cat 4): same four algorithms at 15M with 4-bit hand-crafted error comm + 4-bit age comm.
+- **IDs 21-23** (Cat 5): DIAL recurrent + 8-dim differentiable communication at 30M, sweeping `--mixer` ∈ {none, vdn, qmix}. Like NDQ, DIAL is paper-aligned and does not expose `--feature-norm`/`--layer-norm`/`--n-step`.
 
 List the registry with `python -m tools.run_experiments --list`. Run a subset (CSV or ranges) with `--ids`:
 
@@ -71,6 +72,7 @@ List the registry with `python -m tools.run_experiments --list`. Run a subset (C
 python -m tools.run_experiments --list                  # show ID -> name table
 python -m tools.run_experiments --ids 1-6               # one batch with all Cat 1 experiments
 python -m tools.run_experiments --ids 7-12              # NDQ sweep
+python -m tools.run_experiments --ids 21-23             # DIAL mixer sweep
 python -m tools.run_experiments --ids 1,4-6,9 --dry-run # preview commands without running
 ```
 

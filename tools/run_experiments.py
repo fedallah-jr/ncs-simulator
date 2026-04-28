@@ -1,7 +1,7 @@
 """
 Orchestrate the finalized experiment matrix in Python instead of bash.
 
-Replaces run_experiment_1..8 with a single numbered registry of 20 experiments
+Replaces run_experiment_1..8 with a single numbered registry of 23 experiments
 that can be split across machines for parallel execution. Each --ids invocation
 forms one *batch*: all selected experiments are trained into a single batch
 directory, then a single batch-mode tools.policy_tester run produces a
@@ -23,7 +23,7 @@ Usage
 
     # Override defaults.
     python -m tools.run_experiments --ids 1-6 --seed 0 \
-        --output-root outputs --num-policy-test-seeds 250 \
+        --output-root outputs --num-policy-test-seeds 1264 \
         --batch-name cat1
 
     # Skip the batch policy_tester and/or zip steps (e.g. when iterating).
@@ -42,6 +42,9 @@ Design notes
   mirroring run_experiment_8. NDQ does not expose --feature-norm/--layer-norm/--n-step.
 * Cat 3 (IDs 13-16): VDN/QMIX/HAPPO/HASAC + 8-bit hand-crafted error comm at 15M.
 * Cat 4 (IDs 17-20): VDN/QMIX/HAPPO/HASAC + 4-bit hand-crafted + 4-bit age comm at 15M.
+* Cat 5 (IDs 21-23): DIAL recurrent + 8-dim differentiable comm at 30M, sweeping
+  --mixer in {none, vdn, qmix}. Like NDQ, DIAL is paper-aligned and does not
+  expose --feature-norm/--layer-norm/--n-step.
 * The VoU (Value of Update) quantile search runs once and produces edges for
   bits_1 through bits_8 in a single output. Cached under
   outputs/_shared/vou_search/ and reused across all comm experiments.
@@ -98,6 +101,9 @@ CAT1_TIMESTEPS = 15_000_000
 CAT2_TIMESTEPS = 30_000_000
 CAT3_TIMESTEPS = 15_000_000
 CAT4_TIMESTEPS = 15_000_000
+CAT5_TIMESTEPS = 30_000_000
+
+DIAL_COMM_DIM = 8
 
 # Q-learner bash defaults (run_experiment_1..3).
 QLEARNER_BASE_ARGS: List[str] = [
@@ -146,6 +152,15 @@ NDQ_BASE_ARGS: List[str] = [
     "--n-eval-episodes", "80",
     "--n-envs", "8",
     "--episode-length", "250",
+]
+
+# DIAL bash defaults (run_experiment_7). Recurrent, paper-aligned, online-only.
+# No --feature-norm/--layer-norm/--n-step exposed; comm-dim is fixed via DIAL_COMM_DIM.
+DIAL_BASE_ARGS: List[str] = [
+    "--no-normalize-obs",
+    "--eval-freq", "40000",
+    "--n-eval-episodes", "80",
+    "--n-envs", "8",
 ]
 
 # Hand-crafted communication is built on top of the per-algo base args,
@@ -209,6 +224,17 @@ def _ndq_args(total: int, mixer: str, comm_dim: int) -> List[str]:
 
 def _on_policy_args(total: int) -> List[str]:
     return list(ON_POLICY_BASE_ARGS) + ["--total-timesteps", str(total)]
+
+
+def _dial_args(total: int, mixer: str, comm_dim: int) -> List[str]:
+    args = list(DIAL_BASE_ARGS) + [
+        "--total-timesteps", str(total),
+        "--epsilon-decay-steps", _eps_decay(total),
+        "--comm-dim", str(comm_dim),
+    ]
+    if mixer != "none":
+        args += ["--mixer", mixer]
+    return args
 
 
 def _hasac_args(total: int) -> List[str]:
@@ -314,6 +340,18 @@ def build_registry() -> List[Experiment]:
             needs_vou_edges=True,
             error_comm_bits=HANDCRAFT_BITS_4,
             age_comm_bits=AGE_BITS_4,
+        ))
+        next_id += 1
+
+    # ----- Cat 5: DIAL recurrent + 8-dim differentiable comm at 30M -----
+    for mixer in ("none", "vdn", "qmix"):
+        exps.append(Experiment(
+            id=next_id,
+            name=f"DIAL_{DIAL_COMM_DIM}dim_{mixer}_30mil",
+            module="algorithms.marl_dial",
+            algo_label="marl_dial",
+            total_timesteps=CAT5_TIMESTEPS,
+            extra_args=_dial_args(CAT5_TIMESTEPS, mixer, DIAL_COMM_DIM),
         ))
         next_id += 1
 
@@ -644,8 +682,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--batch-name", default=None,
                    help="Override the auto-derived batch directory name (default: encoded IDs).")
     p.add_argument("--seed", type=int, default=0, help="Training seed (default: 0).")
-    p.add_argument("--num-policy-test-seeds", type=int, default=250,
-                   help="Seeds passed to policy_tester (default: 250, the tool default).")
+    p.add_argument("--num-policy-test-seeds", type=int, default=1264,
+                   help="Seeds passed to policy_tester (default: 1264; tools.policy_tester default is 250).")
     p.add_argument("--skip-policy-test", action="store_true",
                    help="Skip the post-training batch policy_tester step.")
     p.add_argument("--skip-zip", action="store_true",

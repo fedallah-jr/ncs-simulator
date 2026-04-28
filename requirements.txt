@@ -8,3 +8,4 @@ jax
 jaxlib
 flax
 evosax
+pandas
