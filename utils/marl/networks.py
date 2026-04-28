@@ -469,7 +469,7 @@ def dial_rnn_forward_batched(
                 agent_idx,
                 prev_action[:, agent_id],
                 recv_msg[:, agent_id, :],
-                hidden_view[:, :, agent_id, :],
+                hidden_view[:, :, agent_id, :].contiguous(),
             )
             q_per_agent.append(q_i)
             m_per_agent.append(m_i)
