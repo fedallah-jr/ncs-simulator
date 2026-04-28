@@ -28,7 +28,8 @@ import csv
 import json
 import os
 
-# Prevent thread thrashing when using ProcessPoolExecutor with PyTorch
+# Prevent BLAS thread thrashing when using ProcessPoolExecutor. PyTorch's
+# own CPU pools are clamped in tools._common when torch policies are loaded.
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 

@@ -7,6 +7,7 @@ This module centralizes code used by both ``policy_tester`` and
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -21,6 +22,35 @@ from ncs_env.config import load_config
 from ncs_env.env import NCS_Env
 from tools.heuristic_policies import get_heuristic_policy
 from utils.marl.obs_normalization import RunningObsNormalizer
+
+
+# PyTorch does very small CPU inference batches in policy_tester. On machines
+# with many cores, the default intra-op/inter-op thread pools can dominate the
+# actual MLP work by orders of magnitude. Keep this helper local to policy
+# loading so training code is not affected.
+_TORCH_INFERENCE_THREADS_CONFIGURED = False
+
+
+def _configure_torch_policy_inference_threads(torch_module: Any) -> None:
+    global _TORCH_INFERENCE_THREADS_CONFIGURED
+    if _TORCH_INFERENCE_THREADS_CONFIGURED:
+        return
+
+    thread_count = 1
+    os.environ.setdefault("OMP_NUM_THREADS", str(thread_count))
+    os.environ.setdefault("MKL_NUM_THREADS", str(thread_count))
+    try:
+        torch_module.set_num_threads(thread_count)
+    except Exception:
+        pass
+    try:
+        torch_module.set_num_interop_threads(thread_count)
+    except Exception:
+        # PyTorch only allows this before inter-op work has started. In that
+        # case, set_num_threads above still prevents the expensive intra-op
+        # oversubscription that hurts policy testing most.
+        pass
+    _TORCH_INFERENCE_THREADS_CONFIGURED = True
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +122,7 @@ def read_marl_torch_n_agents(model_path: Path) -> Optional[int]:
         import torch
     except ImportError as exc:
         raise ImportError("torch is required to read marl_torch checkpoints") from exc
+    _configure_torch_policy_inference_threads(torch)
 
     ckpt = torch.load(str(model_path), map_location="cpu")
     if not isinstance(ckpt, dict):
@@ -314,6 +345,7 @@ def load_marl_torch_multi_agent_policy(
     ndq_cut_mu_thres: float = 0.0,
 ):
     import torch
+    _configure_torch_policy_inference_threads(torch)
 
     # Check if this is a DIAL checkpoint
     ckpt = torch.load(str(model_path), map_location="cpu")
