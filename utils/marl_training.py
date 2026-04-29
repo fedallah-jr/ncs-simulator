@@ -2,7 +2,7 @@
 Shared utilities for MARL training scripts.
 
 This module contains common setup and utility functions used across
-all MARL training algorithms (IQL, VDN, QMIX, QPLEX, MAPPO).
+all MARL training algorithms (IQL, VDN, QMIX, MAPPO).
 """
 
 from __future__ import annotations

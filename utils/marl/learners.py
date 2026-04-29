@@ -18,7 +18,6 @@ from utils.marl.networks import (
     NDQRNNAgent,
     NDQCommEncoder,
     QMixer,
-    QPLEXMixer,
     VDNMixer,
     TwinQNetwork,
     append_agent_id,
@@ -357,123 +356,6 @@ class QMIXLearner:
         }
 
     def load_state_dict(self, d: dict) -> None:
-        self.agent.load_state_dict(d["agent"])
-        self.target_agent.load_state_dict(d["target_agent"])
-        self.mixer.load_state_dict(d["mixer"])
-        self.target_mixer.load_state_dict(d["target_mixer"])
-        self.optimizer.load_state_dict(d["optimizer"])
-        self.train_steps = int(d["train_steps"])
-
-
-class QPLEXLearner:
-    def __init__(
-        self,
-        agent: nn.Module,
-        mixer: QPLEXMixer,
-        n_agents: int,
-        n_actions: int,
-        gamma: float,
-        lr: float,
-        target_update_interval: int = 200,
-        grad_clip_norm: Optional[float] = 1.0,
-        use_agent_id: bool = True,
-        double_q: bool = True,
-        device: Optional[torch.device] = None,
-        optimizer_type: str = "rmsprop",
-    ) -> None:
-        self.agent = agent
-        self.target_agent = copy.deepcopy(agent)
-
-        self.mixer = mixer
-        self.target_mixer = copy.deepcopy(mixer)
-
-        self.n_agents = n_agents
-        self.n_actions = n_actions
-        self.gamma = float(gamma)
-        self.target_update_interval = int(target_update_interval)
-        self.grad_clip_norm = grad_clip_norm
-        self.use_agent_id = bool(use_agent_id)
-        self.double_q = bool(double_q)
-
-        self.device = device if device is not None else torch.device("cpu")
-        self.agent.to(self.device)
-        self.target_agent.to(self.device)
-        self.mixer.to(self.device)
-        self.target_mixer.to(self.device)
-
-        self._all_params = list(self.agent.parameters()) + list(self.mixer.parameters())
-        self.optimizer = _make_optimizer(self._all_params, lr=float(lr), optimizer_type=optimizer_type)
-        self.train_steps = 0
-
-    def update(self, batch: MARLBatch) -> None:
-        self.train_steps += 1
-        obs = _maybe_append_id(batch.obs, self.n_agents, self.use_agent_id)
-        next_obs = _maybe_append_id(batch.next_obs, self.n_agents, self.use_agent_id)
-        actions = batch.actions
-        rewards = batch.rewards
-        dones = batch.dones
-        states = batch.states
-        next_states = batch.next_states
-
-        q_all = _q_values(self.agent, obs, self.n_agents, self.n_actions)
-        q_taken = q_all.gather(-1, actions.unsqueeze(-1)).squeeze(-1)
-        max_q_i = q_all.max(dim=-1).values
-        actions_onehot = F.one_hot(actions, num_classes=self.n_actions).float()
-
-        q_tot_raw, attend_reg, _ = self.mixer(
-            q_taken, states, actions_onehot=actions_onehot, max_q_i=max_q_i,
-        )
-        q_tot = q_tot_raw.squeeze(-1)
-
-        with torch.no_grad():
-            if self.double_q:
-                online_next_q = _q_values(self.agent, next_obs, self.n_agents, self.n_actions)
-                next_actions = online_next_q.argmax(dim=-1)
-                target_next_q = _q_values(self.target_agent, next_obs, self.n_agents, self.n_actions)
-                target_chosen_qvals = target_next_q.gather(-1, next_actions.unsqueeze(-1)).squeeze(-1)
-                target_max_qvals = target_next_q.max(dim=-1).values
-                next_actions_onehot = F.one_hot(next_actions, num_classes=self.n_actions).float()
-
-                target_q_tot, _, _ = self.target_mixer(
-                    target_chosen_qvals,
-                    next_states,
-                    actions_onehot=next_actions_onehot,
-                    max_q_i=target_max_qvals,
-                )
-                target_q_tot = target_q_tot.squeeze(-1)
-            else:
-                target_next_q = _q_values(self.target_agent, next_obs, self.n_agents, self.n_actions)
-                target_max_qvals = target_next_q.max(dim=-1).values
-                target_q_tot, _, _ = self.target_mixer(target_max_qvals, next_states)
-                target_q_tot = target_q_tot.squeeze(-1)
-
-            r_tot = rewards.sum(dim=1)
-            not_done = (1.0 - dones)
-            gamma_n = batch.gamma_n  # per-sample discount (gamma^n for n-step)
-            targets = r_tot + gamma_n * not_done * target_q_tot
-
-        loss = F.mse_loss(q_tot, targets) + attend_reg
-        self.optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        if self.grad_clip_norm is not None:
-            nn.utils.clip_grad_norm_(self._all_params, float(self.grad_clip_norm))
-        self.optimizer.step()
-
-        if self.train_steps % self.target_update_interval == 0:
-            _hard_update(self.target_agent, self.agent)
-            _hard_update(self.target_mixer, self.mixer)
-
-    def state_dict(self) -> dict:  # QPLEXLearner state_dict
-        return {
-            "agent": self.agent.state_dict(),
-            "target_agent": self.target_agent.state_dict(),
-            "mixer": self.mixer.state_dict(),
-            "target_mixer": self.target_mixer.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "train_steps": self.train_steps,
-        }
-
-    def load_state_dict(self, d: dict) -> None:  # QPLEXLearner load_state_dict
         self.agent.load_state_dict(d["agent"])
         self.target_agent.load_state_dict(d["target_agent"])
         self.mixer.load_state_dict(d["mixer"])

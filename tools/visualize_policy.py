@@ -2,12 +2,9 @@
 Policy Visualization Tool for Networked Control Systems
 
 This tool visualizes the state evolution of policies trained or defined in the NCS simulator.
-It supports learned policies (OpenAI-ES, MARL torch) and heuristic policies.
+It supports learned MARL torch policies and heuristic policies.
 
 Usage:
-    # Visualize an ES policy
-    python -m tools.visualize_policy --config configs/perfect_comm.json --policy path/to/model.npz --policy-type es
-
     # Visualize a heuristic policy
     python -m tools.visualize_policy --config configs/perfect_comm.json --policy always_send --policy-type heuristic
 
@@ -54,7 +51,6 @@ from ncs_env.config import load_config
 from tools.heuristic_policies import HEURISTIC_POLICIES
 from tools._common import (
     MultiAgentHeuristicPolicy,
-    load_es_policy,
     load_marl_torch_multi_agent_policy,
     load_multi_agent_policy,
     resolve_n_agents,
@@ -1365,13 +1361,13 @@ def main():
     parser.add_argument(
         '--policy',
         type=str,
-        help='Path to policy file (ES/MARL torch) or policy name (heuristic)'
+        help='Path to policy file (MARL torch) or policy name (heuristic)'
     )
     parser.add_argument(
         '--policy-type',
         type=str,
-        choices=['es', 'openai_es', 'heuristic', 'marl_torch'],
-        help='Type of policy: es, openai_es, heuristic, or marl_torch'
+        choices=['heuristic', 'marl_torch'],
+        help='Type of policy: heuristic or marl_torch'
     )
 
     # Multi-policy comparison mode
@@ -1385,7 +1381,7 @@ def main():
         '--policy-types',
         type=str,
         nargs='+',
-        choices=['es', 'openai_es', 'heuristic', 'marl_torch'],
+        choices=['heuristic', 'marl_torch'],
         help='List of policy types corresponding to --policies'
     )
     parser.add_argument(
@@ -1575,9 +1571,9 @@ def main():
         print("✓ Using evaluation reward/termination overrides")
     print()
 
-    allowed_policy_types = {"marl_torch", "heuristic", "es", "openai_es"}
+    allowed_policy_types = {"marl_torch", "heuristic"}
     if not all(policy_type in allowed_policy_types for policy_type in policy_types_norm):
-        parser.error("Supported policy types: marl_torch, es, openai_es, heuristic")
+        parser.error("Supported policy types: marl_torch, heuristic")
 
     try:
         resolved_n_agents = resolve_n_agents(

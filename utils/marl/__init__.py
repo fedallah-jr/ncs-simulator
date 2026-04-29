@@ -20,7 +20,7 @@ from .common import (
     dial_rnn_collect_transition,
     qlearning_collect_transition,
 )
-from .learners import IQLLearner, VDNLearner, QMIXLearner, QPLEXLearner, HASACLearner, MARLDIALLearner
+from .learners import IQLLearner, VDNLearner, QMIXLearner, HASACLearner, MARLDIALLearner
 from .networks import (
     CentralValueMLP,
     MLPAgent,
@@ -29,7 +29,6 @@ from .networks import (
     DRU,
     route_messages,
     QMixer,
-    QPLEXMixer,
     TwinQNetwork,
     VDNMixer,
     append_agent_id,
@@ -40,7 +39,6 @@ from .value_norm import ValueNorm
 from .args_builder import (
     build_base_qlearning_parser,
     add_qmix_args,
-    add_qplex_args,
     build_happo_parser,
     build_happo_hyperparams,
     build_hasac_parser,
@@ -76,7 +74,6 @@ __all__ = [
     "QLearnStepResult",
     "DialRNNStepResult",
     "add_qmix_args",
-    "add_qplex_args",
     "append_agent_id",
     "build_base_qlearning_parser",
     "build_happo_hyperparams",
@@ -103,8 +100,6 @@ __all__ = [
     "MLPAgent",
     "QMIXLearner",
     "QMixer",
-    "QPLEXLearner",
-    "QPLEXMixer",
     "route_messages",
     "RunningObsNormalizer",
     "patch_autoreset_final_obs",

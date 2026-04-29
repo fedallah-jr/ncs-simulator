@@ -54,11 +54,9 @@ from ncs_env.env import NCS_Env
 from tools.heuristic_policies import get_heuristic_policy
 from tools._common import (
     MultiAgentHeuristicPolicy,
-    load_es_policy,
     load_marl_torch_multi_agent_policy,
     infer_policy_n_agents,
     read_marl_torch_n_agents,
-    read_es_n_agents,
     resolve_n_agents,
     sanitize_filename as _sanitize_filename,
     parse_set_overrides,
@@ -666,8 +664,6 @@ def _load_policy(
             deterministic=deterministic,
             env=env,
         )
-    if policy_type in {"es", "openai_es"}:
-        return load_es_policy(spec.policy_path, env)
     if policy_type == "marl_torch":
         return load_marl_torch_multi_agent_policy(
             spec.policy_path, env,
@@ -940,10 +936,9 @@ def _discover_model_runs(models_root: Path) -> List[ModelRun]:
             continue
 
         def _select_checkpoint(stem: str) -> Optional[Path]:
-            for suffix in (".pt", ".npz"):
-                candidate = entry / f"{stem}{suffix}"
-                if candidate.exists():
-                    return candidate
+            candidate = entry / f"{stem}.pt"
+            if candidate.exists():
+                return candidate
             return None
 
         best_model = _select_checkpoint("best_model")
@@ -968,8 +963,6 @@ def _infer_policy_type(model_path: Path) -> str:
     suffix = model_path.suffix.lower()
     if suffix == ".pt":
         return "marl_torch"
-    if suffix == ".npz":
-        return "es"
     raise ValueError(f"Unsupported model extension: {model_path}")
 
 
@@ -1549,7 +1542,7 @@ def main() -> int:
     parser.add_argument("--policy", help="Path to policy file or heuristic name")
     parser.add_argument(
         "--policy-type",
-        choices=["es", "openai_es", "heuristic", "marl_torch"],
+        choices=["heuristic", "marl_torch"],
         help="Policy type for the target policy",
     )
     parser.add_argument("--policy-label", default=None, help="Label for the target policy")
@@ -1747,9 +1740,9 @@ def main() -> int:
 
         resolved_n_agents = _resolve_n_agents(config, policy_specs, args.n_agents)
         policy_type_names = [spec.policy_type.lower() for spec in policy_specs]
-        allowed_policy_types = {"marl_torch", "heuristic", "es", "openai_es"}
+        allowed_policy_types = {"marl_torch", "heuristic"}
         if not all(policy in allowed_policy_types for policy in policy_type_names):
-            raise ValueError("Supported policy types: marl_torch, es, openai_es, heuristic")
+            raise ValueError("Supported policy types: marl_torch, heuristic")
         if resolved_n_agents < 1:
             raise ValueError("Resolved n_agents must be >= 1.")
 
@@ -2043,9 +2036,9 @@ def main() -> int:
         raise ValueError("No model checkpoints found under the specified root.")
 
     unique_policy_types = sorted(set(policy_types))
-    allowed_policy_types = {"marl_torch", "es"}
+    allowed_policy_types = {"marl_torch"}
     if not set(unique_policy_types).issubset(allowed_policy_types):
-        raise ValueError("Batch mode supports only marl_torch and es checkpoints.")
+        raise ValueError("Batch mode supports only marl_torch checkpoints.")
 
     resolved_n_agents = _resolve_n_agents(
         reference_config,

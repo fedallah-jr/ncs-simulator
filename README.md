@@ -6,9 +6,6 @@ This project models multiple physical plants that share a single IEEE 802.15.4
 
 Learning-based baselines live under `algorithms/`:
 
-- OpenAI-ES (shared policy, JAX): `python -m algorithms.openai_es --config configs/marl_absolute_plants.json --generations 1000 --popsize 128`
-  - Uses `system.n_agents` from the config and appends a one-hot agent id for parameter sharing when `n_agents > 1`.
-  - Observation normalization matches MARL flags: `--no-normalize-obs`, `--obs-norm-clip`, `--obs-norm-eps`.
 - IQL (multi-agent, PyTorch): `python -m algorithms.marl_iql --config configs/marl_absolute_plants.json --total-timesteps 200000`
 - DIAL (multi-agent, PyTorch, recurrent, online-only): `python -m algorithms.marl_dial --config configs/marl_absolute_plants.json --total-timesteps 200000`
   - Uses a shared GRU with differentiable communication following the original DIAL paper architecture.
@@ -18,8 +15,6 @@ Learning-based baselines live under `algorithms/`:
   - `--qmix-mixing-hidden-dim`, `--qmix-hypernet-hidden-dim`: QMIX architecture knobs (defaults: 32, 64).
 - VDN (multi-agent, PyTorch): `python -m algorithms.marl_vdn --config configs/marl_absolute_plants.json --total-timesteps 200000`
 - QMIX (multi-agent, PyTorch): `python -m algorithms.marl_qmix --config configs/marl_absolute_plants.json --total-timesteps 200000`
-- QPLEX (multi-agent, PyTorch, Q-attention mixer): `python -m algorithms.marl_qplex --config configs/marl_absolute_plants.json --total-timesteps 200000`
-  - QPLEX weights agent Qs via Q-attention (state + per-agent Q-values); tune with `--n-head`, `--attend-reg-coef`, `--nonlinear`, `--no-state-bias`, `--no-weighted-head`.
 - MAPPO (multi-agent, PyTorch): `python -m algorithms.marl_mappo --config configs/marl_absolute_plants.json --total-timesteps 200000`
   - `--num-mini-batch`: Number of mini-batches per PPO epoch (default `1`, i.e., full-batch updates).
   - Key PPO defaults: `--n-epochs 5`, `--learning-rate 5e-4`, `--vf-coef 1.0`, and LR decay disabled by default (enable with `--lr-decay`).
@@ -35,14 +30,14 @@ Learning-based baselines live under `algorithms/`:
   - `--popart`: Use PopArt value normalization instead of the default EMA-based ValueNorm.
   - PopArt EMA decay can be tuned with `--popart-beta` (default `0.999`).
 
-All MARL Q-learning algorithms (IQL, IQL-DIAL, VDN, QMIX, QPLEX) support these architectural enhancements:
+All MARL Q-learning algorithms (IQL, IQL-DIAL, VDN, QMIX) support these architectural enhancements:
 - `--double-q`: Enable Double DQN (use online network to select actions, target network to evaluate).
 - `--dueling`: Enable Dueling DQN architecture (separate value and advantage streams).
 - `--stream-hidden-dim`: Hidden dimension for dueling streams (default: 64).
 
 Example with all enhancements: `python -m algorithms.marl_qmix --config configs/marl_absolute_plants.json --dueling --double-q --total-timesteps 200000`
 
-All MARL algorithms (IQL, IQL-DIAL, VDN, QMIX, QPLEX, MAPPO, HAPPO) support observation normalization (enabled by default):
+All MARL algorithms (IQL, IQL-DIAL, VDN, QMIX, MAPPO, HAPPO) support observation normalization (enabled by default):
 - `--no-normalize-obs`: Disable running mean/std normalization on per-agent observations.
 - `--obs-norm-clip`: Clip normalized observations to +/- this value (<=0 disables).
 - `--obs-norm-eps`: Epsilon for observation normalization.
@@ -50,9 +45,8 @@ All MARL algorithms (IQL, IQL-DIAL, VDN, QMIX, QPLEX, MAPPO, HAPPO) support obse
 CLI flags let you change environment parameters. Use `--output-root` (defaults to `outputs/`) to control where training artifacts land. Each run calls `utils.run_utils.prepare_run_directory(...)`, which creates a sequentially numbered folder for the algorithm (e.g., `iql_0`, `iql_1`, `vdn_0`, etc.). All training details are preserved in the saved config file. That directory always contains:
 
 - **Model Checkpoints:**
-  - For OpenAI-ES: `best_model.npz` (flattened params of best individual) and `latest_model.npz`.
   - For MARL (IQL/VDN/QMIX/MAPPO): `best_model.pt` and `latest_model.pt`.
-- `training_rewards.csv`: A simple CSV table tracking performance. For OpenAI-ES it logs `[generation, mean_reward, max_reward, time]`.
+- `training_rewards.csv`: A simple CSV table tracking performance.
 - `evaluation_drop_stats.csv`: Training-time baseline comparison stats per eval step: baseline policy, policy/baseline mean/std rewards, and drop-ratio mean/std used for `best_model.pt` selection.
 - **`config.json`**, which combines the effective environment configuration used by the run (including CLI `--set` overrides, when provided) with a `training_run` section containing the algorithm name, timestamp, source config path, and all hyperparameters from the run. 
 

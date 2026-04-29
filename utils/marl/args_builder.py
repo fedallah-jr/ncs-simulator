@@ -121,19 +121,6 @@ def add_qmix_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mixer-hidden-dim", type=int, default=32)
     parser.add_argument("--hypernet-hidden-dim", type=int, default=64)
 
-def add_qplex_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--mixing-embed-dim", type=int, default=32)
-    parser.add_argument("--hypernet-embed", type=int, default=64)
-    parser.add_argument("--adv-hypernet-layers", type=int, default=3)
-    parser.add_argument("--adv-hypernet-embed", type=int, default=64)
-    parser.add_argument("--num-kernel", type=int, default=10)
-    parser.add_argument("--n-head", type=int, default=4)
-    parser.add_argument("--attend-reg-coef", type=float, default=0.001)
-    parser.add_argument("--nonlinear", action="store_true")
-    parser.add_argument("--no-weighted-head", action="store_false", dest="weighted_head")
-    parser.add_argument("--no-state-bias", action="store_false", dest="state_bias")
-    parser.add_argument("--no-is-minus-one", action="store_false", dest="is_minus_one")
-    parser.set_defaults(weighted_head=True, state_bias=True, is_minus_one=True)
 
 def build_happo_parser(description: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)

@@ -53,16 +53,6 @@ python -m tools.visualize_policy \
     --generate-video --per-agent-videos
 ```
 
-#### Visualize an OpenAI-ES Policy
-
-```bash
-python -m tools.visualize_policy \
-    --config configs/marl_mixed_plants.json \
-    --policy path/to/latest_model.npz \
-    --policy-type es \
-    --episode-length 500
-```
-
 #### Compare Multiple Policies
 
 ```bash
@@ -112,7 +102,7 @@ python -m tools.visualize_policy \
 - `--policies`: Multiple policies to compare (requires `--policy-types`)
 
 **Policy Type:**
-- `--policy-type`: Type of single policy (`marl_torch`, `es`, `openai_es`, or `heuristic`)
+- `--policy-type`: Type of single policy (`marl_torch` or `heuristic`)
 - `--policy-types`: Types of multiple policies (space-separated)
 
 **Optional:**
@@ -350,7 +340,6 @@ You can extend the visualization tool by adding new plotting functions. Follow t
 - Matplotlib
 - Gymnasium
 - torch (for marl_torch checkpoints)
-- jax/jaxlib/flax (for ES checkpoints)
 - filterpy (for Kalman filter)
 - FFmpeg (optional, only for MP4 video generation)
 
