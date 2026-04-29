@@ -45,6 +45,10 @@ Design notes
 * Cat 5 (IDs 21-23): DIAL recurrent + 8-dim differentiable comm at 30M, sweeping
   --mixer in {none, vdn, qmix}. Like NDQ, DIAL is paper-aligned and does not
   expose --feature-norm/--layer-norm/--n-step.
+* Cat 6 (IDs 24-25): RNN-VDN / RNN-QMIX no-comm baseline at 30M. Same GRU
+  backbone and hyperparameters as NDQ Cat 2 with the message branch deleted
+  -- one run per mixer so each NDQ comm-dim setting has a directly comparable
+  no-comm reference.
 * The VoU (Value of Update) quantile search runs once and produces edges for
   bits_1 through bits_8 in a single output. Cached under
   outputs/_shared/vou_search/ and reused across all comm experiments.
@@ -102,6 +106,7 @@ CAT2_TIMESTEPS = 30_000_000
 CAT3_TIMESTEPS = 15_000_000
 CAT4_TIMESTEPS = 15_000_000
 CAT5_TIMESTEPS = 30_000_000
+CAT6_TIMESTEPS = 30_000_000
 
 DIAL_COMM_DIM = 8
 
@@ -237,6 +242,20 @@ def _dial_args(total: int, mixer: str, comm_dim: int) -> List[str]:
     return args
 
 
+def _rnn_qmix_args(total: int, mixer: str) -> List[str]:
+    """No-comm recurrent baseline that mirrors NDQ minus the message branch.
+
+    Reuses NDQ_BASE_ARGS verbatim (so --double-q, --n-envs, --eval-freq, etc.
+    match the NDQ Cat 2 sweep) and drops --comm-embed-dim because there is no
+    message channel.
+    """
+    return list(NDQ_BASE_ARGS) + [
+        "--total-timesteps", str(total),
+        "--epsilon-decay-steps", _eps_decay(total),
+        "--mixer", mixer,
+    ]
+
+
 def _hasac_args(total: int) -> List[str]:
     return list(HASAC_BASE_ARGS) + ["--total-timesteps", str(total)]
 
@@ -352,6 +371,22 @@ def build_registry() -> List[Experiment]:
             algo_label="marl_dial",
             total_timesteps=CAT5_TIMESTEPS,
             extra_args=_dial_args(CAT5_TIMESTEPS, mixer, DIAL_COMM_DIM),
+        ))
+        next_id += 1
+
+    # ----- Cat 6: RNN-QMIX / RNN-VDN no-comm baseline at 30M -----
+    # Same recurrent backbone and optimizer settings as NDQ Cat 2 with the
+    # message branch removed. Pairs 1-to-1 with the NDQ vdn/qmix splits so
+    # each NDQ comm-dim run has a directly-comparable no-comm baseline at
+    # the same mixer.
+    for mixer in ("vdn", "qmix"):
+        exps.append(Experiment(
+            id=next_id,
+            name=f"RNN_{mixer}_nocomm_30mil",
+            module="algorithms.marl_rnn_qmix",
+            algo_label="marl_rnn_qmix",
+            total_timesteps=CAT6_TIMESTEPS,
+            extra_args=_rnn_qmix_args(CAT6_TIMESTEPS, mixer),
         ))
         next_id += 1
 
