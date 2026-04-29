@@ -487,8 +487,23 @@ class MARLDIALLearner:
 
     Recomputes the full online and target recurrent traces over padded episode
     batches, with mask-aware hidden state freezing and per-sample bootstrap
-    selection.  Target network is updated every ``target_update_episodes``
-    episodes (accumulator pattern for B > 1).
+    selection.
+
+    Target sync cadence: every ``target_update_steps`` calls to ``update``
+    (one call = one optimizer step on a batch of B episodes). With B = 32 and
+    target_update_steps = 100 this matches the reference's
+    ``step_target=100`` (which counts ``learn_from_episode`` calls, each over
+    ``bs=32`` parallel rollouts).
+
+    DRU noise replay: the online trace replays ``batch.dru_noise`` so the
+    recomputed recv_msg matches what the policy actually saw at collection
+    time (variance reduction). The target trace samples fresh noise to remain
+    independent of the online trace, mirroring the reference's separate
+    target rollout in ``arena.run_episode``.
+
+    ``episodes_seen`` is kept as an informational counter (also persisted in
+    ``state_dict``) for downstream logging / resume; it is *not* used to
+    decide target syncs — that is keyed off ``_train_steps``.
     """
 
     def __init__(
@@ -611,12 +626,16 @@ class MARLDIALLearner:
         all_q: list[torch.Tensor] = []
         for t in range(max_T):
             obs_t = batch.obs[:, t]
-            q_t, m_t, new_hidden = dial_rnn_forward_batched(
+            valid = batch.mask[:, t].bool()
+            q_t, m_t, new_hidden = self._forward_with_valid_mask(
                 agent,
-                obs_t,
-                prev_action,
-                recv_msg,
-                hidden,
+                obs_t=obs_t,
+                prev_action=prev_action,
+                recv_msg=recv_msg,
+                hidden=hidden,
+                valid=valid,
+                B=B,
+                N=N,
             )
             all_q.append(q_t)
 
@@ -629,7 +648,6 @@ class MARLDIALLearner:
             )
 
             # Freeze state for padded timesteps
-            valid = batch.mask[:, t].bool()
             valid_bn = valid.unsqueeze(1).expand(B, N).reshape(B * N)
             v_h = valid_bn.view(1, B * N, 1).expand_as(new_hidden)
             hidden = torch.where(v_h, new_hidden, hidden)
@@ -638,15 +656,87 @@ class MARLDIALLearner:
             v_m = valid.view(B, 1, 1).expand_as(new_recv)
             recv_msg = torch.where(v_m, new_recv, recv_msg)
 
-        # Bootstrap step (reference runs nsteps+1)
-        q_boot, _, _ = dial_rnn_forward_batched(
+        # Bootstrap step (reference runs nsteps+1). Only forward over rows
+        # whose episode actually reached this point; otherwise BN running
+        # stats would absorb post-end (padded) inputs.
+        boot_valid = batch.mask.any(dim=1)  # (B,) — true if episode had ≥1 valid step
+        q_boot, _, _ = self._forward_with_valid_mask(
             agent,
-            batch.next_obs,
-            prev_action,
-            recv_msg,
-            hidden,
+            obs_t=batch.next_obs,
+            prev_action=prev_action,
+            recv_msg=recv_msg,
+            hidden=hidden,
+            valid=boot_valid,
+            B=B,
+            N=N,
         )
         return all_q, q_boot
+
+    # ------------------------------------------------------------------
+    def _forward_with_valid_mask(
+        self,
+        agent: DialRNNAgent,
+        *,
+        obs_t: torch.Tensor,
+        prev_action: torch.Tensor,
+        recv_msg: torch.Tensor,
+        hidden: torch.Tensor,
+        valid: torch.Tensor,
+        B: int,
+        N: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Forward only the valid (non-padded) rows through the agent.
+
+        Avoids BatchNorm contamination from padded timesteps: with batch-mode
+        BN, every row in the batch contributes to running stats and to the
+        per-batch normalization, so naively forwarding all B rows leaks
+        garbage from envs whose episodes already ended.
+
+        Outputs are scattered back to full batch shape; invalid rows hold
+        zero Q/message values (loss is masked out anyway) and the *original*
+        hidden state (subsequent ``torch.where`` masking is then a no-op
+        for those rows).
+        """
+        if valid.all():
+            return dial_rnn_forward_batched(
+                agent, obs_t, prev_action, recv_msg, hidden,
+            )
+
+        device = obs_t.device
+        q_full = torch.zeros(B, N, agent.n_actions, device=device, dtype=obs_t.dtype)
+        m_full = torch.zeros(B, N, agent.comm_dim, device=device, dtype=obs_t.dtype)
+        if not valid.any():
+            return q_full, m_full, hidden
+
+        valid_idx = valid.nonzero(as_tuple=True)[0]
+        V = int(valid_idx.numel())
+
+        obs_v = obs_t.index_select(0, valid_idx).contiguous()
+        pa_v = prev_action.index_select(0, valid_idx).contiguous()
+        rm_v = recv_msg.index_select(0, valid_idx).contiguous()
+
+        hidden_view = hidden.reshape(agent.rnn_layers, B, N, agent.rnn_hidden_dim)
+        h_v = hidden_view.index_select(1, valid_idx).reshape(
+            agent.rnn_layers, V * N, agent.rnn_hidden_dim,
+        ).contiguous()
+
+        q_v, m_v, h_v_out = dial_rnn_forward_batched(
+            agent, obs_v, pa_v, rm_v, h_v,
+        )
+
+        q_full = q_full.index_copy(0, valid_idx, q_v)
+        m_full = m_full.index_copy(0, valid_idx, m_v)
+
+        new_hidden_view = hidden.reshape(
+            agent.rnn_layers, B, N, agent.rnn_hidden_dim,
+        ).clone()
+        h_v_out_4d = h_v_out.reshape(agent.rnn_layers, V, N, agent.rnn_hidden_dim)
+        new_hidden_view = new_hidden_view.index_copy(1, valid_idx, h_v_out_4d)
+        new_hidden = new_hidden_view.reshape(
+            agent.rnn_layers, B * N, agent.rnn_hidden_dim,
+        )
+
+        return q_full, m_full, new_hidden
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -685,18 +775,27 @@ class MARLDIALLearner:
         B, max_T = batch.obs.shape[:2]
         N = self.n_agents
 
-        # Replay stored DRU noise so the communication trace matches collection.
-        noise = batch.dru_noise if batch.dru_noise.shape[-1] > 0 else None
+        # Online: replay stored DRU noise so the recomputed communication
+        # trace matches the noise actually applied at collection time. This
+        # is a variance-reduction technique that pins the online trace to
+        # the rolled-out recv_msg modulo any drift in agent params between
+        # collection and learning.
+        online_noise = batch.dru_noise if batch.dru_noise.shape[-1] > 0 else None
 
         # Online trace WITH gradients
         online_q, _ = self._forward_trace(
-            self.agent, batch, train_mode=True, dru_noise=noise,
+            self.agent, batch, train_mode=True, dru_noise=online_noise,
         )
 
-        # Target trace WITHOUT gradients
+        # Target trace WITHOUT gradients. Reference samples target's DRU
+        # noise independently of the online net's noise (separate rollout in
+        # arena.run_episode). Pass dru_noise=None so each target step
+        # samples fresh noise. The bootstrap recv_msg is similarly
+        # freshly-sampled because there is no stored noise for the
+        # bootstrap timestep.
         with torch.no_grad():
             target_q, target_q_boot = self._forward_trace(
-                self.target_agent, batch, train_mode=True, dru_noise=noise,
+                self.target_agent, batch, train_mode=True, dru_noise=None,
             )
 
         if self.mixer_type == "vdn":

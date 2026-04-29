@@ -464,16 +464,34 @@ class DialRNNEpisodeCollector:
 
     def _finalize(self, env_idx: int) -> dict:
         buf = self._buffers[env_idx]
+        obs_arr = np.stack([t["obs"] for t in buf])
+        next_obs_arr = buf[-1]["next_obs"]
         result = {
-            "obs": np.stack([t["obs"] for t in buf]),
+            "obs": obs_arr,
             "actions": np.stack([t["actions"] for t in buf]),
             "rewards": np.stack([t["rewards"] for t in buf]),
             "terminated": np.array([t["done"] for t in buf], dtype=np.float32),
-            "next_obs": buf[-1]["next_obs"],
-            "states": np.stack([t["state"] for t in buf]),
-            "next_state": buf[-1]["next_state"],
+            "next_obs": next_obs_arr,
         }
+        # state / next_state are required only by mixers that consume a
+        # global state channel (QMIX). When the caller does not supply them,
+        # synthesize a flattened-obs surrogate so the buffer stays usable for
+        # IQL / VDN paths without forcing the trainer to fabricate state.
+        if "state" in buf[0]:
+            result["states"] = np.stack([t["state"] for t in buf])
+            result["next_state"] = buf[-1]["next_state"]
+        else:
+            T, N, obs_dim = obs_arr.shape
+            result["states"] = obs_arr.reshape(T, N * obs_dim).astype(np.float32, copy=False)
+            result["next_state"] = next_obs_arr.reshape(N * obs_dim).astype(
+                np.float32, copy=False,
+            )
         if "dru_noise" in buf[0]:
+            # NOTE: dru_noise[0] is the noise used at collection step 0 to
+            # produce the *first* recv_msg, which is then overridden to
+            # exact zeros by the episode-start mask. The learner only
+            # consumes indices 1..T-1 in _forward_trace; index 0 is kept for
+            # shape consistency and may be removed in a future cleanup.
             result["dru_noise"] = np.stack([t["dru_noise"] for t in buf])
         return result
 

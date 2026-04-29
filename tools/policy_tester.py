@@ -2,7 +2,7 @@
 Policy testing tool for the NCS simulator.
 
 Evaluates a target policy against a fixed set of heuristic baselines across multiple seeds.
-By default uses raw absolute reward without normalization; enable normalization via CLI.
+By default uses the LQR-cost reward term without normalization; enable normalization via CLI.
 
 Replay Testing:
     Use --test-replay to test policy determinism by recording actions on a recording seed
@@ -81,7 +81,7 @@ HEURISTIC_POLICY_NAMES: Sequence[str] = (
 # Names for stochastic heuristics that should use non-deterministic actions.
 STOCHASTIC_HEURISTICS: Sequence[str] = ("random_33", "random_20")
 
-# Reward override for evaluation: absolute reward, no normalization by default.
+# Reward override for evaluation: LQR-cost reward term, no normalization by default.
 # Reward clipping is disabled by default but can be enabled via --use-reward-clipping.
 EVAL_REWARD_OVERRIDE: Dict[str, Any] = {
     "state_error_reward": "lqr_cost",
@@ -1597,7 +1597,7 @@ def main() -> int:
     parser.add_argument(
         "--only-heuristics",
         action="store_true",
-        help="Evaluate only heuristic baselines (zero_wait, perfect_sync, perfect_sync_n2, always_send, never_send, random_50)",
+        help="Evaluate only heuristic baselines (zero_wait, perfect_sync, perfect_sync_n2, always_send, never_send, random_33, random_20)",
     )
     parser.add_argument(
         "--only-best",
@@ -1769,10 +1769,10 @@ def main() -> int:
             _log(f"Evaluation: reward from config (no override, {clipping_status}).")
         elif args.use_reward_normalization:
             clipping_status = "with clipping" if args.use_reward_clipping else "no clipping"
-            _log(f"Evaluation: absolute reward with running normalization; {clipping_status}; comm/termination from config.")
+            _log(f"Evaluation: LQR-cost reward with running normalization; {clipping_status}; comm/termination from config.")
         else:
             clipping_status = "with clipping" if args.use_reward_clipping else "no clipping"
-            _log(f"Evaluation: raw absolute reward; {clipping_status}; comm/termination from config.")
+            _log(f"Evaluation: LQR-cost reward; {clipping_status}; comm/termination from config.")
         _log("Policies:")
         for spec in policy_specs:
             _log(f"- {spec.label} ({spec.policy_type})", indent=2)
@@ -2078,10 +2078,10 @@ def main() -> int:
         _log(f"Evaluation: reward from config (no override, {clipping_status}).")
     elif args.use_reward_normalization:
         clipping_status = "with clipping" if args.use_reward_clipping else "no clipping"
-        _log(f"Evaluation: absolute reward with running normalization; {clipping_status}; comm/termination from config.")
+        _log(f"Evaluation: LQR-cost reward with running normalization; {clipping_status}; comm/termination from config.")
     else:
         clipping_status = "with clipping" if args.use_reward_clipping else "no clipping"
-        _log(f"Evaluation: raw absolute reward; {clipping_status}; comm/termination from config.")
+        _log(f"Evaluation: LQR-cost reward; {clipping_status}; comm/termination from config.")
     _log(f"Drop-ratio baseline: {args.drop_ratio_baseline}")
 
     for model_idx, (model_name, specs) in enumerate(model_specs_by_run.items(), start=1):

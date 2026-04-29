@@ -63,6 +63,14 @@ def parse_args() -> argparse.Namespace:
         include_replay_buffer_args=False,
         include_mlp_arch_args=False,
     )
+    # Defaults are deliberately aligned with NDQ (Adam, momentum 0.0) so
+    # DIAL-vs-NDQ QMIX experiments use the same optimizer family. The
+    # reference DIAL paper uses RMSprop(lr=5e-4, momentum=0.05); pass
+    # ``--optimizer rmsprop --momentum 0.05`` to reproduce that setting.
+    # Epsilon defaults are constant 0.05 — the reference uses per-episode
+    # multiplicative ``eps_decay`` (default 1.0 → no decay); this codebase
+    # exposes per-step linear interpolation, so the constant pair below
+    # reproduces the reference's effective behavior.
     parser.set_defaults(
         optimizer="adam",
         grad_clip_norm=10.0,
@@ -72,20 +80,27 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--comm-dim", type=int, default=4, help="Message dimension per agent")
     parser.add_argument("--dru-sigma", type=float, default=2.0, help="DRU noise std")
-    parser.add_argument("--rnn-hidden-dim", type=int, default=128)
-    parser.add_argument("--rnn-layers", type=int, default=2)
+    parser.add_argument("--rnn-hidden-dim", type=int, default=64,
+                        help="GRU hidden size; default matches NDQ for fair QMIX comparison "
+                             "(reference DIAL config uses 128).")
+    parser.add_argument("--rnn-layers", type=int, default=1,
+                        help="GRU layers; default matches NDQ for fair QMIX comparison "
+                             "(reference DIAL config uses 2).")
     parser.add_argument("--batch-episodes", type=int, default=32, help="Episodes per training batch")
     parser.add_argument("--target-update-steps", type=int, default=100,
                         help="Target net sync every N optimizer steps (reference: step_target)")
-    parser.add_argument("--momentum", type=float, default=0.05, help="RMSprop momentum")
+    parser.add_argument("--momentum", type=float, default=0.0,
+                        help="RMSprop momentum (only used with --optimizer rmsprop). "
+                             "Reference DIAL uses 0.05; default is 0.0 to match NDQ.")
     parser.add_argument("--mixer", type=str, default="none", choices=["none", "vdn", "qmix"],
                         help="Value decomposition mixer for joint TD loss (default: none = per-agent IQL)")
     parser.add_argument("--qmix-mixing-hidden-dim", type=int, default=32,
                         help="QMIX mixing network hidden dim")
     parser.add_argument("--qmix-hypernet-hidden-dim", type=int, default=64,
                         help="QMIX hypernetwork hidden dim")
-    parser.add_argument("--td-lambda", type=float, default=0.6,
-                        help="TD(lambda) mixing parameter in [0, 1] (0 = 1-step TD).")
+    parser.add_argument("--td-lambda", type=float, default=0.0,
+                        help="TD(lambda) mixing parameter in [0, 1]; 0 = 1-step TD "
+                             "(reference DIAL uses 1-step targets).")
     return parser.parse_args()
 
 
@@ -109,11 +124,16 @@ def _make_dial_rnn_eval_action_selector(
     hidden = torch.zeros(rnn_layers, n_eval_envs * n_agents, rnn_hidden_dim, device=device)
     prev_msg_logits = np.zeros((n_eval_envs, n_agents, comm_dim), dtype=np.float32)
     prev_actions = np.full((n_eval_envs, n_agents), n_actions, dtype=np.int64)
+    # Track per-batch episode start so the first call after reset feeds exact
+    # zeros as recv_msg (matching the reference's zero-initialized comm buffer)
+    # rather than DRU(0)≈sigmoid(-20) ≈ 2e-9 from the discretization path.
+    episode_start = [True]
 
     def reset_eval_state():
         hidden.zero_()
         prev_msg_logits[:] = 0.0
         prev_actions[:] = n_actions
+        episode_start[0] = True
 
     @torch.no_grad()
     def action_selector(obs: np.ndarray) -> np.ndarray:
@@ -122,6 +142,9 @@ def _make_dial_rnn_eval_action_selector(
         msg_t = torch.as_tensor(prev_msg_logits, device=device, dtype=torch.float32)
         msg_post_dru = dru(msg_t, train_mode=False)
         recv_msg = route_messages(msg_post_dru, n_agents)
+        if episode_start[0]:
+            recv_msg = torch.zeros_like(recv_msg)
+            episode_start[0] = False
 
         prev_act_t = torch.as_tensor(prev_actions, device=device, dtype=torch.long)
         q_values, msg_logits, new_hidden = dial_rnn_forward_batched(

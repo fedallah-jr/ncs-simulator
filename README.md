@@ -113,14 +113,14 @@ Post-training visualization lives in `tools/visualize_policy.py`.
 
 ## Policy Testing
 
-Policy testing lives in `tools/policy_tester.py` and evaluates a target policy against a fixed heuristic set (default: `zero_wait`, `perfect_sync`, `always_send`, `never_send`, `random_50`) over multiple seeds. The evaluator forces raw absolute reward (no normalization/mixing) while keeping communication penalties and termination settings from the config. Pass `--use-reward-normalization` to enable running reward normalization during evaluation.
+Policy testing lives in `tools/policy_tester.py` and evaluates a target policy against a fixed heuristic set (default: `zero_wait`, `perfect_sync`, `perfect_sync_n2`, `always_send`, `never_send`, `random_33`, `random_20`) over multiple seeds. The evaluator forces the reward state-error term to `lqr_cost` with reward normalization disabled by default, while keeping communication penalties and termination settings from the config. Pass `--use-reward-normalization` to enable running reward normalization during evaluation.
 
 - Example (MARL): `python -m tools.policy_tester --config configs/marl_absolute_plants.json --policy outputs/.../best_model.pt --policy-type marl_torch --num-seeds 30`
 - Example (batch): `python -m tools.policy_tester --models-root outputs --num-seeds 30`
   - Expects subfolders like `model_1/config.json`, `model_1/best_model.pt`, `model_1/latest_model.pt`.
   - Writes `leaderboard.csv` at the models root plus per-model evaluation folders under `model_*/policy_tests/`.
 - Example (heuristics only): `python -m tools.policy_tester --config configs/marl_absolute_plants.json --only-heuristics --num-seeds 50`
-  - Evaluates heuristic baselines (`zero_wait`, `perfect_sync`, `always_send`, `never_send`, `random_50`) plus a perfect communication baseline (`always_send` with `network.perfect_communication=true`).
+  - Evaluates heuristic baselines (`zero_wait`, `perfect_sync`, `perfect_sync_n2`, `always_send`, `never_send`, `random_33`, `random_20`) plus a perfect communication baseline (`always_send` with `network.perfect_communication=true`).
   - `perfect_sync` supports aliases `perfect_sync_n2`, `perfect_sync_n3`, ... (equivalently `perfect_sync_2`, `perfect_sync_3`, ...) to enforce extra idle spacing.
 - Useful for establishing baseline performance metrics before training.
 

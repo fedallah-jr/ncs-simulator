@@ -53,6 +53,44 @@ def _configure_torch_policy_inference_threads(torch_module: Any) -> None:
     _TORCH_INFERENCE_THREADS_CONFIGURED = True
 
 
+def validate_marl_checkpoint_matches_env_spec(
+    *,
+    env_n_agents: int,
+    env_obs_dim: int,
+    env_n_actions: int,
+    meta: Any,
+) -> None:
+    """Compare environment dims against checkpoint metadata.
+
+    Public helper so vectorized eval scripts (which expose dims via
+    ``single_observation_space``) can reuse the same checks as single-env
+    callers (``NCS_Env``).
+    """
+    if env_n_agents != meta.n_agents:
+        raise ValueError(
+            f"Env n_agents={env_n_agents} does not match "
+            f"checkpoint n_agents={meta.n_agents}."
+        )
+    if env_obs_dim != meta.obs_dim:
+        raise ValueError(
+            f"Env obs_dim={env_obs_dim} does not match checkpoint obs_dim={meta.obs_dim}"
+        )
+    if env_n_actions != meta.n_actions:
+        raise ValueError(
+            f"Env n_actions={env_n_actions} does not match checkpoint n_actions={meta.n_actions}. "
+            "Ensure the config and checkpoint use the same action space."
+        )
+
+
+def _validate_marl_checkpoint_matches_env(env: NCS_Env, meta: Any) -> None:
+    validate_marl_checkpoint_matches_env_spec(
+        env_n_agents=int(getattr(env, "n_agents", 0)),
+        env_obs_dim=int(env.observation_space.spaces["agent_0"].shape[0]),
+        env_n_actions=int(env.action_space.spaces["agent_0"].n),
+        meta=meta,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Filename sanitization
 # ---------------------------------------------------------------------------
@@ -354,26 +392,14 @@ def load_marl_torch_multi_agent_policy(
         from utils.marl.networks import DRU
 
         agent, meta, comm_dim, dru_sigma = load_dial_rnn_agent_from_checkpoint(Path(model_path))
-        if int(getattr(env, "n_agents", 0)) != meta.n_agents:
-            raise ValueError(
-                f"Env n_agents={getattr(env, 'n_agents', None)} does not match checkpoint n_agents={meta.n_agents}."
-            )
-        env_obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
-        if env_obs_dim != meta.obs_dim:
-            raise ValueError(f"Env obs_dim={env_obs_dim} does not match checkpoint obs_dim={meta.obs_dim}")
+        _validate_marl_checkpoint_matches_env(env, meta)
         dru = DRU(sigma=dru_sigma)
         return MARLDialRNNTorchPolicy(agent, meta, dru, comm_dim, device=torch.device("cpu"))
     if isinstance(ckpt, dict) and ckpt.get("ndq", False):
         from utils.marl.torch_policy import MARLNDQTorchPolicy, load_ndq_agent_from_checkpoint
 
         agent, comm_encoder, meta, comm_embed_dim = load_ndq_agent_from_checkpoint(Path(model_path))
-        if int(getattr(env, "n_agents", 0)) != meta.n_agents:
-            raise ValueError(
-                f"Env n_agents={getattr(env, 'n_agents', None)} does not match checkpoint n_agents={meta.n_agents}."
-            )
-        env_obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
-        if env_obs_dim != meta.obs_dim:
-            raise ValueError(f"Env obs_dim={env_obs_dim} does not match checkpoint obs_dim={meta.obs_dim}")
+        _validate_marl_checkpoint_matches_env(env, meta)
         return MARLNDQTorchPolicy(
             agent, comm_encoder, meta, comm_embed_dim,
             device=torch.device("cpu"),
@@ -386,26 +412,13 @@ def load_marl_torch_multi_agent_policy(
         )
 
         agent, meta = load_rnn_qmix_agent_from_checkpoint(Path(model_path))
-        if int(getattr(env, "n_agents", 0)) != meta.n_agents:
-            raise ValueError(
-                f"Env n_agents={getattr(env, 'n_agents', None)} does not match checkpoint n_agents={meta.n_agents}."
-            )
-        env_obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
-        if env_obs_dim != meta.obs_dim:
-            raise ValueError(f"Env obs_dim={env_obs_dim} does not match checkpoint obs_dim={meta.obs_dim}")
+        _validate_marl_checkpoint_matches_env(env, meta)
         return MARLRNNQMIXTorchPolicy(agent, meta, device=torch.device("cpu"))
 
     from utils.marl.torch_policy import MARLTorchMultiAgentPolicy, load_marl_torch_agents_from_checkpoint
 
     agent_or_agents, meta = load_marl_torch_agents_from_checkpoint(Path(model_path))
-    if int(getattr(env, "n_agents", 0)) != meta.n_agents:
-        raise ValueError(
-            f"Env n_agents={getattr(env, 'n_agents', None)} does not match checkpoint n_agents={meta.n_agents}. "
-            "Ensure the config and checkpoint describe the same agent count."
-        )
-    env_obs_dim = int(env.observation_space.spaces["agent_0"].shape[0])
-    if env_obs_dim != meta.obs_dim:
-        raise ValueError(f"Env obs_dim={env_obs_dim} does not match checkpoint obs_dim={meta.obs_dim}")
+    _validate_marl_checkpoint_matches_env(env, meta)
     return MARLTorchMultiAgentPolicy(agent_or_agents, meta, device=torch.device("cpu"))
 
 

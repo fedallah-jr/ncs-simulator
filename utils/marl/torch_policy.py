@@ -184,13 +184,24 @@ def load_dial_rnn_agent_from_checkpoint(
     """
     ckpt = _load_checkpoint_dict(model_path)
 
-    n_agents = int(ckpt.get("n_agents", 1))
+    n_agents = int(ckpt.get("n_agents", 0))
     obs_dim = int(ckpt.get("obs_dim", 0))
     n_actions = int(ckpt.get("n_actions", 0))
-    comm_dim = int(ckpt.get("comm_dim", 1))
+    comm_dim = int(ckpt.get("comm_dim", 0))
     dru_sigma = float(ckpt.get("dru_sigma", 2.0))
-    rnn_hidden_dim = int(ckpt.get("rnn_hidden_dim", 128))
-    rnn_layers = int(ckpt.get("rnn_layers", 2))
+    rnn_hidden_dim = int(ckpt.get("rnn_hidden_dim", 0))
+    rnn_layers = int(ckpt.get("rnn_layers", 0))
+
+    if (
+        n_agents <= 0 or obs_dim <= 0 or n_actions <= 0
+        or comm_dim <= 0 or rnn_hidden_dim <= 0 or rnn_layers <= 0
+    ):
+        raise ValueError(
+            "DIAL checkpoint must include positive 'n_agents', 'obs_dim', "
+            "'n_actions', 'comm_dim', 'rnn_hidden_dim', and 'rnn_layers'; "
+            f"got n_agents={n_agents}, obs_dim={obs_dim}, n_actions={n_actions}, "
+            f"comm_dim={comm_dim}, rnn_hidden_dim={rnn_hidden_dim}, rnn_layers={rnn_layers}."
+        )
 
     obs_normalizer: Optional[RunningObsNormalizer] = None
     obs_norm_state = ckpt.get("obs_normalization", None)
@@ -248,11 +259,17 @@ class MARLDialRNNTorchPolicy:
         self.prev_msg_logits = torch.zeros(
             n_agents, comm_dim, device=self.device,
         )
+        # Reference initializes recv_msg to literal zeros at episode start.
+        # DRU(0, train_mode=False) returns sigmoid(-20) ≈ 2e-9, so without
+        # this flag the first step would feed near-zero (but not exactly zero)
+        # messages into the network.
+        self._episode_start = True
 
     def reset(self) -> None:
         self.hidden.zero_()
         self.prev_action.fill_(self.agent.n_actions)
         self.prev_msg_logits.zero_()
+        self._episode_start = True
 
     @torch.no_grad()
     def act(self, obs_dict: Mapping[str, Any]) -> Dict[str, int]:
@@ -264,6 +281,9 @@ class MARLDialRNNTorchPolicy:
         obs_t = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
         msg_post_dru = self.dru(self.prev_msg_logits.unsqueeze(0), train_mode=False)
         recv_msg = route_messages(msg_post_dru, n_agents).squeeze(0)
+        if self._episode_start:
+            recv_msg = torch.zeros_like(recv_msg)
+            self._episode_start = False
         q_values, msg_logits, new_hidden = dial_rnn_forward_batched(
             self.agent,
             obs_t.unsqueeze(0),

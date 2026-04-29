@@ -246,13 +246,15 @@ class CentralValueMLP(nn.Module):
 class DRU(nn.Module):
     """Discretize/Regularize Unit for DIAL communication.
 
-    During training: noisy sigmoid regularization.
-    During evaluation: hard binary discretization.
+    This follows the narrow-channel DRU used by the reference implementation:
+    during training messages are regularized with Gaussian noise and sigmoid,
+    while test-time messages are thresholded at 0.5 and optionally hardened.
     """
 
-    def __init__(self, sigma: float = 2.0) -> None:
+    def __init__(self, sigma: float = 2.0, hard: bool = False) -> None:
         super().__init__()
         self.sigma = float(sigma)
+        self.hard = bool(hard)
 
     def forward(
         self,
@@ -264,8 +266,11 @@ class DRU(nn.Module):
             if noise is None:
                 noise = torch.randn_like(msg_logits) * self.sigma
             return torch.sigmoid(msg_logits + noise)
-        else:
-            return (msg_logits > 0.0).float()
+
+        thresholded = msg_logits.gt(0.5).float() - 0.5
+        if self.hard:
+            return thresholded.sign().float()
+        return torch.sigmoid(thresholded * 40.0)
 
 
 def route_messages(msg_post_dru: torch.Tensor, n_agents: int) -> torch.Tensor:
