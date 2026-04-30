@@ -18,6 +18,7 @@ def _add_set_override_argument(parser: argparse.ArgumentParser) -> None:
 
 def _add_cevat_state_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
+        "--cevat-state",
         "--cevat_state",
         action="append_const",
         const="observation.cevat_state=true",

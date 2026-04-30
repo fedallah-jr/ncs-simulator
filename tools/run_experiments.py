@@ -1,7 +1,7 @@
 """
 Orchestrate the finalized experiment matrix in Python instead of bash.
 
-Replaces run_experiment_1..8 with a single numbered registry of 23 experiments
+Replaces run_experiment_1..8 with a single numbered registry of 28 experiments
 that can be split across machines for parallel execution. Each --ids invocation
 forms one *batch*: all selected experiments are trained into a single batch
 directory, then a single batch-mode tools.policy_tester run produces a
@@ -49,6 +49,7 @@ Design notes
   backbone and hyperparameters as NDQ Cat 2 with the message branch deleted
   -- one run per mixer so each NDQ comm-dim setting has a directly comparable
   no-comm reference.
+* Cat 7 (IDs 26-28): HASAC/HAPPO/VDN + CEVAT joint-state observation at 15M.
 * The VoU (Value of Update) quantile search runs once and produces edges for
   bits_1 through bits_8 in a single output. Cached under
   outputs/_shared/vou_search/ and reused across all comm experiments.
@@ -204,6 +205,7 @@ class Experiment:
     needs_vou_edges: bool = False
     error_comm_bits: int = 0  # 0 = disabled
     age_comm_bits: int = 0    # 0 = disabled
+    cevat_state: bool = False
 
 
 def _eps_decay(total: int) -> str:
@@ -268,6 +270,11 @@ def _comm_overrides(error_bits: int, age_bits: int) -> List[str]:
     if age_bits > 0:
         args += ["--age_comm", "--set", f"observation.age_comm_bits={age_bits}"]
     return args
+
+
+def _cevat_state_args(base_args: List[str]) -> List[str]:
+    """Enable CEVAT joint-state observations for a non-comm experiment."""
+    return list(base_args) + ["--cevat-state"]
 
 
 def build_registry() -> List[Experiment]:
@@ -390,6 +397,23 @@ def build_registry() -> List[Experiment]:
         ))
         next_id += 1
 
+    # ----- Cat 7: HASAC/HAPPO/VDN + CEVAT joint-state observation at 15M -----
+    cevat_specs = [
+        ("HASAC", "algorithms.marl_hasac", "hasac", _hasac_args),
+        ("HAPPO", "algorithms.marl_happo", "happo", _on_policy_args),
+        ("VDN", "algorithms.marl_vdn", "vdn", _qlearner_args),
+    ]
+    for prefix, module, label, base_fn in cevat_specs:
+        exps.append(Experiment(
+            id=next_id,
+            name=f"{prefix}_cevat_state_15mil",
+            module=module, algo_label=label,
+            total_timesteps=CAT1_TIMESTEPS,
+            extra_args=_cevat_state_args(base_fn(CAT1_TIMESTEPS)),
+            cevat_state=True,
+        ))
+        next_id += 1
+
     return exps
 
 
@@ -451,6 +475,8 @@ def print_registry() -> None:
             comm_bits.append(f"err{exp.error_comm_bits}")
         if exp.age_comm_bits > 0:
             comm_bits.append(f"age{exp.age_comm_bits}")
+        if exp.cevat_state:
+            comm_bits.append("cevat_state")
         comm = "+".join(comm_bits) if comm_bits else "-"
         print(f"{exp.id:<4}{exp.name:<38}{exp.module:<28}{exp.total_timesteps:<14,}{comm}")
 

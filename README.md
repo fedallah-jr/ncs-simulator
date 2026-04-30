@@ -52,13 +52,15 @@ CLI flags let you change environment parameters. Use `--output-root` (defaults t
 
 ## Experiment Runner
 
-The finalized experiment matrix is orchestrated from `tools/run_experiments.py`, which replaces the legacy `run_experiment_*` bash scripts. It exposes a numbered registry of 23 experiments split across five categories:
+The finalized experiment matrix is orchestrated from `tools/run_experiments.py`, which replaces the legacy `run_experiment_*` bash scripts. It exposes a numbered registry of 28 experiments split across seven categories:
 
 - **IDs 1-6** (Cat 1): IQL, QMIX, VDN, MAPPO, HAPPO, HASAC at 15M steps on the heterogeneous config. Q-learners get `--double-q`; n-step returns are 3 (the default for IQL/QMIX/VDN, set explicitly for HASAC). All six use `--no-normalize-obs --feature-norm --layer-norm`; HASAC additionally passes `--value-norm` (MAPPO/HAPPO use ValueNorm via the default code path).
 - **IDs 7-12** (Cat 2): NDQ at 30M steps, sweeping `--comm-embed-dim` ∈ {5, 10, 15} × `--mixer` ∈ {vdn, qmix}.
 - **IDs 13-16** (Cat 3): VDN, QMIX, HAPPO, HASAC at 15M with 8-bit hand-crafted error communication. Quantile bin edges are computed once via `tools.search_vou_threshold` and cached under `outputs/_shared/vou_search/`.
 - **IDs 17-20** (Cat 4): same four algorithms at 15M with 4-bit hand-crafted error comm + 4-bit age comm.
 - **IDs 21-23** (Cat 5): DIAL recurrent + 8-dim differentiable communication at 30M, sweeping `--mixer` ∈ {none, vdn, qmix}. Like NDQ, DIAL is paper-aligned and does not expose `--feature-norm`/`--layer-norm`/`--n-step`.
+- **IDs 24-25** (Cat 6): RNN-VDN and RNN-QMIX no-comm baselines at 30M.
+- **IDs 26-28** (Cat 7): HASAC, HAPPO, and VDN at 15M with CEVAT joint-state observation (`--cevat-state`).
 
 List the registry with `python -m tools.run_experiments --list`. Run a subset (CSV or ranges) with `--ids`:
 
@@ -67,6 +69,7 @@ python -m tools.run_experiments --list                  # show ID -> name table
 python -m tools.run_experiments --ids 1-6               # one batch with all Cat 1 experiments
 python -m tools.run_experiments --ids 7-12              # NDQ sweep
 python -m tools.run_experiments --ids 21-23             # DIAL mixer sweep
+python -m tools.run_experiments --ids 26-28             # CEVAT state sweep
 python -m tools.run_experiments --ids 1,4-6,9 --dry-run # preview commands without running
 ```
 
