@@ -24,7 +24,7 @@ Usage
     # Override defaults.
     python -m tools.run_experiments --ids 1-6 --seed 0 \
         --output-root outputs --num-policy-test-seeds 2604 \
-        --batch-name cat1
+        --batch-name cat1 --torch_device cpu
 
     # Skip the batch policy_tester and/or zip steps (e.g. when iterating).
     python -m tools.run_experiments --ids 1 --skip-policy-test --skip-zip
@@ -629,7 +629,7 @@ def find_next_run_dir(parent: Path, label: str) -> Path:
 
 def build_train_command(
     exp: Experiment, *, config: str, run_root: Path, seed: int,
-    edges: Optional[List[float]],
+    edges: Optional[List[float]], torch_device: str = "auto",
 ) -> List[str]:
     cmd = [
         sys.executable, "-m", exp.module,
@@ -637,6 +637,8 @@ def build_train_command(
         "--output-root", str(run_root),
         "--seed", str(seed),
     ]
+    if torch_device != "auto":
+        cmd.extend(["--device", torch_device])
     cmd.extend(exp.extra_args)
     if exp.needs_vou_edges and edges is not None:
         cmd.extend(["--set", f"observation.error_comm_edges={json.dumps(edges)}"])
@@ -645,7 +647,7 @@ def build_train_command(
 
 def train_experiment(
     exp: Experiment, *, config: str, batch_dir: Path, seed: int,
-    edges_path: Optional[Path], dry_run: bool,
+    edges_path: Optional[Path], dry_run: bool, torch_device: str = "auto",
 ) -> Path:
     """Train one experiment into batch_dir and rename to exp.name. Returns the model dir."""
     edges: Optional[List[float]] = None
@@ -660,6 +662,7 @@ def train_experiment(
     expected_train_dir = find_next_run_dir(batch_dir, exp.algo_label)
     train_cmd = build_train_command(
         exp, config=config, run_root=batch_dir, seed=seed, edges=edges,
+        torch_device=torch_device,
     )
     log_path = batch_dir / "logs" / f"train_{exp.name}.log"
     rc = run_command(train_cmd, log_path, cwd=PROJECT_ROOT, dry_run=dry_run)
@@ -743,6 +746,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--batch-name", default=None,
                    help="Override the auto-derived batch directory name (default: encoded IDs).")
     p.add_argument("--seed", type=int, default=0, help="Training seed (default: 0).")
+    p.add_argument("--torch_device", "--torch-device", dest="torch_device",
+                   default="auto", choices=["auto", "cpu", "cuda"],
+                   help="Torch device forwarded to training modules as --device (default: auto).")
     p.add_argument("--num-policy-test-seeds", type=int, default=2604,
                    help="Seeds passed to policy_tester (default: 2604; tools.policy_tester default is 250).")
     p.add_argument("--skip-policy-test", action="store_true",
@@ -837,6 +843,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             train_experiment(
                 exp, config=str(config_path), batch_dir=batch_dir,
                 seed=args.seed, edges_path=edges_path, dry_run=args.dry_run,
+                torch_device=args.torch_device,
             )
             train_summary.append((exp.id, exp.name, "OK", time.time() - t0, ""))
         except Exception as exc:  # noqa: BLE001 - surface to summary rather than crash

@@ -98,7 +98,7 @@ outputs/experiments_1-6/
 outputs/experiments_1-6.zip
 ```
 
-To split the matrix across machines, give each box a disjoint slice of IDs (e.g. machine A `--ids 1-6`, machine B `--ids 7-12`, machine C `--ids 13-20`). Each machine produces its own batch zip independently. Other knobs: `--seed`, `--output-root`, `--num-policy-test-seeds`, `--skip-policy-test`, `--skip-zip`, `--skip-vou`, `--force-vou`, `--dry-run`.
+To split the matrix across machines, give each box a disjoint slice of IDs (e.g. machine A `--ids 1-6`, machine B `--ids 7-12`, machine C `--ids 13-20`). Each machine produces its own batch zip independently. Other knobs: `--seed`, `--output-root`, `--torch_device`, `--num-policy-test-seeds`, `--skip-policy-test`, `--skip-zip`, `--skip-vou`, `--force-vou`, `--dry-run`.
 
 ## Visualization
 
