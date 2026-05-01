@@ -696,18 +696,25 @@ def train_experiment(
 # ---------------------------------------------------------------------------
 
 
-def build_batch_policy_test_command(batch_dir: Path, num_seeds: int) -> List[str]:
-    return [
+def build_batch_policy_test_command(
+    batch_dir: Path, num_seeds: int, *, torch_device: str = "auto",
+) -> List[str]:
+    cmd = [
         sys.executable, "-m", "tools.policy_tester",
         "--models-root", str(batch_dir),
         "--num-seeds", str(num_seeds),
     ]
+    if torch_device != "auto":
+        cmd.extend(["--torch_device", torch_device])
+    return cmd
 
 
 def run_batch_policy_test(
-    batch_dir: Path, num_seeds: int, *, dry_run: bool,
+    batch_dir: Path, num_seeds: int, *, dry_run: bool, torch_device: str = "auto",
 ) -> int:
-    cmd = build_batch_policy_test_command(batch_dir, num_seeds)
+    cmd = build_batch_policy_test_command(
+        batch_dir, num_seeds, torch_device=torch_device,
+    )
     log_path = batch_dir / "logs" / "policy_test_batch.log"
     return run_command(cmd, log_path, cwd=PROJECT_ROOT, dry_run=dry_run)
 
@@ -748,7 +755,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0, help="Training seed (default: 0).")
     p.add_argument("--torch_device", "--torch-device", dest="torch_device",
                    default="auto", choices=["auto", "cpu", "cuda"],
-                   help="Torch device forwarded to training modules as --device (default: auto).")
+                   help="Torch device forwarded to training modules and policy_tester (default: auto).")
     p.add_argument("--num-policy-test-seeds", type=int, default=2604,
                    help="Seeds passed to policy_tester (default: 2604; tools.policy_tester default is 250).")
     p.add_argument("--skip-policy-test", action="store_true",
@@ -868,6 +875,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         try:
             rc = run_batch_policy_test(
                 batch_dir, args.num_policy_test_seeds, dry_run=args.dry_run,
+                torch_device=args.torch_device,
             )
             if rc != 0:
                 raise RuntimeError(f"policy_tester exited with code {rc}")

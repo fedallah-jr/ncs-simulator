@@ -220,9 +220,13 @@ def load_marl_torch_multi_agent_policy(
     env: NCS_Env,
     *,
     ndq_cut_mu_thres: float = 0.0,
+    torch_device: str = "cpu",
 ):
     import torch
     _configure_torch_policy_inference_threads(torch)
+    from utils.marl.common import select_device
+
+    device = select_device(torch_device)
 
     # Check if this is a DIAL checkpoint
     ckpt = torch.load(str(model_path), map_location="cpu")
@@ -233,7 +237,7 @@ def load_marl_torch_multi_agent_policy(
         agent, meta, comm_dim, dru_sigma = load_dial_rnn_agent_from_checkpoint(Path(model_path))
         _validate_marl_checkpoint_matches_env(env, meta)
         dru = DRU(sigma=dru_sigma)
-        return MARLDialRNNTorchPolicy(agent, meta, dru, comm_dim, device=torch.device("cpu"))
+        return MARLDialRNNTorchPolicy(agent, meta, dru, comm_dim, device=device)
     if isinstance(ckpt, dict) and ckpt.get("ndq", False):
         from utils.marl.torch_policy import MARLNDQTorchPolicy, load_ndq_agent_from_checkpoint
 
@@ -241,7 +245,7 @@ def load_marl_torch_multi_agent_policy(
         _validate_marl_checkpoint_matches_env(env, meta)
         return MARLNDQTorchPolicy(
             agent, comm_encoder, meta, comm_embed_dim,
-            device=torch.device("cpu"),
+            device=device,
             cut_mu_thres=float(ndq_cut_mu_thres),
         )
     if isinstance(ckpt, dict) and ckpt.get("rnn_qmix", False):
@@ -252,13 +256,13 @@ def load_marl_torch_multi_agent_policy(
 
         agent, meta = load_rnn_qmix_agent_from_checkpoint(Path(model_path))
         _validate_marl_checkpoint_matches_env(env, meta)
-        return MARLRNNQMIXTorchPolicy(agent, meta, device=torch.device("cpu"))
+        return MARLRNNQMIXTorchPolicy(agent, meta, device=device)
 
     from utils.marl.torch_policy import MARLTorchMultiAgentPolicy, load_marl_torch_agents_from_checkpoint
 
     agent_or_agents, meta = load_marl_torch_agents_from_checkpoint(Path(model_path))
     _validate_marl_checkpoint_matches_env(env, meta)
-    return MARLTorchMultiAgentPolicy(agent_or_agents, meta, device=torch.device("cpu"))
+    return MARLTorchMultiAgentPolicy(agent_or_agents, meta, device=device)
 
 
 def load_multi_agent_policy(

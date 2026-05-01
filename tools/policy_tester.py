@@ -653,6 +653,7 @@ def _load_policy(
     env: Any,
     *,
     seed: int,
+    torch_device: str = "auto",
 ) -> Any:
     policy_type = spec.policy_type.lower()
     if policy_type == "heuristic":
@@ -668,6 +669,7 @@ def _load_policy(
         return load_marl_torch_multi_agent_policy(
             spec.policy_path, env,
             ndq_cut_mu_thres=float(spec.ndq_cut_mu_thres),
+            torch_device=torch_device,
         )
     raise ValueError(f"Unknown policy type: {spec.policy_type}")
 
@@ -992,6 +994,7 @@ def _evaluate_policy_for_seeds(
     seeds: Sequence[int],
     termination_override: Optional[Dict[str, Any]],
     reward_override: Optional[Dict[str, Any]],
+    torch_device: str,
 ) -> List[EpisodeResult]:
     if not seeds:
         return []
@@ -1008,10 +1011,10 @@ def _evaluate_policy_for_seeds(
     try:
         for seed in seeds:
             if spec.policy_type.lower() == "heuristic":
-                policy = _load_policy(spec, env, seed=int(seed))
+                policy = _load_policy(spec, env, seed=int(seed), torch_device=torch_device)
             else:
                 if cached_policy is None:
-                    policy = _load_policy(spec, env, seed=int(seed))
+                    policy = _load_policy(spec, env, seed=int(seed), torch_device=torch_device)
                     cached_policy = policy
                 else:
                     policy = cached_policy
@@ -1042,6 +1045,7 @@ def _evaluate_policy(
     termination_override: Optional[Dict[str, Any]],
     reward_override: Optional[Dict[str, Any]],
     num_workers: int = 1,
+    torch_device: str = "auto",
 ) -> List[EpisodeResult]:
     if not seeds:
         return []
@@ -1057,6 +1061,7 @@ def _evaluate_policy(
             seeds=seeds,
             termination_override=termination_override,
             reward_override=reward_override,
+            torch_device=torch_device,
         )
         results.sort(key=lambda r: r.seed)
         return results
@@ -1072,6 +1077,7 @@ def _evaluate_policy(
                 chunks,
                 [termination_override] * len(chunks),
                 [reward_override] * len(chunks),
+                [torch_device] * len(chunks),
             )
         )
 
@@ -1554,6 +1560,13 @@ def main() -> int:
         help="Optional override for agent count (default: read from checkpoint or config)",
     )
     parser.add_argument("--num-seeds", type=int, default=250, help="Number of seeds to evaluate")
+    parser.add_argument(
+        "--torch_device", "--torch-device",
+        dest="torch_device",
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="Torch device for marl_torch policy inference (default: auto).",
+    )
     default_workers = os.cpu_count() or 1
     parser.add_argument(
         "--num-workers",
@@ -1784,6 +1797,7 @@ def main() -> int:
                 termination_override=termination_override,
                 reward_override=reward_override,
                 num_workers=int(args.num_workers),
+                torch_device=args.torch_device,
             )
             for result in results:
                 per_seed_rows.append(_episode_result_to_seed_row(result))
@@ -1817,6 +1831,7 @@ def main() -> int:
                 termination_override=termination_override,
                 reward_override=reward_override,
                 num_workers=int(args.num_workers),
+                torch_device=args.torch_device,
             )
             for result in perfect_comm_results:
                 per_seed_rows.append(_episode_result_to_seed_row(result))
@@ -1850,7 +1865,12 @@ def main() -> int:
                     policy_path=args.policy,
                     ndq_cut_mu_thres=float(args.ndq_cut_mu_thres),
                 )
-                original_policy = _load_policy(target_spec, env_for_loading, seed=args.replay_recording_seed)
+                original_policy = _load_policy(
+                    target_spec,
+                    env_for_loading,
+                    seed=args.replay_recording_seed,
+                    torch_device=args.torch_device,
+                )
             finally:
                 if hasattr(env_for_loading, "close"):
                     env_for_loading.close()
@@ -1879,6 +1899,7 @@ def main() -> int:
                 termination_override=termination_override,
                 reward_override=reward_override,
                 num_workers=int(args.num_workers),
+                torch_device=args.torch_device,
             )
 
             # Create and evaluate replay policy
@@ -2101,6 +2122,7 @@ def main() -> int:
                 termination_override=termination_override,
                 reward_override=reward_override,
                 num_workers=int(args.num_workers),
+                torch_device=args.torch_device,
             )
             run_dir = models_root / model_name / "policy_tests" / f"{checkpoint_name}_eval"
             summary_row = _write_policy_results(run_dir, spec, results)
@@ -2127,7 +2149,12 @@ def main() -> int:
                     reward_override,
                 )
                 try:
-                    policy_for_recording = _load_policy(spec, env_for_loading, seed=args.replay_recording_seed)
+                    policy_for_recording = _load_policy(
+                        spec,
+                        env_for_loading,
+                        seed=args.replay_recording_seed,
+                        torch_device=args.torch_device,
+                    )
                 finally:
                     if hasattr(env_for_loading, "close"):
                         env_for_loading.close()
@@ -2237,6 +2264,7 @@ def main() -> int:
             termination_override=termination_override,
             reward_override=reward_override,
             num_workers=int(args.num_workers),
+            torch_device=args.torch_device,
         )
         run_dir = models_root / "heuristics" / f"{heuristic_name}_eval"
         summary_row = _write_policy_results(run_dir, spec, results)
@@ -2268,6 +2296,7 @@ def main() -> int:
         termination_override=termination_override,
         reward_override=reward_override,
         num_workers=int(args.num_workers),
+        torch_device=args.torch_device,
     )
     perfect_comm_dir = perfect_comm_root / "policy_tests" / "always_send_eval"
     perfect_comm_summary = _write_policy_results(perfect_comm_dir, perfect_comm_spec, perfect_comm_results)
