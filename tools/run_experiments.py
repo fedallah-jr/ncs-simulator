@@ -1,7 +1,7 @@
 """
 Orchestrate the finalized experiment matrix in Python instead of bash.
 
-Replaces run_experiment_1..8 with a single numbered registry of 28 experiments
+Replaces run_experiment_1..8 with a single numbered registry of 13 experiments
 that can be split across machines for parallel execution. Each --ids invocation
 forms one *batch*: all selected experiments are trained into a single batch
 directory, then a single batch-mode tools.policy_tester run produces a
@@ -38,18 +38,18 @@ Design notes
   run_experiment_{1..6}. Q-learners get --double-q; --n-step 3 is the default
   for IQL/QMIX/VDN and is set explicitly for HASAC. MAPPO/HAPPO use GAE so
   n-step does not apply; they rely on ValueNorm via the default code path.
-* Cat 2 (IDs 7-12): NDQ comm-embed-dim sweep {5,10,15} x {vdn,qmix} at 30M,
-  mirroring run_experiment_8. NDQ does not expose --feature-norm/--layer-norm/--n-step.
-* Cat 3 (IDs 13-16): VDN/QMIX/HAPPO/HASAC + 8-bit hand-crafted error comm at 15M.
-* Cat 4 (IDs 17-20): VDN/QMIX/HAPPO/HASAC + 4-bit hand-crafted + 4-bit age comm at 15M.
-* Cat 5 (IDs 21-23): DIAL recurrent + 8-dim differentiable comm at 30M, sweeping
-  --mixer in {none, vdn, qmix}. Like NDQ, DIAL is paper-aligned and does not
-  expose --feature-norm/--layer-norm/--n-step.
-* Cat 6 (IDs 24-25): RNN-VDN / RNN-QMIX no-comm baseline at 30M. Same GRU
-  backbone and hyperparameters as NDQ Cat 2 with the message branch deleted
-  -- one run per mixer so each NDQ comm-dim setting has a directly comparable
-  no-comm reference.
-* Cat 7 (IDs 26-28): HASAC/HAPPO/VDN + CEVAT joint-state observation at 15M.
+* Cat 2 (IDs 7-9): NDQ comm-embed-dim sweep {5,10,15} with the VDN mixer at
+  30M, mirroring run_experiment_8. NDQ does not expose
+  --feature-norm/--layer-norm/--n-step.
+* Cat 3 (IDs 10-12): RNN-VDN + hand-crafted comm at 30M. ID 10 uses 8-bit
+  error comm; ID 11 uses 4-bit error + 4-bit age comm; ID 12 broadcasts the
+  raw VoU score AND the raw time-since-last-send count with no quantization
+  (infinite-bit reference for both channels). Same GRU backbone and optimizer
+  settings as the RNN no-comm baselines (Cat 4) and NDQ (Cat 2).
+* Cat 4 (ID 13): RNN-VDN no-comm baseline at 30M. Same GRU backbone and
+  hyperparameters as NDQ Cat 2 with the message branch deleted; the
+  directly-comparable no-comm reference for the NDQ-VDN sweep (Cat 2) and
+  the RNN-VDN comm sweep (Cat 3).
 * The VoU (Value of Update) quantile search runs once and produces edges for
   bits_1 through bits_8 in a single output. Cached under
   outputs/_shared/vou_search/ and reused across all comm experiments.
@@ -104,12 +104,8 @@ VOU_CACHE_DIRNAME = "vou_search"
 
 CAT1_TIMESTEPS = 15_000_000
 CAT2_TIMESTEPS = 30_000_000
-CAT3_TIMESTEPS = 15_000_000
-CAT4_TIMESTEPS = 15_000_000
-CAT5_TIMESTEPS = 30_000_000
-CAT6_TIMESTEPS = 30_000_000
-
-DIAL_COMM_DIM = 8
+CAT3_TIMESTEPS = 30_000_000  # RNN-VDN + hand-crafted comm
+CAT4_TIMESTEPS = 30_000_000  # RNN no-comm baselines
 
 # Q-learner bash defaults (run_experiment_1..3).
 QLEARNER_BASE_ARGS: List[str] = [
@@ -160,15 +156,6 @@ NDQ_BASE_ARGS: List[str] = [
     "--episode-length", "250",
 ]
 
-# DIAL bash defaults (run_experiment_7). Recurrent, paper-aligned, online-only.
-# No --feature-norm/--layer-norm/--n-step exposed; comm-dim is fixed via DIAL_COMM_DIM.
-DIAL_BASE_ARGS: List[str] = [
-    "--no-normalize-obs",
-    "--eval-freq", "40000",
-    "--n-eval-episodes", "80",
-    "--n-envs", "8",
-]
-
 # Hand-crafted communication is built on top of the per-algo base args,
 # matching the bash --error_comm / --age_comm pattern.
 HANDCRAFT_BITS_8 = 8
@@ -203,9 +190,10 @@ class Experiment:
     total_timesteps: int     # training steps
     extra_args: List[str] = field(default_factory=list)
     needs_vou_edges: bool = False
-    error_comm_bits: int = 0  # 0 = disabled
-    age_comm_bits: int = 0    # 0 = disabled
-    cevat_state: bool = False
+    error_comm_bits: int = 0       # 0 = disabled (or continuous, see flag below)
+    age_comm_bits: int = 0         # 0 = disabled (or continuous, see flag below)
+    error_comm_continuous: bool = False  # True = no quantization (raw score)
+    age_comm_continuous: bool = False    # True = no quantization (raw count)
 
 
 def _eps_decay(total: int) -> str:
@@ -231,17 +219,6 @@ def _ndq_args(total: int, mixer: str, comm_dim: int) -> List[str]:
 
 def _on_policy_args(total: int) -> List[str]:
     return list(ON_POLICY_BASE_ARGS) + ["--total-timesteps", str(total)]
-
-
-def _dial_args(total: int, mixer: str, comm_dim: int) -> List[str]:
-    args = list(DIAL_BASE_ARGS) + [
-        "--total-timesteps", str(total),
-        "--epsilon-decay-steps", _eps_decay(total),
-        "--comm-dim", str(comm_dim),
-    ]
-    if mixer != "none":
-        args += ["--mixer", mixer]
-    return args
 
 
 def _rnn_qmix_args(total: int, mixer: str) -> List[str]:
@@ -270,11 +247,6 @@ def _comm_overrides(error_bits: int, age_bits: int) -> List[str]:
     if age_bits > 0:
         args += ["--age_comm", "--set", f"observation.age_comm_bits={age_bits}"]
     return args
-
-
-def _cevat_state_args(base_args: List[str]) -> List[str]:
-    """Enable CEVAT joint-state observations for a non-comm experiment."""
-    return list(base_args) + ["--cevat-state"]
 
 
 def build_registry() -> List[Experiment]:
@@ -318,101 +290,78 @@ def build_registry() -> List[Experiment]:
         extra_args=_hasac_args(CAT1_TIMESTEPS),
     ))
 
-    # ----- Cat 2: NDQ comm sweep at 30M -----
+    # ----- Cat 2: NDQ comm sweep at 30M (VDN mixer only) -----
     next_id = 7
     for comm_dim in (5, 10, 15):
-        for mixer in ("vdn", "qmix"):
-            exps.append(Experiment(
-                id=next_id,
-                name=f"NDQ_{comm_dim}dim_{mixer}_30mil",
-                module="algorithms.marl_ndq",
-                algo_label="marl_ndq",
-                total_timesteps=CAT2_TIMESTEPS,
-                extra_args=_ndq_args(CAT2_TIMESTEPS, mixer, comm_dim),
-            ))
-            next_id += 1
+        exps.append(Experiment(
+            id=next_id,
+            name=f"NDQ_{comm_dim}dim_vdn_30mil",
+            module="algorithms.marl_ndq",
+            algo_label="marl_ndq",
+            total_timesteps=CAT2_TIMESTEPS,
+            extra_args=_ndq_args(CAT2_TIMESTEPS, "vdn", comm_dim),
+        ))
+        next_id += 1
 
-    # ----- Cat 3: VDN/QMIX/HAPPO/HASAC + 8-bit hand-crafted error comm -----
-    cat34_specs = [
-        ("VDN", "algorithms.marl_vdn", "vdn", _qlearner_args),
-        ("QMIX", "algorithms.marl_qmix", "qmix", _qlearner_args),
-        ("HAPPO", "algorithms.marl_happo", "happo", _on_policy_args),
-        ("HASAC", "algorithms.marl_hasac", "hasac", _hasac_args),
+    # ----- Cat 3: RNN-VDN + hand-crafted comm at 30M -----
+    rnn_vdn_comm_specs = [
+        ("8bithand", HANDCRAFT_BITS_8, 0),
+        ("4bithand_4bitage", HANDCRAFT_BITS_4, AGE_BITS_4),
     ]
-
-    for prefix, module, label, base_fn in cat34_specs:
+    for tag, error_bits, age_bits in rnn_vdn_comm_specs:
         exps.append(Experiment(
             id=next_id,
-            name=f"{prefix}_8bithand_15mil",
-            module=module, algo_label=label,
-            total_timesteps=CAT3_TIMESTEPS,
-            extra_args=base_fn(CAT3_TIMESTEPS) + _comm_overrides(HANDCRAFT_BITS_8, 0),
-            needs_vou_edges=True,
-            error_comm_bits=HANDCRAFT_BITS_8,
-        ))
-        next_id += 1
-
-    # ----- Cat 4: VDN/QMIX/HAPPO/HASAC + 4-bit hand-crafted + 4-bit age comm -----
-    for prefix, module, label, base_fn in cat34_specs:
-        exps.append(Experiment(
-            id=next_id,
-            name=f"{prefix}_4bithand_4bitage_15mil",
-            module=module, algo_label=label,
-            total_timesteps=CAT4_TIMESTEPS,
-            extra_args=(
-                base_fn(CAT4_TIMESTEPS)
-                + _comm_overrides(HANDCRAFT_BITS_4, AGE_BITS_4)
-            ),
-            needs_vou_edges=True,
-            error_comm_bits=HANDCRAFT_BITS_4,
-            age_comm_bits=AGE_BITS_4,
-        ))
-        next_id += 1
-
-    # ----- Cat 5: DIAL recurrent + 8-dim differentiable comm at 30M -----
-    for mixer in ("none", "vdn", "qmix"):
-        exps.append(Experiment(
-            id=next_id,
-            name=f"DIAL_{DIAL_COMM_DIM}dim_{mixer}_30mil",
-            module="algorithms.marl_dial",
-            algo_label="marl_dial",
-            total_timesteps=CAT5_TIMESTEPS,
-            extra_args=_dial_args(CAT5_TIMESTEPS, mixer, DIAL_COMM_DIM),
-        ))
-        next_id += 1
-
-    # ----- Cat 6: RNN-QMIX / RNN-VDN no-comm baseline at 30M -----
-    # Same recurrent backbone and optimizer settings as NDQ Cat 2 with the
-    # message branch removed. Pairs 1-to-1 with the NDQ vdn/qmix splits so
-    # each NDQ comm-dim run has a directly-comparable no-comm baseline at
-    # the same mixer.
-    for mixer in ("vdn", "qmix"):
-        exps.append(Experiment(
-            id=next_id,
-            name=f"RNN_{mixer}_nocomm_30mil",
+            name=f"RNN_VDN_{tag}_30mil",
             module="algorithms.marl_rnn_qmix",
             algo_label="marl_rnn_qmix",
-            total_timesteps=CAT6_TIMESTEPS,
-            extra_args=_rnn_qmix_args(CAT6_TIMESTEPS, mixer),
+            total_timesteps=CAT3_TIMESTEPS,
+            extra_args=(
+                _rnn_qmix_args(CAT3_TIMESTEPS, "vdn")
+                + _comm_overrides(error_bits, age_bits)
+            ),
+            needs_vou_edges=True,
+            error_comm_bits=error_bits,
+            age_comm_bits=age_bits,
         ))
         next_id += 1
 
-    # ----- Cat 7: HASAC/HAPPO/VDN + CEVAT joint-state observation at 15M -----
-    cevat_specs = [
-        ("HASAC", "algorithms.marl_hasac", "hasac", _hasac_args),
-        ("HAPPO", "algorithms.marl_happo", "happo", _on_policy_args),
-        ("VDN", "algorithms.marl_vdn", "vdn", _qlearner_args),
-    ]
-    for prefix, module, label, base_fn in cevat_specs:
-        exps.append(Experiment(
-            id=next_id,
-            name=f"{prefix}_cevat_state_15mil",
-            module=module, algo_label=label,
-            total_timesteps=CAT1_TIMESTEPS,
-            extra_args=_cevat_state_args(base_fn(CAT1_TIMESTEPS)),
-            cevat_state=True,
-        ))
-        next_id += 1
+    # Continuous (no-quantization) reference: same RNN-VDN backbone with the
+    # raw VoU score AND raw time-since-last-send broadcast directly. Acts as
+    # the infinite-bit upper bound for the 8/4-bit quantization sweep above.
+    # Does not need VoU edges.
+    exps.append(Experiment(
+        id=next_id,
+        name="RNN_VDN_continuous_30mil",
+        module="algorithms.marl_rnn_qmix",
+        algo_label="marl_rnn_qmix",
+        total_timesteps=CAT3_TIMESTEPS,
+        extra_args=(
+            _rnn_qmix_args(CAT3_TIMESTEPS, "vdn")
+            + [
+                "--error_comm", "--set", "observation.error_comm_continuous=true",
+                "--age_comm", "--set", "observation.age_comm_continuous=true",
+            ]
+        ),
+        needs_vou_edges=False,
+        error_comm_continuous=True,
+        age_comm_continuous=True,
+    ))
+    next_id += 1
+
+    # ----- Cat 4: RNN-VDN no-comm baseline at 30M -----
+    # Same recurrent backbone and optimizer settings as NDQ Cat 2 with the
+    # message branch removed; serves as the directly-comparable no-comm
+    # reference for the NDQ-VDN sweep (Cat 2) and the RNN-VDN comm sweep
+    # (Cat 3).
+    exps.append(Experiment(
+        id=next_id,
+        name="RNN_vdn_nocomm_30mil",
+        module="algorithms.marl_rnn_qmix",
+        algo_label="marl_rnn_qmix",
+        total_timesteps=CAT4_TIMESTEPS,
+        extra_args=_rnn_qmix_args(CAT4_TIMESTEPS, "vdn"),
+    ))
+    next_id += 1
 
     return exps
 
@@ -471,12 +420,14 @@ def print_registry() -> None:
     print("-" * len(header))
     for exp in REGISTRY:
         comm_bits = []
-        if exp.error_comm_bits > 0:
+        if exp.error_comm_continuous:
+            comm_bits.append("err_cont")
+        elif exp.error_comm_bits > 0:
             comm_bits.append(f"err{exp.error_comm_bits}")
-        if exp.age_comm_bits > 0:
+        if exp.age_comm_continuous:
+            comm_bits.append("age_cont")
+        elif exp.age_comm_bits > 0:
             comm_bits.append(f"age{exp.age_comm_bits}")
-        if exp.cevat_state:
-            comm_bits.append("cevat_state")
         comm = "+".join(comm_bits) if comm_bits else "-"
         print(f"{exp.id:<4}{exp.name:<38}{exp.module:<28}{exp.total_timesteps:<14,}{comm}")
 

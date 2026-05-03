@@ -52,24 +52,21 @@ CLI flags let you change environment parameters. Use `--output-root` (defaults t
 
 ## Experiment Runner
 
-The finalized experiment matrix is orchestrated from `tools/run_experiments.py`, which replaces the legacy `run_experiment_*` bash scripts. It exposes a numbered registry of 28 experiments split across seven categories:
+The finalized experiment matrix is orchestrated from `tools/run_experiments.py`, which replaces the legacy `run_experiment_*` bash scripts. It exposes a numbered registry of 13 experiments split across four categories:
 
 - **IDs 1-6** (Cat 1): IQL, QMIX, VDN, MAPPO, HAPPO, HASAC at 15M steps on the heterogeneous config. Q-learners get `--double-q`; n-step returns are 3 (the default for IQL/QMIX/VDN, set explicitly for HASAC). All six use `--no-normalize-obs --feature-norm --layer-norm`; HASAC additionally passes `--value-norm` (MAPPO/HAPPO use ValueNorm via the default code path).
-- **IDs 7-12** (Cat 2): NDQ at 30M steps, sweeping `--comm-embed-dim` ∈ {5, 10, 15} × `--mixer` ∈ {vdn, qmix}.
-- **IDs 13-16** (Cat 3): VDN, QMIX, HAPPO, HASAC at 15M with 8-bit hand-crafted error communication. Quantile bin edges are computed once via `tools.search_vou_threshold` and cached under `outputs/_shared/vou_search/`.
-- **IDs 17-20** (Cat 4): same four algorithms at 15M with 4-bit hand-crafted error comm + 4-bit age comm.
-- **IDs 21-23** (Cat 5): DIAL recurrent + 8-dim differentiable communication at 30M, sweeping `--mixer` ∈ {none, vdn, qmix}. Like NDQ, DIAL is paper-aligned and does not expose `--feature-norm`/`--layer-norm`/`--n-step`.
-- **IDs 24-25** (Cat 6): RNN-VDN and RNN-QMIX no-comm baselines at 30M.
-- **IDs 26-28** (Cat 7): HASAC, HAPPO, and VDN at 15M with CEVAT joint-state observation (`--cevat-state`).
+- **IDs 7-9** (Cat 2): NDQ at 30M steps with the VDN mixer, sweeping `--comm-embed-dim` ∈ {5, 10, 15}.
+- **IDs 10-12** (Cat 3): RNN-VDN at 30M with hand-crafted communication: 8-bit error (ID 10), 4-bit error + 4-bit age (ID 11), and continuous / no-quantization (ID 12) which broadcasts both the raw VoU score and the raw time-since-last-send count, acting as the infinite-bit reference for both channels. Quantile bin edges for IDs 10-11 are computed once via `tools.search_vou_threshold` and cached under `outputs/_shared/vou_search/`; ID 12 does not need them. Continuous mode is enabled via `--error_comm --set observation.error_comm_continuous=true --age_comm --set observation.age_comm_continuous=true`.
+- **ID 13** (Cat 4): RNN-VDN no-comm baseline at 30M.
 
 List the registry with `python -m tools.run_experiments --list`. Run a subset (CSV or ranges) with `--ids`:
 
 ```bash
 python -m tools.run_experiments --list                  # show ID -> name table
 python -m tools.run_experiments --ids 1-6               # one batch with all Cat 1 experiments
-python -m tools.run_experiments --ids 7-12              # NDQ sweep
-python -m tools.run_experiments --ids 21-23             # DIAL mixer sweep
-python -m tools.run_experiments --ids 26-28             # CEVAT state sweep
+python -m tools.run_experiments --ids 7-9               # NDQ-VDN comm-embed-dim sweep
+python -m tools.run_experiments --ids 10-12             # RNN-VDN hand-crafted comm (8/4-bit + continuous)
+python -m tools.run_experiments --ids 13                # RNN-VDN no-comm baseline
 python -m tools.run_experiments --ids 1,4-6,9 --dry-run # preview commands without running
 ```
 
@@ -98,7 +95,7 @@ outputs/experiments_1-6/
 outputs/experiments_1-6.zip
 ```
 
-To split the matrix across machines, give each box a disjoint slice of IDs (e.g. machine A `--ids 1-6`, machine B `--ids 7-12`, machine C `--ids 13-20`). Each machine produces its own batch zip independently. Other knobs: `--seed`, `--output-root`, `--torch_device`, `--num-policy-test-seeds`, `--skip-policy-test`, `--skip-zip`, `--skip-vou`, `--force-vou`, `--dry-run`.
+To split the matrix across machines, give each box a disjoint slice of IDs (e.g. machine A `--ids 1-6`, machine B `--ids 7-9`, machine C `--ids 10-13`). Each machine produces its own batch zip independently. Other knobs: `--seed`, `--output-root`, `--torch_device`, `--num-policy-test-seeds`, `--skip-policy-test`, `--skip-zip`, `--skip-vou`, `--force-vou`, `--dry-run`.
 
 ## Visualization
 

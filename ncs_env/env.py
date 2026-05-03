@@ -176,6 +176,9 @@ class NCS_Env(gym.Env):
         self.error_comm_enabled = bool(
             observation_cfg.get("error_comm_enabled", False)
         )
+        self.error_comm_continuous = bool(
+            observation_cfg.get("error_comm_continuous", False)
+        )
         self.error_comm_bits = int(
             observation_cfg.get("error_comm_bits", 1)
         )
@@ -183,7 +186,7 @@ class NCS_Env(gym.Env):
         self.error_comm_threshold = (
             None if threshold_raw is None else float(threshold_raw)
         )
-        if self.error_comm_bits <= 0:
+        if not self.error_comm_continuous and self.error_comm_bits <= 0:
             raise ValueError("observation.error_comm_bits must be positive")
         if self.cevat_state and self.error_comm_enabled:
             raise ValueError(
@@ -191,7 +194,7 @@ class NCS_Env(gym.Env):
                 "observation.error_comm_enabled cannot be enabled together"
             )
         edges_raw = observation_cfg.get("error_comm_edges", None)
-        if edges_raw is not None:
+        if edges_raw is not None and not self.error_comm_continuous:
             self.error_comm_edges: np.ndarray | None = np.asarray(
                 edges_raw, dtype=np.float64
             )
@@ -204,7 +207,11 @@ class NCS_Env(gym.Env):
                 )
         else:
             self.error_comm_edges = None
-        if self.error_comm_enabled and self.error_comm_edges is None:
+        if (
+            self.error_comm_enabled
+            and not self.error_comm_continuous
+            and self.error_comm_edges is None
+        ):
             if (
                 self.error_comm_threshold is None
                 or self.error_comm_threshold <= 0.0
@@ -223,8 +230,11 @@ class NCS_Env(gym.Env):
         self.age_comm_enabled = bool(
             observation_cfg.get("age_comm_enabled", False)
         )
+        self.age_comm_continuous = bool(
+            observation_cfg.get("age_comm_continuous", False)
+        )
         self.age_comm_bits = int(observation_cfg.get("age_comm_bits", 1))
-        if self.age_comm_bits <= 0:
+        if not self.age_comm_continuous and self.age_comm_bits <= 0:
             raise ValueError("observation.age_comm_bits must be positive")
         if self.cevat_state and self.age_comm_enabled:
             raise ValueError(
@@ -1449,12 +1459,23 @@ class NCS_Env(gym.Env):
         return float(dx.T @ self.state_cost_matrix @ dx)
 
     def _encode_error_comm_score(self, score: float) -> float:
-        """Encode a non-negative VoU score into a normalised scalar in [0, 1]."""
+        """Encode a non-negative VoU score into a scalar message.
+
+        Quantized mode (default) maps the score into [0, 1] using either
+        VoU edges or a threshold-based bin schedule. Continuous mode
+        (``error_comm_continuous=True``) skips quantization and emits the
+        raw non-negative score, which is the infinite-bit reference for
+        the quantization sweep.
+        """
         if not self.error_comm_enabled:
             return 0.0
 
-        bits = int(self.error_comm_bits)
         score_value = max(0.0, float(score))
+
+        if self.error_comm_continuous:
+            return score_value
+
+        bits = int(self.error_comm_bits)
         n_levels = 1 << bits
 
         if self.error_comm_edges is not None:
@@ -1496,14 +1517,23 @@ class NCS_Env(gym.Env):
         return routed
 
     def _build_age_comm_features(self) -> np.ndarray:
-        """Route encoded time-since-last-send messages all-to-all with self-slots zeroed."""
+        """Route encoded time-since-last-send messages all-to-all with self-slots zeroed.
+
+        Quantized mode (default) clips the count to ``2^age_comm_bits - 1``
+        and normalises to [0, 1]. Continuous mode (``age_comm_continuous=True``)
+        emits the raw integer count as a float, the infinite-bit reference
+        for the quantization sweep.
+        """
         if not self.age_comm_enabled:
             return np.zeros((self.n_agents, 0), dtype=np.float32)
 
-        max_level = (1 << self.age_comm_bits) - 1
-        sender_messages = np.minimum(self._time_since_last_send, max_level).astype(np.float32)
-        if max_level > 0:
-            sender_messages = sender_messages / float(max_level)
+        if self.age_comm_continuous:
+            sender_messages = self._time_since_last_send.astype(np.float32)
+        else:
+            max_level = (1 << self.age_comm_bits) - 1
+            sender_messages = np.minimum(self._time_since_last_send, max_level).astype(np.float32)
+            if max_level > 0:
+                sender_messages = sender_messages / float(max_level)
 
         routed = np.broadcast_to(
             sender_messages[np.newaxis, :],
