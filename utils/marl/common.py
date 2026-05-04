@@ -686,6 +686,7 @@ def ndq_rnn_collect_transition(
     prev_actions: np.ndarray,
     hidden_states: torch.Tensor,
     collector: Any,
+    delay_queue: Any = None,
 ) -> NDQRNNStepResult:
     """Collect a single vectorized recurrent NDQ transition.
 
@@ -693,6 +694,10 @@ def ndq_rnn_collect_transition(
     state is pulled from ``infos["global_state"]`` and patched through
     :func:`patch_autoreset_final_obs` so episode boundaries carry the true
     terminal state.
+
+    When ``delay_queue`` is non-None, the agent consumes a delayed routed
+    message from the queue and the freshly routed current-step message is
+    pushed back. The queue is reset for any env that resets this step.
     """
     if obs_normalizer is not None:
         obs = obs_normalizer.normalize(obs_raw, update=True)
@@ -704,15 +709,30 @@ def ndq_rnn_collect_transition(
     with torch.no_grad():
         obs_t = torch.as_tensor(obs, device=device, dtype=torch.float32)
         prev_act_t = torch.as_tensor(prev_actions, device=device, dtype=torch.long)
-        q_values, _, _, _, new_hidden = ndq_rnn_forward_batched(
-            agent,
-            comm_encoder,
-            obs_t,
-            prev_act_t,
-            hidden_states,
-            n_actions=n_actions,
-            comm_embed_dim=comm_embed_dim,
-        )
+        if delay_queue is None:
+            q_values, _, _, _, new_hidden, _ = ndq_rnn_forward_batched(
+                agent,
+                comm_encoder,
+                obs_t,
+                prev_act_t,
+                hidden_states,
+                n_actions=n_actions,
+                comm_embed_dim=comm_embed_dim,
+            )
+        else:
+            delayed_recv = delay_queue.peek()
+            q_values, _, _, _, new_hidden, recv_current = ndq_rnn_forward_batched(
+                agent,
+                comm_encoder,
+                obs_t,
+                prev_act_t,
+                hidden_states,
+                n_actions=n_actions,
+                comm_embed_dim=comm_embed_dim,
+                recv_msg_override=delayed_recv,
+            )
+            # Detach: rollout never backprops through queued messages.
+            delay_queue.pop_then_push(recv_current.detach())
 
     greedy = q_values.argmax(dim=-1).cpu().numpy().astype(np.int64)
     actions = greedy.copy()
@@ -764,6 +784,11 @@ def ndq_rnn_collect_transition(
         if done_reset[env_idx]:
             prev_actions[env_idx] = start_token
             hidden_states[:, env_idx * n_agents : (env_idx + 1) * n_agents, :] = 0.0
+
+    if delay_queue is not None:
+        reset_idxs = np.flatnonzero(done_reset)
+        if reset_idxs.size:
+            delay_queue.reset_batch_indices(reset_idxs)
 
     return NDQRNNStepResult(
         obs=obs,

@@ -600,6 +600,64 @@ def route_ndq_messages(
     return msg.view(batch_size, n_agents, n_agents * comm_embed_dim)
 
 
+class NDQDelayQueue:
+    """Slot-replacement FIFO of routed NDQ recv-messages.
+
+    Used in unpadded contexts (rollout, eval, inference). The learner's
+    _forward_trace operates on padded replay batches and uses absolute-time
+    history indexing instead — see MARLNDQLearner._forward_trace.
+
+    Slots are Python references — push reassigns slots[ptr], it never mutates
+    the tensor in place. Required because callers may push tensors that are
+    still in an autograd graph; in-place mutation would raise version-counter
+    errors at backward(). delay == 0 callers must skip the queue entirely.
+    """
+
+    def __init__(
+        self,
+        delay: int,
+        batch: int,
+        n_agents: int,
+        embed_total: int,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        if delay < 1:
+            raise ValueError("NDQDelayQueue requires delay >= 1; D=0 callers must skip the queue")
+        zero = torch.zeros(batch, n_agents, embed_total, device=device, dtype=dtype)
+        self._slots: list[torch.Tensor] = [zero.clone() for _ in range(delay)]
+        self._ptr = 0
+        self._delay = int(delay)
+
+    @property
+    def delay(self) -> int:
+        return self._delay
+
+    def pop_then_push(self, current: torch.Tensor) -> torch.Tensor:
+        popped = self._slots[self._ptr]
+        self._slots[self._ptr] = current
+        self._ptr = (self._ptr + 1) % self._delay
+        return popped
+
+    def peek(self) -> torch.Tensor:
+        return self._slots[self._ptr]
+
+    def reset_all(self) -> None:
+        zero = torch.zeros_like(self._slots[0])
+        self._slots = [zero.clone() for _ in range(self._delay)]
+        self._ptr = 0
+
+    def reset_batch_indices(self, idxs) -> None:
+        if len(idxs) == 0:
+            return
+        device = self._slots[0].device
+        idxs_t = torch.as_tensor(idxs, device=device, dtype=torch.long)
+        for i, slot in enumerate(self._slots):
+            new_slot = slot.clone()
+            new_slot[idxs_t] = 0.0
+            self._slots[i] = new_slot
+
+
 def ndq_rnn_forward_batched(
     agent: NDQRNNAgent,
     comm_encoder: NDQCommEncoder,
@@ -611,7 +669,10 @@ def ndq_rnn_forward_batched(
     comm_embed_dim: int,
     cut_mu_thres: float = 0.0,
     comm_stats: Optional[dict] = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    recv_msg_override: Optional[torch.Tensor] = None,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+]:
     """Run one NDQ recurrent step over a vectorized batch.
 
     When ``cut_mu_thres > 0``, message dimensions with ``|mu| < thres`` are
@@ -623,6 +684,14 @@ def ndq_rnn_forward_batched(
     If ``comm_stats`` is provided, accumulates four integer keys:
     ``total_dims``, ``dropped_dims``, ``total_messages``, ``silent_messages``
     — counted over off-diagonal (sender, receiver, embed) triples.
+
+    When ``recv_msg_override`` is provided, the agent's GRU and the
+    communication inference network consume that tensor instead of the
+    freshly-routed current-step message. mu / m_sample / logits returned are
+    still computed from current ``obs``; the routed current-step message is
+    returned as the 6th tuple element so callers can buffer it for delayed
+    delivery. ``recv_msg_override`` must have shape ``(B, N, N*comm_embed_dim)``.
+    Default ``None`` reproduces the legacy same-step behavior bit-for-bit.
     """
     if obs.ndim != 3:
         raise ValueError("obs must have shape (B, N, obs_dim)")
@@ -669,8 +738,17 @@ def ndq_rnn_forward_batched(
             comm_stats["total_messages"] = comm_stats.get("total_messages", 0) + total_messages
             comm_stats["silent_messages"] = comm_stats.get("silent_messages", 0) + silent_messages
     messages = m_sample.view(batch_size, n_agents, n_agents * comm_embed_dim)
-    recv_msg = route_ndq_messages(messages, n_agents, comm_embed_dim)
-    recv_flat = recv_msg.reshape(batch_size * n_agents, -1)
+    recv_msg_current = route_ndq_messages(messages, n_agents, comm_embed_dim)
+    if recv_msg_override is None:
+        recv_for_agent = recv_msg_current
+    else:
+        if recv_msg_override.shape != recv_msg_current.shape:
+            raise ValueError(
+                f"recv_msg_override shape {tuple(recv_msg_override.shape)} must match "
+                f"routed shape {tuple(recv_msg_current.shape)} (B, N, N*comm_embed_dim)"
+            )
+        recv_for_agent = recv_msg_override
+    recv_flat = recv_for_agent.reshape(batch_size * n_agents, -1)
 
     agent_idx = torch.arange(
         n_agents, device=obs.device, dtype=torch.long,
@@ -690,6 +768,7 @@ def ndq_rnn_forward_batched(
         m_sample.view(batch_size, n_agents, -1),
         logits.view(batch_size, n_agents, -1),
         h_out,
+        recv_msg_current,
     )
 
 

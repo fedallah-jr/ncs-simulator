@@ -904,10 +904,13 @@ class MARLNDQLearner:
         momentum: float = 0.0,
         rmsprop_alpha: float = 0.99,
         rmsprop_eps: float = 1e-5,
+        comm_delay_steps: int = 0,
     ) -> None:
         td_lambda = float(td_lambda)
         if not 0.0 <= td_lambda <= 1.0:
             raise ValueError("td_lambda must be in [0, 1]")
+        if int(comm_delay_steps) < 0:
+            raise ValueError("comm_delay_steps must be >= 0")
 
         self.agent = agent
         self.target_agent = copy.deepcopy(agent)
@@ -931,6 +934,7 @@ class MARLNDQLearner:
         self.target_update_steps = int(target_update_steps)
         self.td_lambda = td_lambda
         self.double_q = bool(double_q)
+        self.comm_delay_steps = int(comm_delay_steps)
 
         self.device = device if device is not None else torch.device("cpu")
         self.agent.to(self.device)
@@ -996,12 +1000,33 @@ class MARLNDQLearner:
             (batch_size, n_agents), self.n_actions, dtype=torch.long, device=self.device,
         )
 
+        # Absolute-time message history for delayed receive. Indexed by absolute
+        # timestep. Per-row bootstrap reads history[T_b - D] (zeros if T_b < D),
+        # which is correct under variable-length padded batches — see v3 plan.
+        D = self.comm_delay_steps
+        use_delay = D > 0
+        embed_total = n_agents * self.comm_embed_dim
+        if use_delay:
+            zero_recv = torch.zeros(
+                batch_size, n_agents, embed_total,
+                device=self.device, dtype=batch.obs.dtype,
+            )
+            history: list[torch.Tensor] = []
+
         all_q: list[torch.Tensor] = []
         all_mu: list[torch.Tensor] = []
         all_m_sample: list[torch.Tensor] = []
         all_logits: list[torch.Tensor] = []
         for t in range(max_t):
-            q_t, mu_t, m_t, logits_t, new_hidden = ndq_rnn_forward_batched(
+            if not use_delay:
+                recv_override = None
+            elif t < D:
+                recv_override = zero_recv
+            else:
+                # NOT detached — gradients flow back to the sender at t-D.
+                recv_override = history[t - D]
+
+            q_t, mu_t, m_t, logits_t, new_hidden, recv_current = ndq_rnn_forward_batched(
                 agent,
                 comm_encoder,
                 batch.obs[:, t],
@@ -1009,7 +1034,11 @@ class MARLNDQLearner:
                 hidden,
                 n_actions=self.n_actions,
                 comm_embed_dim=self.comm_embed_dim,
+                recv_msg_override=recv_override,
             )
+            if use_delay:
+                history.append(recv_current)
+
             all_q.append(q_t)
             all_mu.append(mu_t)
             all_m_sample.append(m_t)
@@ -1022,7 +1051,21 @@ class MARLNDQLearner:
             v_a = valid.unsqueeze(1).expand(batch_size, n_agents)
             prev_action = torch.where(v_a, batch.actions[:, t], prev_action)
 
-        q_boot, _, _, _, _ = ndq_rnn_forward_batched(
+        if not use_delay:
+            boot_override = None
+        else:
+            lengths = batch.mask.sum(dim=1).long()           # (B,) true T_b
+            boot_idx = lengths - D                            # (B,)
+            valid_idx = boot_idx >= 0                         # (B,) bool
+            safe_idx = boot_idx.clamp(min=0)                  # (B,)
+            history_stack = torch.stack(history, dim=0)       # (max_t, B, N, embed)
+            rows = torch.arange(batch_size, device=self.device)
+            gathered = history_stack[safe_idx, rows]          # (B, N, embed)
+            boot_override = torch.where(
+                valid_idx.view(batch_size, 1, 1), gathered, zero_recv,
+            )
+
+        q_boot, _, _, _, _, _ = ndq_rnn_forward_batched(
             agent,
             comm_encoder,
             batch.next_obs,
@@ -1030,6 +1073,7 @@ class MARLNDQLearner:
             hidden,
             n_actions=self.n_actions,
             comm_embed_dim=self.comm_embed_dim,
+            recv_msg_override=boot_override,
         )
         return all_q, q_boot, all_mu, all_m_sample, all_logits
 
@@ -1291,6 +1335,7 @@ class MARLNDQLearner:
             "episodes_seen": self.episodes_seen,
             "train_steps": self._train_steps,
             "mixer_type": self.mixer_type,
+            "comm_delay_steps": int(self.comm_delay_steps),
         }
         if self.mixer is not None:
             state["mixer"] = self.mixer.state_dict()
@@ -1308,6 +1353,17 @@ class MARLNDQLearner:
         if self.mixer is not None and "mixer" in d:
             self.mixer.load_state_dict(d["mixer"])
             self.target_mixer.load_state_dict(d["target_mixer"])
+        # comm_delay_steps is fixed at construction time and must agree with
+        # the saved state. The resume path in algorithms/marl_ndq.py peeks at
+        # this value before constructing the learner; here we defensively
+        # error if the constructed learner doesn't match what was saved.
+        saved_delay = d.get("comm_delay_steps", None)
+        if saved_delay is not None and int(saved_delay) != int(self.comm_delay_steps):
+            raise ValueError(
+                f"comm_delay_steps mismatch on resume: learner constructed with "
+                f"{self.comm_delay_steps}, saved state has {int(saved_delay)}. "
+                f"Re-run with --comm-delay-steps {int(saved_delay)}."
+            )
 
 
 def _soft_update(target: nn.Module, source: nn.Module, tau: float) -> None:

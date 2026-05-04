@@ -1,7 +1,7 @@
 """
 Orchestrate the finalized experiment matrix in Python instead of bash.
 
-Replaces run_experiment_1..8 with a single numbered registry of 13 experiments
+Replaces run_experiment_1..8 with a single numbered registry of 16 experiments
 that can be split across machines for parallel execution. Each --ids invocation
 forms one *batch*: all selected experiments are trained into a single batch
 directory, then a single batch-mode tools.policy_tester run produces a
@@ -50,6 +50,10 @@ Design notes
   hyperparameters as NDQ Cat 2 with the message branch deleted; the
   directly-comparable no-comm reference for the NDQ-VDN sweep (Cat 2) and
   the RNN-VDN comm sweep (Cat 3).
+* Cat 5 (IDs 14-16): NDQ comm sweep at 30M with --comm-delay-steps 1.
+  One-to-one mirror of Cat 2 (same comm-embed-dim {5,10,15}, same VDN mixer,
+  same NDQ_BASE_ARGS) with messages emitted at t arriving at t+1. Provides
+  the directly-comparable delay-1 reference for the same-step NDQ sweep.
 * The VoU (Value of Update) quantile search runs once and produces edges for
   bits_1 through bits_8 in a single output. Cached under
   outputs/_shared/vou_search/ and reused across all comm experiments.
@@ -208,13 +212,18 @@ def _qlearner_args(total: int) -> List[str]:
     ]
 
 
-def _ndq_args(total: int, mixer: str, comm_dim: int) -> List[str]:
-    return list(NDQ_BASE_ARGS) + [
+def _ndq_args(
+    total: int, mixer: str, comm_dim: int, *, comm_delay_steps: int = 0,
+) -> List[str]:
+    args = list(NDQ_BASE_ARGS) + [
         "--total-timesteps", str(total),
         "--epsilon-decay-steps", _eps_decay(total),
         "--mixer", mixer,
         "--comm-embed-dim", str(comm_dim),
     ]
+    if comm_delay_steps > 0:
+        args += ["--comm-delay-steps", str(comm_delay_steps)]
+    return args
 
 
 def _on_policy_args(total: int) -> List[str]:
@@ -362,6 +371,24 @@ def build_registry() -> List[Experiment]:
         extra_args=_rnn_qmix_args(CAT4_TIMESTEPS, "vdn"),
     ))
     next_id += 1
+
+    # ----- Cat 5: NDQ comm sweep at 30M with --comm-delay-steps 1 -----
+    # One-to-one mirror of Cat 2 (IDs 7-9): same comm-embed-dim sweep, same
+    # VDN mixer, same NDQ_BASE_ARGS, only difference is fixed message delay
+    # of one timestep. Provides the directly-comparable delay-1 reference
+    # for the same-step NDQ sweep.
+    for comm_dim in (5, 10, 15):
+        exps.append(Experiment(
+            id=next_id,
+            name=f"NDQ_{comm_dim}dim_vdn_delay1_30mil",
+            module="algorithms.marl_ndq",
+            algo_label="marl_ndq",
+            total_timesteps=CAT2_TIMESTEPS,
+            extra_args=_ndq_args(
+                CAT2_TIMESTEPS, "vdn", comm_dim, comm_delay_steps=1,
+            ),
+        ))
+        next_id += 1
 
     return exps
 

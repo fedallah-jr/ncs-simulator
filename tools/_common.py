@@ -241,12 +241,15 @@ def load_marl_torch_multi_agent_policy(
     if isinstance(ckpt, dict) and ckpt.get("ndq", False):
         from utils.marl.torch_policy import MARLNDQTorchPolicy, load_ndq_agent_from_checkpoint
 
-        agent, comm_encoder, meta, comm_embed_dim = load_ndq_agent_from_checkpoint(Path(model_path))
+        agent, comm_encoder, meta, comm_embed_dim, comm_delay_steps = (
+            load_ndq_agent_from_checkpoint(Path(model_path))
+        )
         _validate_marl_checkpoint_matches_env(env, meta)
         return MARLNDQTorchPolicy(
             agent, comm_encoder, meta, comm_embed_dim,
             device=device,
             cut_mu_thres=float(ndq_cut_mu_thres),
+            comm_delay_steps=comm_delay_steps,
         )
     if isinstance(ckpt, dict) and ckpt.get("rnn_qmix", False):
         from utils.marl_rnn_qmix import (

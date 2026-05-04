@@ -385,6 +385,7 @@ def save_ndq_checkpoint(
     rnn_hidden_dim: int = 64,
     rnn_layers: int = 1,
     mixer_type: str = "qmix",
+    comm_delay_steps: int = 0,
 ) -> None:
     ckpt: Dict[str, Any] = {
         "algorithm": "marl_ndq",
@@ -398,6 +399,7 @@ def save_ndq_checkpoint(
         "rnn_hidden_dim": rnn_hidden_dim,
         "rnn_layers": rnn_layers,
         "mixer_type": mixer_type,
+        "comm_delay_steps": int(comm_delay_steps),
         "agent_state_dict": agent.state_dict(),
         "comm_encoder_state_dict": comm_encoder.state_dict(),
     }

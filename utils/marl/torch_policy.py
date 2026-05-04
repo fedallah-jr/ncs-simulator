@@ -15,6 +15,7 @@ from utils.marl.networks import (
     DRU,
     NDQRNNAgent,
     NDQCommEncoder,
+    NDQDelayQueue,
     route_messages,
     dial_rnn_forward_batched,
     ndq_rnn_forward_batched,
@@ -300,8 +301,12 @@ class MARLDialRNNTorchPolicy:
 
 def load_ndq_agent_from_checkpoint(
     model_path: Path,
-) -> Tuple[NDQRNNAgent, NDQCommEncoder, MARLTorchCheckpointMetadata, int]:
-    """Load a recurrent NDQ agent and comm encoder from checkpoint."""
+) -> Tuple[NDQRNNAgent, NDQCommEncoder, MARLTorchCheckpointMetadata, int, int]:
+    """Load a recurrent NDQ agent and comm encoder from checkpoint.
+
+    Returns ``(agent, comm_encoder, metadata, comm_embed_dim, comm_delay_steps)``.
+    Legacy checkpoints without a ``comm_delay_steps`` field default to 0.
+    """
     ckpt = _load_checkpoint_dict(model_path)
 
     n_agents = int(ckpt.get("n_agents", 1))
@@ -310,6 +315,7 @@ def load_ndq_agent_from_checkpoint(
     comm_embed_dim = int(ckpt.get("comm_embed_dim", 1))
     rnn_hidden_dim = int(ckpt.get("rnn_hidden_dim", 64))
     rnn_layers = int(ckpt.get("rnn_layers", 1))
+    comm_delay_steps = int(ckpt.get("comm_delay_steps", 0))
 
     obs_normalizer: Optional[RunningObsNormalizer] = None
     obs_norm_state = ckpt.get("obs_normalization", None)
@@ -346,7 +352,7 @@ def load_ndq_agent_from_checkpoint(
         agent_activation="relu",
         obs_normalizer=obs_normalizer,
     )
-    return agent, comm_encoder, metadata, comm_embed_dim
+    return agent, comm_encoder, metadata, comm_embed_dim, comm_delay_steps
 
 
 class MARLNDQTorchPolicy:
@@ -361,6 +367,7 @@ class MARLNDQTorchPolicy:
         *,
         device: Optional[torch.device] = None,
         cut_mu_thres: float = 0.0,
+        comm_delay_steps: int = 0,
     ) -> None:
         self.agent = agent
         self.comm_encoder = comm_encoder
@@ -370,6 +377,7 @@ class MARLNDQTorchPolicy:
         self.agent.to(self.device)
         self.comm_encoder.to(self.device)
         self.cut_mu_thres = float(cut_mu_thres)
+        self.comm_delay_steps = int(comm_delay_steps)
         self.comm_stats: Dict[str, int] = {
             "total_dims": 0,
             "dropped_dims": 0,
@@ -382,6 +390,14 @@ class MARLNDQTorchPolicy:
         self.prev_action = torch.full(
             (1, n_agents), agent.n_actions, dtype=torch.long, device=self.device,
         )
+        self.delay_queue = (
+            NDQDelayQueue(
+                delay=self.comm_delay_steps, batch=1,
+                n_agents=n_agents, embed_total=n_agents * self.comm_embed_dim,
+                device=self.device,
+            )
+            if self.comm_delay_steps > 0 else None
+        )
 
     def reset(self) -> None:
         self.hidden.zero_()
@@ -392,6 +408,8 @@ class MARLNDQTorchPolicy:
             "total_messages": 0,
             "silent_messages": 0,
         }
+        if self.delay_queue is not None:
+            self.delay_queue.reset_all()
 
     @torch.no_grad()
     def act(self, obs_dict: Mapping[str, Any]) -> Dict[str, int]:
@@ -400,17 +418,33 @@ class MARLNDQTorchPolicy:
         if self.metadata.obs_normalizer is not None:
             obs = self.metadata.obs_normalizer.normalize(obs, update=False)
 
-        q_values, _, _, _, new_hidden = ndq_rnn_forward_batched(
-            self.agent,
-            self.comm_encoder,
-            torch.as_tensor(obs, device=self.device, dtype=torch.float32).unsqueeze(0),
-            self.prev_action,
-            self.hidden,
-            n_actions=self.metadata.n_actions,
-            comm_embed_dim=self.comm_embed_dim,
-            cut_mu_thres=self.cut_mu_thres,
-            comm_stats=self.comm_stats,
-        )
+        if self.delay_queue is None:
+            q_values, _, _, _, new_hidden, _ = ndq_rnn_forward_batched(
+                self.agent,
+                self.comm_encoder,
+                torch.as_tensor(obs, device=self.device, dtype=torch.float32).unsqueeze(0),
+                self.prev_action,
+                self.hidden,
+                n_actions=self.metadata.n_actions,
+                comm_embed_dim=self.comm_embed_dim,
+                cut_mu_thres=self.cut_mu_thres,
+                comm_stats=self.comm_stats,
+            )
+        else:
+            delayed_recv = self.delay_queue.peek()
+            q_values, _, _, _, new_hidden, recv_current = ndq_rnn_forward_batched(
+                self.agent,
+                self.comm_encoder,
+                torch.as_tensor(obs, device=self.device, dtype=torch.float32).unsqueeze(0),
+                self.prev_action,
+                self.hidden,
+                n_actions=self.metadata.n_actions,
+                comm_embed_dim=self.comm_embed_dim,
+                cut_mu_thres=self.cut_mu_thres,
+                comm_stats=self.comm_stats,
+                recv_msg_override=delayed_recv,
+            )
+            self.delay_queue.pop_then_push(recv_current.detach())
         actions = q_values.squeeze(0).argmax(dim=-1).cpu().numpy().astype(np.int64)
         self.hidden = new_hidden
         self.prev_action = torch.as_tensor(actions, device=self.device, dtype=torch.long).unsqueeze(0)

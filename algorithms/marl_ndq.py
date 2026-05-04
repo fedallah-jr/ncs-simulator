@@ -15,7 +15,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from utils.marl.networks import NDQRNNAgent, NDQCommEncoder, ndq_rnn_forward_batched
+from utils.marl.networks import (
+    NDQCommEncoder,
+    NDQDelayQueue,
+    NDQRNNAgent,
+    ndq_rnn_forward_batched,
+)
 from utils.marl.learners import MARLNDQLearner
 from utils.marl.common import run_evaluation_vectorized_seeded, ndq_rnn_collect_transition
 from utils.marl.buffer import DialRNNEpisodeCollector, EpisodeReplayBuffer
@@ -80,6 +85,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--qmix-hypernet-hidden-dim", type=int, default=64)
     parser.add_argument("--td-lambda", type=float, default=0.0)
     parser.add_argument("--double-q", action="store_true")
+    parser.add_argument("--comm-delay-steps", type=int, default=0,
+                        help="Fixed integer delay D for learned NDQ communication. "
+                             "Messages emitted at t are received at t+D. Default 0 "
+                             "preserves legacy same-step behavior. No channel model.")
     return parser.parse_args()
 
 
@@ -108,26 +117,52 @@ def _make_ndq_eval_action_selector(
     device: torch.device,
     rnn_layers: int,
     rnn_hidden_dim: int,
+    comm_delay_steps: int = 0,
 ):
     hidden = torch.zeros(rnn_layers, n_eval_envs * n_agents, rnn_hidden_dim, device=device)
     prev_actions = np.full((n_eval_envs, n_agents), n_actions, dtype=np.int64)
+    delay_queue = (
+        NDQDelayQueue(
+            delay=comm_delay_steps, batch=n_eval_envs,
+            n_agents=n_agents, embed_total=n_agents * comm_embed_dim,
+            device=device,
+        )
+        if comm_delay_steps > 0 else None
+    )
 
     def reset_eval_state() -> None:
         hidden.zero_()
         prev_actions[:] = n_actions
+        if delay_queue is not None:
+            delay_queue.reset_all()
 
     @torch.no_grad()
     def action_selector(obs: np.ndarray) -> np.ndarray:
         nonlocal hidden
-        q_values, _, _, _, new_hidden = ndq_rnn_forward_batched(
-            agent,
-            comm_encoder,
-            torch.as_tensor(obs, device=device, dtype=torch.float32),
-            torch.as_tensor(prev_actions, device=device, dtype=torch.long),
-            hidden,
-            n_actions=n_actions,
-            comm_embed_dim=comm_embed_dim,
-        )
+        if delay_queue is None:
+            q_values, _, _, _, new_hidden, _ = ndq_rnn_forward_batched(
+                agent,
+                comm_encoder,
+                torch.as_tensor(obs, device=device, dtype=torch.float32),
+                torch.as_tensor(prev_actions, device=device, dtype=torch.long),
+                hidden,
+                n_actions=n_actions,
+                comm_embed_dim=comm_embed_dim,
+            )
+        else:
+            delayed_recv = delay_queue.peek()
+            q_values, _, _, _, new_hidden, recv_current = ndq_rnn_forward_batched(
+                agent,
+                comm_encoder,
+                torch.as_tensor(obs, device=device, dtype=torch.float32),
+                torch.as_tensor(prev_actions, device=device, dtype=torch.long),
+                hidden,
+                n_actions=n_actions,
+                comm_embed_dim=comm_embed_dim,
+                recv_msg_override=delayed_recv,
+            )
+            # Eval is no_grad; detach is unnecessary but cheap and explicit.
+            delay_queue.pop_then_push(recv_current.detach())
         hidden = new_hidden
         actions = q_values.argmax(dim=-1).cpu().numpy().astype(np.int64)
         prev_actions[:] = actions
@@ -160,6 +195,7 @@ def _evaluate_and_log_ndq(
     eval_baseline: Dict[str, Any],
     start_time: Optional[float] = None,
     total_timesteps: Optional[int] = None,
+    comm_delay_steps: int = 0,
 ) -> None:
     if n_episodes <= 0:
         raise ValueError("n_episodes must be positive")
@@ -180,6 +216,7 @@ def _evaluate_and_log_ndq(
         device,
         rnn_layers,
         rnn_hidden_dim,
+        comm_delay_steps=comm_delay_steps,
     )
 
     all_policy_rewards: List[float] = []
@@ -293,6 +330,8 @@ def _evaluate_and_log_ndq(
 def main() -> None:
     reset_shared_running_normalizers()
     args = parse_args()
+    if args.comm_delay_steps < 0:
+        raise ValueError("--comm-delay-steps must be >= 0")
     device, rng = setup_device_and_rng(args.device, args.seed)
 
     (
@@ -316,6 +355,33 @@ def main() -> None:
         run_dir = Path(args.resume)
         if not run_dir.is_dir():
             raise FileNotFoundError(f"Resume directory does not exist: {run_dir}")
+        # Peek the saved learner state for comm_delay_steps before constructing
+        # the learner / rollout queue. The CLI default is 0; if the user did not
+        # explicitly re-pass --comm-delay-steps, silently restore from the saved
+        # value (and announce the override). If the user passed a different
+        # value, error out — silent override would silently change training
+        # semantics on resume.
+        training_state_path = run_dir / "training_state.pt"
+        if training_state_path.exists():
+            saved_state = torch.load(
+                training_state_path, map_location="cpu", weights_only=False,
+            )
+            saved_delay = int(
+                saved_state.get("learner", {}).get("comm_delay_steps", 0)
+            )
+            if saved_delay != args.comm_delay_steps:
+                if args.comm_delay_steps == 0:
+                    print(
+                        f"[MARL-NDQ] Resume: restoring comm_delay_steps={saved_delay} "
+                        f"from saved training state."
+                    )
+                    args.comm_delay_steps = saved_delay
+                else:
+                    raise ValueError(
+                        f"--comm-delay-steps={args.comm_delay_steps} but the resumed "
+                        f"run was trained with comm_delay_steps={saved_delay}. "
+                        f"Re-run with --comm-delay-steps {saved_delay} or omit the flag."
+                    )
     else:
         run_dir = prepare_run_directory(algo_label, args.config, args.output_root)
 
@@ -410,6 +476,7 @@ def main() -> None:
         momentum=args.momentum,
         rmsprop_alpha=args.rmsprop_alpha,
         rmsprop_eps=args.rmsprop_eps,
+        comm_delay_steps=args.comm_delay_steps,
     )
 
     best_model_tracker = BestModelTracker()
@@ -453,6 +520,7 @@ def main() -> None:
             rnn_hidden_dim=args.rnn_hidden_dim,
             rnn_layers=args.rnn_layers,
             mixer_type=args.mixer,
+            comm_delay_steps=args.comm_delay_steps,
         )
 
     def save_training_state() -> None:
@@ -487,6 +555,14 @@ def main() -> None:
             args.rnn_layers, args.n_envs * n_agents, args.rnn_hidden_dim, device=device,
         )
         prev_actions = np.full((args.n_envs, n_agents), n_actions, dtype=np.int64)
+        delay_queue = (
+            NDQDelayQueue(
+                delay=args.comm_delay_steps, batch=args.n_envs,
+                n_agents=n_agents, embed_total=n_agents * args.comm_embed_dim,
+                device=device,
+            )
+            if args.comm_delay_steps > 0 else None
+        )
 
         while global_step < args.total_timesteps:
             step_result = ndq_rnn_collect_transition(
@@ -509,6 +585,7 @@ def main() -> None:
                 hidden_states=hidden_states,
                 collector=collector,
                 global_state_raw=global_state_raw,
+                delay_queue=delay_queue,
             )
 
             team_rewards = step_result.rewards_arr.sum(axis=1)
@@ -574,6 +651,7 @@ def main() -> None:
                     eval_baseline=eval_baseline,
                     start_time=start_time,
                     total_timesteps=args.total_timesteps,
+                    comm_delay_steps=args.comm_delay_steps,
                 )
                 eval_seed += args.n_eval_episodes
                 last_eval_step = global_step
@@ -605,6 +683,7 @@ def main() -> None:
         "batch_episodes": args.batch_episodes,
         "buffer_size": args.buffer_size,
         "comm_embed_dim": args.comm_embed_dim,
+        "comm_delay_steps": args.comm_delay_steps,
         "c_beta": args.c_beta,
         "comm_beta": args.comm_beta,
         "comm_entropy_beta": args.comm_entropy_beta,
