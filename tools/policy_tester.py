@@ -149,6 +149,8 @@ _PER_SEED_FIELDS_NETWORK: Tuple[str, ...] = (
     "rewrite_rate",
     "ack_collision_rate",
     "ack_timeout_rate",
+    "mean_packet_delay_microslots",
+    "mean_packet_delay_timesteps",
 )
 
 _PER_SEED_FIELDS: Tuple[str, ...] = _PER_SEED_FIELDS_CORE + _PER_SEED_FIELDS_NETWORK
@@ -219,6 +221,10 @@ _SUMMARY_FIELDS_NETWORK: Tuple[str, ...] = (
     "std_ack_collision_rate",
     "mean_ack_timeout_rate",
     "std_ack_timeout_rate",
+    "mean_packet_delay_microslots",
+    "std_packet_delay_microslots",
+    "mean_packet_delay_timesteps",
+    "std_packet_delay_timesteps",
 )
 
 _SUMMARY_FIELDS: Tuple[str, ...] = _SUMMARY_FIELDS_CORE + _SUMMARY_FIELDS_NETWORK
@@ -321,6 +327,8 @@ class EpisodeResult:
     mac_ack_sent: int
     mac_ack_collisions: int
     ack_timeouts: int
+    data_delivery_delay_microslots_sum: int = 0
+    data_delivery_delay_steps_sum: int = 0
     comm_total_dims: int = 0
     comm_dropped_dims: int = 0
     comm_total_messages: int = 0
@@ -397,6 +405,12 @@ def _episode_result_to_seed_row(
             "rewrite_rate": _safe_rate(result.tx_rewrites, result.tx_attempts),
             "ack_collision_rate": _safe_rate(result.mac_ack_collisions, result.mac_ack_sent),
             "ack_timeout_rate": _safe_rate(result.ack_timeouts, result.tx_attempts),
+            "mean_packet_delay_microslots": _safe_rate(
+                result.data_delivery_delay_microslots_sum, result.data_delivered
+            ),
+            "mean_packet_delay_timesteps": _safe_rate(
+                result.data_delivery_delay_steps_sum, result.data_delivered
+            ),
         })
     return row
 
@@ -445,6 +459,12 @@ def _extract_network_totals(info: Dict[str, Any]) -> Dict[str, int]:
         "mac_ack_sent": _sum_network_stat(network_stats, "mac_ack_sent"),
         "mac_ack_collisions": _sum_network_stat(network_stats, "mac_ack_collisions"),
         "ack_timeouts": _sum_network_stat(network_stats, "ack_timeouts"),
+        "data_delivery_delay_microslots_sum": _sum_network_stat(
+            network_stats, "data_delivery_delay_microslots_sum"
+        ),
+        "data_delivery_delay_steps_sum": _sum_network_stat(
+            network_stats, "data_delivery_delay_steps_sum"
+        ),
     }
 
 
@@ -842,6 +862,14 @@ def _summarize_results(results: List[EpisodeResult]) -> Dict[str, float]:
         ("rewrite_rate", np.array([_safe_rate(r.tx_rewrites, r.tx_attempts) for r in results], dtype=float)),
         ("ack_collision_rate", np.array([_safe_rate(r.mac_ack_collisions, r.mac_ack_sent) for r in results], dtype=float)),
         ("ack_timeout_rate", np.array([_safe_rate(r.ack_timeouts, r.tx_attempts) for r in results], dtype=float)),
+        ("packet_delay_microslots", np.array(
+            [_safe_rate(r.data_delivery_delay_microslots_sum, r.data_delivered) for r in results],
+            dtype=float,
+        )),
+        ("packet_delay_timesteps", np.array(
+            [_safe_rate(r.data_delivery_delay_steps_sum, r.data_delivered) for r in results],
+            dtype=float,
+        )),
     )
 
     out: Dict[str, Any] = {}
@@ -1606,6 +1634,11 @@ def main() -> int:
         help="Evaluate only heuristic baselines (zero_wait, perfect_sync, perfect_sync_n2, always_send, never_send, random_33, random_20)",
     )
     parser.add_argument(
+        "--skip-heuristics",
+        action="store_true",
+        help="In single-policy mode, skip the default heuristic baselines and evaluate only the target policy.",
+    )
+    parser.add_argument(
         "--only-best",
         action="store_true",
         help="In batch mode (--models-root), evaluate only best_model checkpoints and skip best_train/latest",
@@ -1683,6 +1716,10 @@ def main() -> int:
         raise ValueError("--test-replay cannot be used with --only-heuristics.")
     if args.only_best and args.only_heuristics:
         raise ValueError("--only-best cannot be used with --only-heuristics.")
+    if args.skip_heuristics and args.only_heuristics:
+        raise ValueError("--skip-heuristics cannot be used with --only-heuristics.")
+    if args.skip_heuristics and args.models_root:
+        raise ValueError("--skip-heuristics is only supported in single-policy mode (use --config/--policy).")
 
     if args.only_heuristics:
         if args.models_root or args.policy or args.policy_type:
@@ -1734,10 +1771,11 @@ def main() -> int:
                 ndq_cut_mu_thres=float(args.ndq_cut_mu_thres),
             ))
 
-        for heuristic_name in HEURISTIC_POLICY_NAMES:
-            policy_specs.append(
-                PolicySpec(label=heuristic_name, policy_type="heuristic", policy_path=heuristic_name)
-            )
+        if not args.skip_heuristics:
+            for heuristic_name in HEURISTIC_POLICY_NAMES:
+                policy_specs.append(
+                    PolicySpec(label=heuristic_name, policy_type="heuristic", policy_path=heuristic_name)
+                )
 
         run_dir = output_root / f"policy_test_{_sanitize_filename(target_label)}"
         run_dir.mkdir(parents=True, exist_ok=True)

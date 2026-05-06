@@ -144,6 +144,14 @@ class NetworkModel:
         self.collisions_per_agent: List[int] = [0 for _ in range(n_agents)]
         self.data_delivered_total = 0
         self.data_delivered_per_agent: List[int] = [0 for _ in range(n_agents)]
+        # Sum of per-packet delivery delays at delivery time. The microslot
+        # version is current_slot - packet.timestamp_sent; the step version is
+        # the same difference floored by slots_per_step. Counts are implicit in
+        # data_delivered_per_agent.
+        self.data_delivery_delay_microslots_sum_per_agent: List[int] = [0 for _ in range(n_agents)]
+        self.data_delivery_delay_microslots_sum_total: int = 0
+        self.data_delivery_delay_steps_sum_per_agent: List[int] = [0 for _ in range(n_agents)]
+        self.data_delivery_delay_steps_sum_total: int = 0
         self.mac_ack_sent_total = 0
         self.mac_ack_sent_per_agent: List[int] = [0 for _ in range(n_agents)]
         self.mac_ack_collisions_total = 0
@@ -293,6 +301,10 @@ class NetworkModel:
         self.collisions_per_agent = [0 for _ in range(self.n_agents)]
         self.data_delivered_total = 0
         self.data_delivered_per_agent = [0 for _ in range(self.n_agents)]
+        self.data_delivery_delay_microslots_sum_per_agent = [0 for _ in range(self.n_agents)]
+        self.data_delivery_delay_microslots_sum_total = 0
+        self.data_delivery_delay_steps_sum_per_agent = [0 for _ in range(self.n_agents)]
+        self.data_delivery_delay_steps_sum_total = 0
         self.mac_ack_sent_total = 0
         self.mac_ack_sent_per_agent = [0 for _ in range(self.n_agents)]
         self.mac_ack_collisions_total = 0
@@ -745,9 +757,17 @@ class NetworkModel:
 
                     delivered_data.append(packet)
                     dest_id = int(packet.dest_id)
+                    delay_microslots = self.current_slot - packet.timestamp_sent
+                    delay_steps = (self.current_slot // self.slots_per_step) - (
+                        packet.timestamp_sent // self.slots_per_step
+                    )
                     if 0 <= dest_id < self.n_agents:
                         self.data_delivered_per_agent[dest_id] += 1
                         self.data_delivered_total += 1
+                        self.data_delivery_delay_microslots_sum_per_agent[dest_id] += delay_microslots
+                        self.data_delivery_delay_steps_sum_per_agent[dest_id] += delay_steps
+                    self.data_delivery_delay_microslots_sum_total += delay_microslots
+                    self.data_delivery_delay_steps_sum_total += delay_steps
                     receiver_idx = self.n_agents + packet.dest_id
                     measurement_timestamp = packet.payload.get("timestamp") if packet.payload else None
 

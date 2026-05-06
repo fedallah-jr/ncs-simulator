@@ -1961,6 +1961,16 @@ class NCS_Env(gym.Env):
             if self.perfect_communication
             else [int(x) for x in self.network.data_delivered_per_agent]
         )
+        data_delivery_delay_microslots_sum = (
+            [0 for _ in range(self.n_agents)]
+            if self.perfect_communication
+            else [int(x) for x in self.network.data_delivery_delay_microslots_sum_per_agent]
+        )
+        data_delivery_delay_steps_sum = (
+            [0 for _ in range(self.n_agents)]
+            if self.perfect_communication
+            else [int(x) for x in self.network.data_delivery_delay_steps_sum_per_agent]
+        )
         mac_ack_sent = (
             [0 for _ in range(self.n_agents)]
             if self.perfect_communication
@@ -2012,6 +2022,8 @@ class NCS_Env(gym.Env):
                 "tx_rewrites": [int(x) for x in self.net_tx_rewrites],
                 "tx_collisions": collisions,
                 "data_delivered": data_delivered,
+                "data_delivery_delay_microslots_sum": data_delivery_delay_microslots_sum,
+                "data_delivery_delay_steps_sum": data_delivery_delay_steps_sum,
                 "mac_ack_sent": mac_ack_sent,
                 "mac_ack_collisions": mac_ack_collisions,
                 "ack_timeouts": ack_timeouts,
