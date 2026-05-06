@@ -5,7 +5,7 @@ import csv
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import numpy as np
 import torch
@@ -27,8 +27,6 @@ from utils.marl import (
     save_hasac_training_state,
     load_hasac_training_state,
     patch_autoreset_final_obs,
-    select_actions_batched,
-    append_agent_id,
 )
 from utils.marl.common import compute_broadcast_curriculum_mask, curriculum_n_valid_actions
 from utils.marl_training import (

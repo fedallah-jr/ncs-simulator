@@ -4,7 +4,6 @@ from typing import List, Optional
 
 import copy
 import math
-import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -213,7 +212,6 @@ class VDNLearner:
         rewards = batch.rewards
         dones = batch.dones
 
-        batch_size = obs.shape[0]
         q_all = _q_values(self.agent, obs, self.n_agents, self.n_actions)
         q_taken = q_all.gather(-1, actions.unsqueeze(-1)).squeeze(-1)
         q_tot = self.mixer(q_taken).squeeze(-1)
@@ -313,7 +311,6 @@ class QMIXLearner:
         states = batch.states
         next_states = batch.next_states
 
-        batch_size = obs.shape[0]
         q_all = _q_values(self.agent, obs, self.n_agents, self.n_actions)
         q_taken = q_all.gather(-1, actions.unsqueeze(-1)).squeeze(-1)
         q_tot = self.mixer(q_taken, states).squeeze(-1)

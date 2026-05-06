@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from contextlib import contextmanager
 from typing import Optional, Sequence
 
@@ -903,8 +902,3 @@ class TwinQNetwork(nn.Module):
         x1 = self.q1_feature_norm_layer(x) if self.q1_feature_norm_layer is not None else x
         x2 = self.q2_feature_norm_layer(x) if self.q2_feature_norm_layer is not None else x
         return self.q1(x1).squeeze(-1), self.q2(x2).squeeze(-1)
-
-    def q1_forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.q1_feature_norm_layer is not None:
-            x = self.q1_feature_norm_layer(x)
-        return self.q1(x).squeeze(-1)

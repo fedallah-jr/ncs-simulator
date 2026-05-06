@@ -5,7 +5,7 @@ import csv
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -438,17 +438,10 @@ def main() -> None:
                 truncated_any = np.asarray(truncated, dtype=np.bool_)
                 done = np.logical_or(terminated_any, truncated_any)
 
-                next_obs_for_gae_raw, next_global_state_for_gae = patch_autoreset_final_obs(
+                _, next_global_state_for_gae = patch_autoreset_final_obs(
                     next_obs_raw, infos, done, n_agents,
                     next_global_state_raw=next_global_state_raw,
                 )
-
-                if obs_normalizer is not None:
-                    next_obs_for_gae = obs_normalizer.normalize(
-                        next_obs_for_gae_raw, update=False
-                    )
-                else:
-                    next_obs_for_gae = next_obs_for_gae_raw
 
                 raw_rewards = np.asarray(rewards_arr, dtype=np.float32)
                 rewards = raw_rewards.sum(axis=1, keepdims=True)  # (n_envs, 1)

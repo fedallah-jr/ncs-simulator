@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple, List, MutableMapping
+from typing import Any, Callable, Dict, Optional, Tuple, List, MutableMapping, TYPE_CHECKING
 
 import numpy as np
 from gymnasium.vector import AsyncVectorEnv
 from gymnasium.vector.async_vector_env import AutoresetMode
+
+if TYPE_CHECKING:
+    from ncs_env.env import NCS_Env
 
 
 @dataclass(frozen=True)

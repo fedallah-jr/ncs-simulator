@@ -131,7 +131,3 @@ class BestModelTracker:
             save_fn(save_path)
             return True
         return False
-
-    def get_best(self, key: str) -> float:
-        """Get the current best reward for a key, or -inf if not tracked."""
-        return self._best.get(key, -float("inf"))

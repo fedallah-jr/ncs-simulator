@@ -93,15 +93,6 @@ class RunningObsNormalizer:
         )
         self.count = total_count
 
-    def set_state(self, mean: np.ndarray, m2: np.ndarray, count: int) -> None:
-        mean_arr = np.asarray(mean, dtype=np.float64)
-        m2_arr = np.asarray(m2, dtype=np.float64)
-        if mean_arr.shape != self.mean.shape or m2_arr.shape != self.mean.shape:
-            raise ValueError("State shapes must match obs_dim")
-        self.mean = mean_arr
-        self.m2 = m2_arr
-        self.count = int(count)
-
     def normalize(self, obs: np.ndarray, *, update: bool = True) -> np.ndarray:
         flat, shape = self._flatten_obs(obs)
         if update and flat.size > 0:

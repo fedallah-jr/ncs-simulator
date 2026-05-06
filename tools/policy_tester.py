@@ -51,12 +51,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from ncs_env.config import load_config
 from ncs_env.env import NCS_Env
-from tools.heuristic_policies import get_heuristic_policy
 from tools._common import (
     MultiAgentHeuristicPolicy,
     load_marl_torch_multi_agent_policy,
-    infer_policy_n_agents,
-    read_marl_torch_n_agents,
     resolve_n_agents,
     sanitize_filename as _sanitize_filename,
     parse_set_overrides,
@@ -1706,7 +1703,12 @@ def main() -> int:
     parser.add_argument(
         "--skip-heuristics",
         action="store_true",
-        help="In single-policy mode, skip the default heuristic baselines and evaluate only the target policy.",
+        help=(
+            "Skip the default heuristic baselines and evaluate only the target policy "
+            "(single-policy mode) or the trained models (batch mode). In batch mode, "
+            "this also skips the perfect_comm reference, and drop_ratio_mean / win_rate "
+            "fall back to NaN with the leaderboard sorted by mean_total_reward instead."
+        ),
     )
     parser.add_argument(
         "--only-best",
@@ -1818,8 +1820,6 @@ def main() -> int:
         raise ValueError("--only-best cannot be used with --only-heuristics.")
     if args.skip_heuristics and args.only_heuristics:
         raise ValueError("--skip-heuristics cannot be used with --only-heuristics.")
-    if args.skip_heuristics and args.models_root:
-        raise ValueError("--skip-heuristics is only supported in single-policy mode (use --config/--policy).")
 
     if args.only_heuristics:
         if args.models_root or args.policy or args.policy_type:
@@ -2381,21 +2381,56 @@ def main() -> int:
             for path in plotted_paths:
                 _log(path, indent=4)
 
-    if config_overrides:
-        heuristic_config_path = apply_config_overrides(
-            runs[0].config_path,
-            config_overrides,
-            models_root / "overridden_config.json",
-        )
+    if args.skip_heuristics:
+        _log("Heuristics + perfect_comm baseline: skipped (--skip-heuristics)")
     else:
-        heuristic_config_path = runs[0].config_path
-    _log("Heuristics:")
-    for heuristic_name in effective_heuristic_names:
-        _log(f"- {heuristic_name}", indent=2)
-        spec = PolicySpec(label=heuristic_name, policy_type="heuristic", policy_path=heuristic_name)
-        results = _evaluate_policy(
-            spec,
-            config_path=heuristic_config_path,
+        if config_overrides:
+            heuristic_config_path = apply_config_overrides(
+                runs[0].config_path,
+                config_overrides,
+                models_root / "overridden_config.json",
+            )
+        else:
+            heuristic_config_path = runs[0].config_path
+        _log("Heuristics:")
+        for heuristic_name in effective_heuristic_names:
+            _log(f"- {heuristic_name}", indent=2)
+            spec = PolicySpec(label=heuristic_name, policy_type="heuristic", policy_path=heuristic_name)
+            results = _evaluate_policy(
+                spec,
+                config_path=heuristic_config_path,
+                episode_length=int(args.episode_length),
+                n_agents=resolved_n_agents,
+                seeds=seeds,
+                termination_override=termination_override,
+                reward_override=reward_override,
+                num_workers=int(args.num_workers),
+                torch_device=args.torch_device,
+            )
+            run_dir = models_root / "heuristics" / f"{heuristic_name}_eval"
+            summary_row = _write_policy_results(run_dir, spec, results)
+            summary_row["model_name"] = "heuristics"
+            summary_row["checkpoint"] = "n/a"
+            summary_row["_per_seed_rewards"] = np.asarray(
+                [r.total_reward for r in results], dtype=np.float64
+            )
+            leaderboard_rows.append(summary_row)
+            _log(f"results: {run_dir / 'summary_results.csv'}", indent=4)
+
+        perfect_comm_root = models_root / "perfect_comm"
+        perfect_comm_config_path = _write_perfect_comm_config(
+            reference_config, perfect_comm_root / "perfect_comm_config.json"
+        )
+        _log("Perfect communication baseline:")
+        _log(f"config: {perfect_comm_config_path}", indent=2)
+        perfect_comm_spec = PolicySpec(
+            label="perfect_comm/always_send",
+            policy_type="heuristic",
+            policy_path="always_send",
+        )
+        perfect_comm_results = _evaluate_policy(
+            perfect_comm_spec,
+            config_path=perfect_comm_config_path,
             episode_length=int(args.episode_length),
             n_agents=resolved_n_agents,
             seeds=seeds,
@@ -2404,47 +2439,15 @@ def main() -> int:
             num_workers=int(args.num_workers),
             torch_device=args.torch_device,
         )
-        run_dir = models_root / "heuristics" / f"{heuristic_name}_eval"
-        summary_row = _write_policy_results(run_dir, spec, results)
-        summary_row["model_name"] = "heuristics"
-        summary_row["checkpoint"] = "n/a"
-        summary_row["_per_seed_rewards"] = np.asarray(
-            [r.total_reward for r in results], dtype=np.float64
+        perfect_comm_dir = perfect_comm_root / "policy_tests" / "always_send_eval"
+        perfect_comm_summary = _write_policy_results(perfect_comm_dir, perfect_comm_spec, perfect_comm_results)
+        perfect_comm_summary["model_name"] = "perfect_comm"
+        perfect_comm_summary["checkpoint"] = "always_send"
+        perfect_comm_summary["_per_seed_rewards"] = np.asarray(
+            [r.total_reward for r in perfect_comm_results], dtype=np.float64
         )
-        leaderboard_rows.append(summary_row)
-        _log(f"results: {run_dir / 'summary_results.csv'}", indent=4)
-
-    perfect_comm_root = models_root / "perfect_comm"
-    perfect_comm_config_path = _write_perfect_comm_config(
-        reference_config, perfect_comm_root / "perfect_comm_config.json"
-    )
-    _log("Perfect communication baseline:")
-    _log(f"config: {perfect_comm_config_path}", indent=2)
-    perfect_comm_spec = PolicySpec(
-        label="perfect_comm/always_send",
-        policy_type="heuristic",
-        policy_path="always_send",
-    )
-    perfect_comm_results = _evaluate_policy(
-        perfect_comm_spec,
-        config_path=perfect_comm_config_path,
-        episode_length=int(args.episode_length),
-        n_agents=resolved_n_agents,
-        seeds=seeds,
-        termination_override=termination_override,
-        reward_override=reward_override,
-        num_workers=int(args.num_workers),
-        torch_device=args.torch_device,
-    )
-    perfect_comm_dir = perfect_comm_root / "policy_tests" / "always_send_eval"
-    perfect_comm_summary = _write_policy_results(perfect_comm_dir, perfect_comm_spec, perfect_comm_results)
-    perfect_comm_summary["model_name"] = "perfect_comm"
-    perfect_comm_summary["checkpoint"] = "always_send"
-    perfect_comm_summary["_per_seed_rewards"] = np.asarray(
-        [r.total_reward for r in perfect_comm_results], dtype=np.float64
-    )
-    leaderboard_rows.append(perfect_comm_summary)
-    _log(f"results: {perfect_comm_dir / 'summary_results.csv'}", indent=2)
+        leaderboard_rows.append(perfect_comm_summary)
+        _log(f"results: {perfect_comm_dir / 'summary_results.csv'}", indent=2)
 
     baseline_row = next(
         (
@@ -2455,33 +2458,49 @@ def main() -> int:
         ),
         None,
     )
-    if baseline_row is None:
-        raise RuntimeError(
-            f"Drop-ratio baseline {args.drop_ratio_baseline!r} did not produce evaluation results."
-        )
-    baseline_rewards = baseline_row.get("_per_seed_rewards")
-    if baseline_rewards is None or len(baseline_rewards) == 0:
-        raise RuntimeError(
-            f"Drop-ratio baseline {args.drop_ratio_baseline!r} produced no per-seed rewards."
-        )
-    for row in leaderboard_rows:
-        policy_rewards = row.get("_per_seed_rewards")
-        if policy_rewards is None:
+    if args.skip_heuristics:
+        # No heuristic baseline available: leave drop_ratio columns blank and
+        # rank by mean_total_reward descending so the leaderboard is still useful.
+        for row in leaderboard_rows:
             row["drop_ratio_mean"] = float("nan")
             row["win_rate"] = float("nan")
-            continue
-        drop_mean, win_rate = _compute_drop_ratio_stats(policy_rewards, baseline_rewards)
-        row["drop_ratio_mean"] = drop_mean
-        row["win_rate"] = win_rate
 
-    def _drop_ratio_sort_key(row: Dict[str, Any]) -> float:
-        try:
-            value = float(row.get("drop_ratio_mean", float("inf")))
-        except (TypeError, ValueError):
-            return float("inf")
-        return value if np.isfinite(value) else float("inf")
+        def _reward_sort_key(row: Dict[str, Any]) -> float:
+            try:
+                value = float(row.get("mean_total_reward", float("-inf")))
+            except (TypeError, ValueError):
+                return float("inf")
+            return -value if np.isfinite(value) else float("inf")
 
-    leaderboard_rows.sort(key=_drop_ratio_sort_key)
+        leaderboard_rows.sort(key=_reward_sort_key)
+    else:
+        if baseline_row is None:
+            raise RuntimeError(
+                f"Drop-ratio baseline {args.drop_ratio_baseline!r} did not produce evaluation results."
+            )
+        baseline_rewards = baseline_row.get("_per_seed_rewards")
+        if baseline_rewards is None or len(baseline_rewards) == 0:
+            raise RuntimeError(
+                f"Drop-ratio baseline {args.drop_ratio_baseline!r} produced no per-seed rewards."
+            )
+        for row in leaderboard_rows:
+            policy_rewards = row.get("_per_seed_rewards")
+            if policy_rewards is None:
+                row["drop_ratio_mean"] = float("nan")
+                row["win_rate"] = float("nan")
+                continue
+            drop_mean, win_rate = _compute_drop_ratio_stats(policy_rewards, baseline_rewards)
+            row["drop_ratio_mean"] = drop_mean
+            row["win_rate"] = win_rate
+
+        def _drop_ratio_sort_key(row: Dict[str, Any]) -> float:
+            try:
+                value = float(row.get("drop_ratio_mean", float("inf")))
+            except (TypeError, ValueError):
+                return float("inf")
+            return value if np.isfinite(value) else float("inf")
+
+        leaderboard_rows.sort(key=_drop_ratio_sort_key)
     ranked_rows: List[Dict[str, Any]] = []
     for idx, row in enumerate(leaderboard_rows, start=1):
         ranked = dict(row)

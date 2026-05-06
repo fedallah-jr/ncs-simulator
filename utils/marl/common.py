@@ -16,6 +16,7 @@ from utils.marl.networks import (
     MLPAgent,
     DuelingMLPAgent,
     DRU,
+    DialRNNAgent,
     NDQRNNAgent,
     NDQCommEncoder,
     append_agent_id,

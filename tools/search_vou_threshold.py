@@ -461,7 +461,7 @@ def main() -> int:
             and math.isclose(next_upper, prev_upper, rel_tol=1e-12, abs_tol=1e-12)
         ):
             stop_reason = "interval_converged"
-            print(f"  interval unchanged for 2 consecutive iterations, stopping")
+            print("  interval unchanged for 2 consecutive iterations, stopping")
             lower = next_lower
             upper = next_upper
             break

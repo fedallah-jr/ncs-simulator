@@ -33,7 +33,6 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 from matplotlib.animation import FuncAnimation, FFMpegWriter
 from matplotlib.colors import ListedColormap
@@ -50,8 +49,6 @@ from ncs_env.env import NCS_Env
 from ncs_env.config import load_config
 from tools.heuristic_policies import HEURISTIC_POLICIES
 from tools._common import (
-    MultiAgentHeuristicPolicy,
-    load_marl_torch_multi_agent_policy,
     load_multi_agent_policy,
     resolve_n_agents,
     sanitize_filename as _sanitize_filename,
@@ -1152,9 +1149,9 @@ def _save_animation(anim, fig, path: Path, fps: int, description: str) -> None:
         print(f"  ✓ Saved {description} to {path}")
     except Exception as e:
         print(f"  ✗ Error saving {description}: {e}")
-        print(f"  Make sure FFmpeg is installed:")
-        print(f"    - Linux: sudo apt-get install ffmpeg")
-        print(f"    - Mac: brew install ffmpeg")
+        print("  Make sure FFmpeg is installed:")
+        print("    - Linux: sudo apt-get install ffmpeg")
+        print("    - Mac: brew install ffmpeg")
     finally:
         plt.close(fig)
 
@@ -1540,7 +1537,7 @@ def main():
     policy_types_norm = [policy_type.lower() for policy_type in policy_types]
 
     print(f"\n{'='*60}")
-    print(f"NCS Policy Visualization Tool")
+    print("NCS Policy Visualization Tool")
     print(f"{'='*60}\n")
 
     # Load configuration
@@ -1561,7 +1558,7 @@ def main():
     termination_override = config.get("termination", {}).get("evaluation")
     if not isinstance(termination_override, dict):
         termination_override = None
-    print(f"✓ Configuration loaded")
+    print("✓ Configuration loaded")
     if config_overrides:
         print("Config overrides:")
         for arg in args.set_overrides:
@@ -1617,7 +1614,7 @@ def main():
             track_eval_stats=True,
         )
 
-    print(f"Creating environment...")
+    print("Creating environment...")
     temp_env = make_env()
     state_dim = int(temp_env.state_dim)
     temp_env.close()
@@ -1668,7 +1665,7 @@ def main():
         total_reward = float(np.sum(traj["rewards"]))
         tx_count = float(np.sum(traj["actions"]))
         final_error = float(np.mean(traj["state_errors"][-1]))
-        print(f"  ✓ Episode complete")
+        print("  ✓ Episode complete")
         print(f"    - Total reward: {total_reward:.2f}")
         denom = args.episode_length * resolved_n_agents
         print(f"    - Transmissions: {int(tx_count)}/{denom}")
@@ -1696,7 +1693,7 @@ def main():
         return
 
     # Generate plots
-    print(f"Generating visualizations...\n")
+    print("Generating visualizations...\n")
 
     summary_plot_path = output_dir / f"{output_prefix}_marl_summary.png"
     plot_marl_comparison_summary(
@@ -1741,7 +1738,7 @@ def main():
 
     # Generate video animation if requested
     if args.generate_video:
-        print(f"\nGenerating animation...\n")
+        print("\nGenerating animation...\n")
         for idx, (label, traj) in enumerate(zip(policy_labels[:len(trajectories)], trajectories)):
             tag = f"p{idx+1}_{_sanitize_filename(label)}"
             video_path = output_dir / f"{output_prefix}_{tag}_animation.mp4"
@@ -1821,7 +1818,7 @@ def main():
     print(f"✓ Saved summary statistics to {summary_path}")
 
     print(f"\n{'='*60}")
-    print(f"Visualization complete!")
+    print("Visualization complete!")
     print(f"Output files saved to: {output_dir}/")
     print(f"{'='*60}\n")
 

@@ -5,7 +5,6 @@ import csv
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
 
 import numpy as np
 import torch

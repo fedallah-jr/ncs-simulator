@@ -23,8 +23,8 @@ import numpy as np
 import torch
 
 if TYPE_CHECKING:
-    from ncs_env.env import NCS_Env
     from utils.marl import RunningObsNormalizer
+    from utils.marl.vector_env import SharedRewardNormalizerConfig
     from utils.run_utils import BestModelTracker
 
 
@@ -140,62 +140,6 @@ def load_config_with_overrides(
         network_override,
         training_reward_override,
     )
-
-
-def create_environments(
-    n_agents: int,
-    episode_length: int,
-    config_path_str: Optional[str],
-    seed: Optional[int],
-    eval_reward_override: Optional[Dict[str, Any]],
-    eval_termination_override: Optional[Dict[str, Any]],
-    observation_override: Optional[Dict[str, Any]] = None,
-    network_override: Optional[Dict[str, Any]] = None,
-    training_reward_override: Optional[Dict[str, Any]] = None,
-) -> Tuple["NCS_Env", "NCS_Env"]:
-    """
-    Create training and evaluation environments.
-
-    Args:
-        n_agents: Number of agents
-        episode_length: Maximum episode length
-        config_path_str: Path to config JSON as string (or None)
-        seed: Random seed
-        eval_reward_override: Evaluation reward config override
-        eval_termination_override: Evaluation termination config override
-        observation_override: Observation config override for both training and eval envs.
-        network_override: Network config override for the training env (--set network.* values).
-            Eval env always loads network settings from the config file directly.
-        training_reward_override: Reward config override for the training env (--set reward.* values).
-            Eval env uses eval_reward_override instead.
-
-    Returns:
-        Tuple of (training environment, evaluation environment)
-    """
-    from ncs_env.env import NCS_Env
-
-    env = NCS_Env(
-        n_agents=n_agents,
-        episode_length=episode_length,
-        config_path=config_path_str,
-        seed=seed,
-        observation_override=observation_override,
-        reward_override=training_reward_override,
-        network_override=network_override,
-    )
-
-    eval_env = NCS_Env(
-        n_agents=n_agents,
-        episode_length=episode_length,
-        config_path=config_path_str,
-        seed=seed,
-        observation_override=observation_override,
-        reward_override=eval_reward_override,
-        termination_override=eval_termination_override,
-        freeze_running_normalization=True,
-    )
-
-    return env, eval_env
 
 
 def create_obs_normalizer(

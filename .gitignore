@@ -8,11 +8,16 @@ __pycache__/
 .idea/
 .vscode/
 .claude/
+.codex
+
+# OS/download metadata
+*:Zone.Identifier
 
 # Generated artifacts and visuals
 outputs/
 outputs_legacy/
 vis/
+temp/
 *.mp4
 *.png
 *.zip
