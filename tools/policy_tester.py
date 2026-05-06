@@ -73,11 +73,39 @@ HEURISTIC_POLICY_NAMES: Sequence[str] = (
     "always_send",
     "never_send",
     "random_33",
-    "random_20",
 )
 
 # Names for stochastic heuristics that should use non-deterministic actions.
 STOCHASTIC_HEURISTICS: Sequence[str] = ("random_33", "random_20")
+
+# Default value-of-update threshold used when --vou-threshold is not supplied.
+DEFAULT_VOU_THRESHOLD: float = 0.51
+
+
+def _format_vou_heuristic_name(threshold: float) -> str:
+    """Stable filesystem-friendly label for a VoU heuristic at *threshold*."""
+    return f"value_of_update_{float(threshold):g}"
+
+
+def _resolve_heuristic_names(
+    *,
+    vou_threshold: Optional[float],
+    extra_heuristics: Sequence[str] = (),
+) -> List[str]:
+    """Effective heuristic list for a run: defaults + VoU (if enabled) + extras, deduped."""
+    names: List[str] = list(HEURISTIC_POLICY_NAMES)
+    if vou_threshold is not None and float(vou_threshold) > 0.0:
+        names.append(_format_vou_heuristic_name(vou_threshold))
+    for name in extra_heuristics:
+        names.append(name)
+    seen: set = set()
+    deduped: List[str] = []
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        deduped.append(name)
+    return deduped
 
 # Reward override for evaluation: LQR-cost reward term, no normalization by default.
 # Reward clipping is disabled by default but can be enabled via --use-reward-clipping.
@@ -121,6 +149,8 @@ _PER_SEED_FIELDS_CORE: Tuple[str, ...] = (
     "total_reward",
     "mean_reward",
     "mean_state_error",
+    "mean_estimation_error",
+    "mean_kf_info_uncertainty",
     "final_state_error",
     "total_lqr_cost",
     "mean_lqr_cost",
@@ -163,6 +193,10 @@ _SUMMARY_FIELDS_CORE: Tuple[str, ...] = (
     "std_total_reward",
     "mean_state_error",
     "std_state_error",
+    "mean_estimation_error",
+    "std_estimation_error",
+    "mean_kf_info_uncertainty",
+    "std_kf_info_uncertainty",
     "mean_final_error",
     "std_final_error",
     "mean_total_lqr_cost",
@@ -239,6 +273,10 @@ _LEADERBOARD_FIELDS: Tuple[str, ...] = (
     "win_rate",
     "mean_state_error",
     "std_state_error",
+    "mean_estimation_error",
+    "std_estimation_error",
+    "mean_kf_info_uncertainty",
+    "std_kf_info_uncertainty",
     "mean_final_error",
     "std_final_error",
     "mean_lqr_cost",
@@ -333,6 +371,8 @@ class EpisodeResult:
     comm_dropped_dims: int = 0
     comm_total_messages: int = 0
     comm_silent_messages: int = 0
+    mean_estimation_error: float = 0.0
+    mean_kf_info_uncertainty: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -377,6 +417,8 @@ def _episode_result_to_seed_row(
         "total_reward": result.total_reward,
         "mean_reward": result.mean_reward,
         "mean_state_error": result.mean_state_error,
+        "mean_estimation_error": result.mean_estimation_error,
+        "mean_kf_info_uncertainty": result.mean_kf_info_uncertainty,
         "final_state_error": result.final_state_error,
         "total_lqr_cost": result.total_lqr_cost,
         "mean_lqr_cost": result.mean_lqr_cost,
@@ -708,6 +750,9 @@ def _run_multi_agent_episode(
 
     total_reward = 0.0
     total_state_error = 0.0
+    total_estimation_error = 0.0
+    total_kf_info_uncertainty = 0.0
+    estimation_sample_count = 0
     total_lqr_cost = 0.0
     send_count = 0
     per_agent_state_send_count = [0] * n_agents
@@ -730,10 +775,24 @@ def _run_multi_agent_episode(
 
         # Track state error separately from rewards
         states = np.asarray(info.get("states", []), dtype=float)
+        estimates = np.asarray(info.get("estimates", []), dtype=float)
         if states.size > 0:
             for agent_idx, state in enumerate(states):
                 state_error = env._compute_state_error(state)
                 total_state_error += float(state_error)
+        # Estimation error and KF-info uncertainty (eᵀ M e), evaluated on
+        # post-step (state, estimate) pairs returned by the env. Both are
+        # natural decision-time quantities used by the value-of-update and
+        # kf_info_m_noise reward terms.
+        if states.size > 0 and estimates.size == states.size:
+            for agent_idx in range(n_agents):
+                state_vec = np.asarray(states[agent_idx], dtype=np.float64).reshape(-1)
+                estimate_vec = np.asarray(estimates[agent_idx], dtype=np.float64).reshape(-1)
+                error_vec = state_vec - estimate_vec
+                total_estimation_error += float(np.linalg.norm(error_vec))
+                weight = np.asarray(env._get_kf_info_matrix(agent_idx), dtype=np.float64)
+                total_kf_info_uncertainty += float(error_vec @ weight @ error_vec)
+                estimation_sample_count += 1
         steps += 1
         last_info = info
         if "true_goodput_kbps_total" in info:
@@ -750,6 +809,9 @@ def _run_multi_agent_episode(
         final_error = 0.0
     mean_reward = total_reward / float(max(1, steps * n_agents))
     mean_state_error = total_state_error / float(max(1, steps * n_agents))
+    estimation_denom = float(max(1, estimation_sample_count))
+    mean_estimation_error = total_estimation_error / estimation_denom
+    mean_kf_info_uncertainty = total_kf_info_uncertainty / estimation_denom
     mean_lqr_cost = total_lqr_cost / float(max(1, steps * n_agents))
     send_rate = float(send_count) / float(max(1, steps * n_agents))
     state_send_rates = [
@@ -783,6 +845,8 @@ def _run_multi_agent_episode(
         steps=steps,
         n_agents=n_agents,
         episode_length=episode_length,
+        mean_estimation_error=mean_estimation_error,
+        mean_kf_info_uncertainty=mean_kf_info_uncertainty,
         **network_totals,
         **comm_kwargs,
     )
@@ -839,6 +903,8 @@ def _summarize_results(results: List[EpisodeResult]) -> Dict[str, float]:
     direct_fields: Sequence[Tuple[str, np.ndarray]] = (
         ("total_reward", np.array([r.total_reward for r in results], dtype=float)),
         ("state_error", np.array([r.mean_state_error for r in results], dtype=float)),
+        ("estimation_error", np.array([r.mean_estimation_error for r in results], dtype=float)),
+        ("kf_info_uncertainty", np.array([r.mean_kf_info_uncertainty for r in results], dtype=float)),
         ("final_error", np.array([r.final_state_error for r in results], dtype=float)),
         ("total_lqr_cost", np.array([r.total_lqr_cost for r in results], dtype=float)),
         ("lqr_cost", np.array([r.mean_lqr_cost for r in results], dtype=float)),
@@ -1631,7 +1697,11 @@ def main() -> int:
     parser.add_argument(
         "--only-heuristics",
         action="store_true",
-        help="Evaluate only heuristic baselines (zero_wait, perfect_sync, perfect_sync_n2, always_send, never_send, random_33, random_20)",
+        help=(
+            "Evaluate only heuristic baselines (zero_wait, perfect_sync, "
+            "perfect_sync_n2, always_send, never_send, random_33, plus the "
+            "VoU-threshold heuristic when --vou-threshold > 0)."
+        ),
     )
     parser.add_argument(
         "--skip-heuristics",
@@ -1674,9 +1744,35 @@ def main() -> int:
         "--drop-ratio-baseline",
         default="perfect_sync_n2",
         help=(
-            "Heuristic used as the drop-ratio/win-rate reference in batch "
-            "(--models-root) mode. Must be one of HEURISTIC_POLICY_NAMES "
-            "(default: perfect_sync_n2)."
+            "Heuristic used as the drop-ratio/win-rate reference. Must match "
+            "one of the heuristics scheduled to run (defaults from "
+            "HEURISTIC_POLICY_NAMES, the VoU-threshold heuristic when "
+            "--vou-threshold > 0, or any --extra-heuristic). "
+            "Default: perfect_sync_n2."
+        ),
+    )
+    parser.add_argument(
+        "--vou-threshold",
+        type=float,
+        default=DEFAULT_VOU_THRESHOLD,
+        help=(
+            "Value-of-update threshold used to add the heuristic "
+            "value_of_update_<threshold> to the default heuristic set. "
+            f"Default: {DEFAULT_VOU_THRESHOLD}. Set to 0 (or negative) to "
+            "skip the VoU heuristic."
+        ),
+    )
+    parser.add_argument(
+        "--extra-heuristic",
+        action="append",
+        default=None,
+        dest="extra_heuristics",
+        metavar="NAME",
+        help=(
+            "Additional heuristic policy name(s) to evaluate in batch mode "
+            "on top of the default heuristic set (which already includes the "
+            "VoU heuristic when --vou-threshold > 0). Repeatable. "
+            "Useful for an extra perfect_sync_n3 or a second VoU level."
         ),
     )
     add_set_override_argument(parser)
@@ -1686,10 +1782,14 @@ def main() -> int:
         raise ValueError("--num-seeds must be >= 1")
     if args.num_workers < 1:
         raise ValueError("--num-workers must be >= 1")
-    if args.drop_ratio_baseline not in HEURISTIC_POLICY_NAMES:
+    effective_heuristic_names = _resolve_heuristic_names(
+        vou_threshold=args.vou_threshold,
+        extra_heuristics=tuple(args.extra_heuristics or ()),
+    )
+    if args.drop_ratio_baseline not in effective_heuristic_names:
         raise ValueError(
-            "--drop-ratio-baseline must be one of "
-            f"{list(HEURISTIC_POLICY_NAMES)}, got {args.drop_ratio_baseline!r}"
+            "--drop-ratio-baseline must be one of the scheduled heuristics "
+            f"({effective_heuristic_names}), got {args.drop_ratio_baseline!r}"
         )
     config_overrides = parse_set_overrides(args.set_overrides)
     # Build reward override based on flags
@@ -1772,7 +1872,7 @@ def main() -> int:
             ))
 
         if not args.skip_heuristics:
-            for heuristic_name in HEURISTIC_POLICY_NAMES:
+            for heuristic_name in effective_heuristic_names:
                 policy_specs.append(
                     PolicySpec(label=heuristic_name, policy_type="heuristic", policy_path=heuristic_name)
                 )
@@ -2290,7 +2390,7 @@ def main() -> int:
     else:
         heuristic_config_path = runs[0].config_path
     _log("Heuristics:")
-    for heuristic_name in HEURISTIC_POLICY_NAMES:
+    for heuristic_name in effective_heuristic_names:
         _log(f"- {heuristic_name}", indent=2)
         spec = PolicySpec(label=heuristic_name, policy_type="heuristic", policy_path=heuristic_name)
         results = _evaluate_policy(
