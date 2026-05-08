@@ -4,8 +4,6 @@ filterpy
 gymnasium
 torch
 matplotlib
-jax
-jaxlib
-flax
-evosax
 pandas
+plotly
+pytest
