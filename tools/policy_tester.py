@@ -35,7 +35,7 @@ os.environ["MKL_NUM_THREADS"] = "1"
 
 import sys
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
@@ -153,6 +153,7 @@ _PER_SEED_FIELDS_CORE: Tuple[str, ...] = (
     "mean_lqr_cost",
     "send_rate",
     "state_send_rates",
+    "send_rates",
     "mean_true_goodput_kbps",
     "steps",
     "n_agents",
@@ -178,6 +179,20 @@ _PER_SEED_FIELDS_NETWORK: Tuple[str, ...] = (
     "ack_timeout_rate",
     "mean_packet_delay_microslots",
     "mean_packet_delay_timesteps",
+    # Per-agent episode-cumulative counters (JSON-encoded length-n_agents
+    # lists). Divide pairwise to recover per-agent drop/success/delivery
+    # rates and mean delays.
+    "tx_attempts_per_agent",
+    "tx_acked_per_agent",
+    "tx_dropped_per_agent",
+    "tx_rewrites_per_agent",
+    "tx_collisions_per_agent",
+    "data_delivered_per_agent",
+    "mac_ack_sent_per_agent",
+    "mac_ack_collisions_per_agent",
+    "ack_timeouts_per_agent",
+    "data_delivery_delay_microslots_sum_per_agent",
+    "data_delivery_delay_steps_sum_per_agent",
 )
 
 _PER_SEED_FIELDS: Tuple[str, ...] = _PER_SEED_FIELDS_CORE + _PER_SEED_FIELDS_NETWORK
@@ -203,6 +218,7 @@ _SUMMARY_FIELDS_CORE: Tuple[str, ...] = (
     "mean_send_rate",
     "std_send_rate",
     "mean_state_send_rates",
+    "mean_send_rates",
     "mean_true_goodput_kbps",
     "std_true_goodput_kbps",
     "mean_steps",
@@ -256,6 +272,19 @@ _SUMMARY_FIELDS_NETWORK: Tuple[str, ...] = (
     "std_packet_delay_microslots",
     "mean_packet_delay_timesteps",
     "std_packet_delay_timesteps",
+    # Per-agent counters averaged across seeds (JSON-encoded length-n_agents
+    # lists).
+    "mean_tx_attempts_per_agent",
+    "mean_tx_acked_per_agent",
+    "mean_tx_dropped_per_agent",
+    "mean_tx_rewrites_per_agent",
+    "mean_tx_collisions_per_agent",
+    "mean_data_delivered_per_agent",
+    "mean_mac_ack_sent_per_agent",
+    "mean_mac_ack_collisions_per_agent",
+    "mean_ack_timeouts_per_agent",
+    "mean_data_delivery_delay_microslots_sum_per_agent",
+    "mean_data_delivery_delay_steps_sum_per_agent",
 )
 
 _SUMMARY_FIELDS: Tuple[str, ...] = _SUMMARY_FIELDS_CORE + _SUMMARY_FIELDS_NETWORK
@@ -370,6 +399,27 @@ class EpisodeResult:
     comm_silent_messages: int = 0
     mean_estimation_error: float = 0.0
     mean_kf_info_uncertainty: float = 0.0
+    # Per-step per-agent metric traces, shape (T, n_agents). Populated by
+    # _run_multi_agent_episode; dumped to per_seed_traces.npz by
+    # _write_step_traces. Excluded from the flat per-seed CSV.
+    lqr_cost_trace: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 0), dtype=np.float64)
+    )
+    estimation_error_l2_trace: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 0), dtype=np.float64)
+    )
+    estimation_error_l1_trace: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 0), dtype=np.float64)
+    )
+    kf_info_m_noise_trace: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 0), dtype=np.float64)
+    )
+    # Per-agent episode aggregates, length n_agents. send_rates is the
+    # per-agent admit rate (fraction of steps with action in {1, 3}).
+    # network_per_agent holds per-agent episode-cumulative network counters
+    # keyed by _NETWORK_PER_AGENT_KEYS.
+    send_rates: List[float] = field(default_factory=list)
+    network_per_agent: Dict[str, List[int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -421,6 +471,7 @@ def _episode_result_to_seed_row(
         "mean_lqr_cost": result.mean_lqr_cost,
         "send_rate": result.send_rate,
         "state_send_rates": json.dumps([round(r, 4) for r in result.state_send_rates]),
+        "send_rates": json.dumps([round(r, 4) for r in result.send_rates]),
         "mean_true_goodput_kbps": result.mean_true_goodput_kbps,
         "steps": result.steps,
         "n_agents": result.n_agents,
@@ -451,6 +502,8 @@ def _episode_result_to_seed_row(
                 result.data_delivery_delay_steps_sum, result.data_delivered
             ),
         })
+        for key, values in result.network_per_agent.items():
+            row[f"{key}_per_agent"] = json.dumps([int(v) for v in values])
     return row
 
 
@@ -486,24 +539,60 @@ def _sum_network_stat(network_stats: Dict[str, Any], key: str) -> int:
         return 0
 
 
+# Per-agent network counters carried through from info["network_stats"].
+# Every key is a length-n_agents list in the env's info dict; the policy
+# tester keeps both the summed scalar (_extract_network_totals) and the
+# per-agent breakdown (_extract_network_totals_per_agent).
+_NETWORK_PER_AGENT_KEYS: Tuple[str, ...] = (
+    "tx_attempts",
+    "tx_acked",
+    "tx_dropped",
+    "tx_rewrites",
+    "tx_collisions",
+    "data_delivered",
+    "mac_ack_sent",
+    "mac_ack_collisions",
+    "ack_timeouts",
+    "data_delivery_delay_microslots_sum",
+    "data_delivery_delay_steps_sum",
+)
+
+
 def _extract_network_totals(info: Dict[str, Any]) -> Dict[str, int]:
     network_stats = info.get("network_stats", {})
     return {
-        "tx_attempts": _sum_network_stat(network_stats, "tx_attempts"),
-        "tx_acked": _sum_network_stat(network_stats, "tx_acked"),
-        "tx_dropped": _sum_network_stat(network_stats, "tx_dropped"),
-        "tx_rewrites": _sum_network_stat(network_stats, "tx_rewrites"),
-        "tx_collisions": _sum_network_stat(network_stats, "tx_collisions"),
-        "data_delivered": _sum_network_stat(network_stats, "data_delivered"),
-        "mac_ack_sent": _sum_network_stat(network_stats, "mac_ack_sent"),
-        "mac_ack_collisions": _sum_network_stat(network_stats, "mac_ack_collisions"),
-        "ack_timeouts": _sum_network_stat(network_stats, "ack_timeouts"),
-        "data_delivery_delay_microslots_sum": _sum_network_stat(
-            network_stats, "data_delivery_delay_microslots_sum"
-        ),
-        "data_delivery_delay_steps_sum": _sum_network_stat(
-            network_stats, "data_delivery_delay_steps_sum"
-        ),
+        key: _sum_network_stat(network_stats, key)
+        for key in _NETWORK_PER_AGENT_KEYS
+    }
+
+
+def _network_stat_list(
+    network_stats: Dict[str, Any], key: str, n_agents: int
+) -> List[int]:
+    """Per-agent counter list, padded/truncated to exactly n_agents entries."""
+    values = network_stats.get(key)
+    if isinstance(values, list):
+        out = [int(x) for x in values[:n_agents]]
+    elif values is None:
+        out = []
+    else:
+        # Scalar fallback: attribute the whole count to agent 0.
+        try:
+            out = [int(values)]
+        except (TypeError, ValueError):
+            out = []
+    if len(out) < n_agents:
+        out.extend([0] * (n_agents - len(out)))
+    return out
+
+
+def _extract_network_totals_per_agent(
+    info: Dict[str, Any], n_agents: int
+) -> Dict[str, List[int]]:
+    network_stats = info.get("network_stats", {})
+    return {
+        key: _network_stat_list(network_stats, key, n_agents)
+        for key in _NETWORK_PER_AGENT_KEYS
     }
 
 
@@ -751,12 +840,20 @@ def _run_multi_agent_episode(
     total_kf_info_uncertainty = 0.0
     estimation_sample_count = 0
     total_lqr_cost = 0.0
-    send_count = 0
+    per_agent_send_count = [0] * n_agents
     per_agent_state_send_count = [0] * n_agents
     steps = 0
     true_goodput_sum = 0.0
     true_goodput_steps = 0
     last_info = info
+    # Per-step per-agent traces (lists of length-n_agents rows; stacked at end).
+    lqr_cost_step_rows: List[List[float]] = []
+    ee_l2_step_rows: List[List[float]] = []
+    ee_l1_step_rows: List[List[float]] = []
+    kfm_noise_step_rows: List[List[float]] = []
+    state_cost_matrix = np.asarray(
+        getattr(env, "state_cost_matrix", np.eye(1)), dtype=np.float64
+    )
     for _ in range(episode_length):
         action_dict = policy.act(obs_dict)
         obs_dict, rewards, terminated, truncated, info = env.step(action_dict)
@@ -764,10 +861,18 @@ def _run_multi_agent_episode(
         for i in range(n_agents):
             a = int(action_dict[f"agent_{i}"])
             if a in (1, 3):
-                send_count += 1
+                per_agent_send_count[i] += 1
             if a in (2, 3):
                 per_agent_state_send_count[i] += 1
-        if "lqr_cost_total" in info:
+        # Per-agent LQR cost (env populates this when track_lqr_cost=True, which
+        # _build_env always sets). Falls back to lqr_cost_total when the
+        # per-agent breakdown is not available.
+        lqr_per_agent = info.get("lqr_costs")
+        if isinstance(lqr_per_agent, list) and len(lqr_per_agent) == n_agents:
+            row = [float(c) for c in lqr_per_agent]
+            lqr_cost_step_rows.append(row)
+            total_lqr_cost += float(sum(row))
+        elif "lqr_cost_total" in info:
             total_lqr_cost += float(info["lqr_cost_total"])
 
         # Track state error separately from rewards
@@ -777,19 +882,33 @@ def _run_multi_agent_episode(
             for agent_idx, state in enumerate(states):
                 state_error = env._compute_state_error(state)
                 total_state_error += float(state_error)
-        # Estimation error and KF-info uncertainty (eᵀ M e), evaluated on
-        # post-step (state, estimate) pairs returned by the env. Both are
-        # natural decision-time quantities used by the value-of-update and
-        # kf_info_m_noise reward terms.
+        # Estimation error (L2 and reward-mode L1-weighted form) and KF-info
+        # uncertainty (eᵀ M e) per agent per step. Evaluated on post-step
+        # (state, estimate) pairs returned by the env. eᵀ M e is the
+        # decision-time quantity whose negation defines the kf_info_m_noise
+        # reward term (env.py: last_kf_info_gains_m_noise).
         if states.size > 0 and estimates.size == states.size:
+            ee_l2_row: List[float] = []
+            ee_l1_row: List[float] = []
+            kfm_row: List[float] = []
             for agent_idx in range(n_agents):
                 state_vec = np.asarray(states[agent_idx], dtype=np.float64).reshape(-1)
                 estimate_vec = np.asarray(estimates[agent_idx], dtype=np.float64).reshape(-1)
                 error_vec = state_vec - estimate_vec
-                total_estimation_error += float(np.linalg.norm(error_vec))
+                ee_l2 = float(np.linalg.norm(error_vec))
+                weighted = state_cost_matrix @ error_vec
+                ee_l1 = float(np.sum(np.abs(weighted)))
                 weight = np.asarray(env._get_kf_info_matrix(agent_idx), dtype=np.float64)
-                total_kf_info_uncertainty += float(error_vec @ weight @ error_vec)
+                kfm = float(error_vec @ weight @ error_vec)
+                ee_l2_row.append(ee_l2)
+                ee_l1_row.append(ee_l1)
+                kfm_row.append(kfm)
+                total_estimation_error += ee_l2
+                total_kf_info_uncertainty += kfm
                 estimation_sample_count += 1
+            ee_l2_step_rows.append(ee_l2_row)
+            ee_l1_step_rows.append(ee_l1_row)
+            kfm_noise_step_rows.append(kfm_row)
         steps += 1
         last_info = info
         if "true_goodput_kbps_total" in info:
@@ -810,12 +929,17 @@ def _run_multi_agent_episode(
     mean_estimation_error = total_estimation_error / estimation_denom
     mean_kf_info_uncertainty = total_kf_info_uncertainty / estimation_denom
     mean_lqr_cost = total_lqr_cost / float(max(1, steps * n_agents))
+    send_count = sum(per_agent_send_count)
     send_rate = float(send_count) / float(max(1, steps * n_agents))
+    send_rates = [
+        float(c) / float(max(1, steps)) for c in per_agent_send_count
+    ]
     state_send_rates = [
         float(c) / float(max(1, steps)) for c in per_agent_state_send_count
     ]
     mean_true_goodput_kbps = true_goodput_sum / float(max(1, true_goodput_steps))
     network_totals = _extract_network_totals(last_info)
+    network_per_agent = _extract_network_totals_per_agent(last_info, n_agents)
     comm_stats = getattr(policy, "comm_stats", None)
     if isinstance(comm_stats, dict):
         comm_kwargs = {
@@ -826,6 +950,11 @@ def _run_multi_agent_episode(
         }
     else:
         comm_kwargs = {}
+    def _stack(rows: List[List[float]]) -> np.ndarray:
+        if rows:
+            return np.asarray(rows, dtype=np.float64)
+        return np.empty((0, n_agents), dtype=np.float64)
+
     return EpisodeResult(
         policy_label="",
         policy_type="",
@@ -838,12 +967,18 @@ def _run_multi_agent_episode(
         mean_lqr_cost=mean_lqr_cost,
         send_rate=send_rate,
         state_send_rates=state_send_rates,
+        send_rates=send_rates,
         mean_true_goodput_kbps=mean_true_goodput_kbps,
         steps=steps,
         n_agents=n_agents,
         episode_length=episode_length,
         mean_estimation_error=mean_estimation_error,
         mean_kf_info_uncertainty=mean_kf_info_uncertainty,
+        lqr_cost_trace=_stack(lqr_cost_step_rows),
+        estimation_error_l2_trace=_stack(ee_l2_step_rows),
+        estimation_error_l1_trace=_stack(ee_l1_step_rows),
+        kf_info_m_noise_trace=_stack(kfm_noise_step_rows),
+        network_per_agent=network_per_agent,
         **network_totals,
         **comm_kwargs,
     )
@@ -941,13 +1076,32 @@ def _summarize_results(results: List[EpisodeResult]) -> Dict[str, float]:
         out[f"mean_{key}"] = m
         out[f"std_{key}"] = s
     out["completion_rate"] = completion_rate
+
+    def _mean_per_agent(extract) -> List[float]:
+        """Mean of a per-agent list field across seeds (empty if no data)."""
+        if not has_data:
+            return []
+        matrix = np.array([extract(r) for r in results], dtype=float)
+        if matrix.size == 0:
+            return []
+        return np.mean(matrix, axis=0).tolist()
+
     # Per-agent state broadcast rates averaged across seeds
-    if has_data:
-        rates_matrix = np.array([r.state_send_rates for r in results], dtype=float)
-        mean_rates = np.mean(rates_matrix, axis=0).tolist()
-    else:
-        mean_rates = []
-    out["mean_state_send_rates"] = json.dumps([round(r, 4) for r in mean_rates])
+    out["mean_state_send_rates"] = json.dumps(
+        [round(r, 4) for r in _mean_per_agent(lambda r: r.state_send_rates)]
+    )
+    # Per-agent admit rate (action in {1, 3}) averaged across seeds
+    out["mean_send_rates"] = json.dumps(
+        [round(r, 4) for r in _mean_per_agent(lambda r: r.send_rates)]
+    )
+    # Per-agent episode-cumulative network counters averaged across seeds
+    for key in _NETWORK_PER_AGENT_KEYS:
+        per_agent_mean = _mean_per_agent(
+            lambda r, k=key: r.network_per_agent.get(k, [])
+        )
+        out[f"mean_{key}_per_agent"] = json.dumps(
+            [round(v, 4) for v in per_agent_mean]
+        )
     out.update(_summarize_comm_stats(results))
     return out
 
@@ -958,6 +1112,46 @@ def _write_csv(path: Path, fieldnames: Sequence[str], rows: Iterable[Dict[str, A
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def _write_step_traces(
+    run_dir: Path,
+    results: List[EpisodeResult],
+    *,
+    filename: str = "per_seed_traces.npz",
+) -> Optional[Path]:
+    """Dump per-seed per-step per-agent metric traces to a single NPZ.
+
+    Keys are ``seed_<seed>_<metric>`` for metric in ``lqr_cost``,
+    ``estimation_error_l2``, ``estimation_error_l1``, ``kf_info_m_noise``.
+    Each value is a (T, n_agents) float64 array. A ``seeds`` index array and
+    a ``metrics`` JSON manifest are also stored for convenience.
+    """
+    if not results:
+        return None
+    arrays: Dict[str, np.ndarray] = {}
+    seed_list: List[int] = []
+    for r in results:
+        seed_list.append(int(r.seed))
+        prefix = f"seed_{int(r.seed)}"
+        if r.lqr_cost_trace.size:
+            arrays[f"{prefix}_lqr_cost"] = r.lqr_cost_trace
+        if r.estimation_error_l2_trace.size:
+            arrays[f"{prefix}_estimation_error_l2"] = r.estimation_error_l2_trace
+        if r.estimation_error_l1_trace.size:
+            arrays[f"{prefix}_estimation_error_l1"] = r.estimation_error_l1_trace
+        if r.kf_info_m_noise_trace.size:
+            arrays[f"{prefix}_kf_info_m_noise"] = r.kf_info_m_noise_trace
+    if not arrays:
+        return None
+    arrays["seeds"] = np.asarray(seed_list, dtype=np.int64)
+    arrays["metrics"] = np.asarray(
+        ["lqr_cost", "estimation_error_l2", "estimation_error_l1", "kf_info_m_noise"]
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    out_path = run_dir / filename
+    np.savez_compressed(out_path, **arrays)
+    return out_path
 
 
 def _filter_rows(rows: List[Dict[str, Any]], fieldnames: Sequence[str]) -> List[Dict[str, Any]]:
@@ -1194,6 +1388,7 @@ def _write_policy_results(
     run_dir.mkdir(parents=True, exist_ok=True)
     _write_csv(run_dir / "per_seed_results.csv", _PER_SEED_FIELDS, per_seed_rows)
     _write_csv(run_dir / "summary_results.csv", _SUMMARY_FIELDS, [summary_row])
+    _write_step_traces(run_dir, results)
     return summary_row
 
 
@@ -1948,6 +2143,11 @@ def main() -> int:
                     **_summarize_results(results),
                 }
             )
+            _write_step_traces(
+                run_dir,
+                results,
+                filename=f"per_seed_traces_{_sanitize_filename(spec.label)}.npz",
+            )
 
         # Add perfect communication baseline if heuristics-only mode
         if args.only_heuristics:
@@ -1980,6 +2180,11 @@ def main() -> int:
                     "num_seeds": len(perfect_comm_results),
                     **_summarize_results(perfect_comm_results),
                 }
+            )
+            _write_step_traces(
+                run_dir,
+                perfect_comm_results,
+                filename="per_seed_traces_perfect_comm_always_send.npz",
             )
 
         # Replay test: compare original policy vs replay on test seeds
