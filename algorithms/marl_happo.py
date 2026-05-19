@@ -29,7 +29,6 @@ from utils.marl import (
     build_happo_hyperparams,
     patch_autoreset_final_obs,
 )
-from utils.marl.common import compute_broadcast_curriculum_mask
 from utils.marl.vector_env import create_async_vector_env, create_eval_async_vector_env, stack_vector_obs
 from utils.marl_training import (
     setup_device_and_rng,
@@ -136,16 +135,6 @@ def main() -> None:
 
     obs_dim = int(env.single_observation_space.spaces["agent_0"].shape[0])
     n_actions = int(env.single_action_space.spaces["agent_0"].n)
-
-    broadcast_curriculum = bool(args.broadcast_curriculum)
-    if broadcast_curriculum:
-        if n_actions != 4:
-            raise ValueError(
-                "--broadcast-curriculum requires state_comm (4-action space), "
-                f"but the resolved config gives n_actions={n_actions}"
-            )
-        if not (0.0 < args.curriculum_phase1_ratio < 1.0):
-            raise ValueError("--curriculum-phase1-ratio must be in (0, 1)")
 
     obs_dict, info = env.reset(seed=env_seeds)
     obs_raw = stack_vector_obs(obs_dict, n_agents)
@@ -281,15 +270,6 @@ def main() -> None:
                 global_obs_dim=global_state_dim,
             )
 
-            # Compute curriculum mask once per rollout (fixed for rollout+update).
-            if broadcast_curriculum:
-                rollout_mask = compute_broadcast_curriculum_mask(
-                    global_step, args.total_timesteps, n_actions,
-                    args.curriculum_phase1_ratio, device,
-                )
-            else:
-                rollout_mask = None
-
             # ---- Rollout phase ----
             for _ in range(args.n_steps):
                 if global_step >= args.total_timesteps:
@@ -308,8 +288,6 @@ def main() -> None:
                     for agent_id in range(n_agents):
                         obs_i = obs_t[:, agent_id, :]  # (n_envs, obs_dim)
                         logits = actors[agent_id](obs_i)
-                        if rollout_mask is not None:
-                            logits = logits + rollout_mask
                         dist = Categorical(logits=logits)
                         act = dist.sample()
                         lp = dist.log_prob(act)
@@ -369,7 +347,6 @@ def main() -> None:
                     algo_name="HAPPO",
                     episode_lengths=episode_lengths,
                     start_time=start_time, total_timesteps=args.total_timesteps,
-                    skip_best_update=rollout_mask is not None,
                 )
 
                 obs_raw = next_obs_raw
@@ -385,10 +362,8 @@ def main() -> None:
                         best_model_tracker=best_model_tracker, run_dir=run_dir,
                         save_checkpoint=save_checkpoint, global_step=global_step,
                         algo_name="HAPPO",
-                        action_mask=rollout_mask,
                         eval_baseline=eval_baseline,
                         start_time=start_time, total_timesteps=args.total_timesteps,
-                        skip_best_update=rollout_mask is not None,
                     )
                     eval_seed += args.n_eval_episodes
                     last_eval_step = global_step
@@ -488,8 +463,6 @@ def main() -> None:
                 actions_i_t = torch.as_tensor(actions_i, device=device, dtype=torch.long)
                 with torch.no_grad():
                     pre_logits = actors[agent_id](obs_i_t.reshape(-1, obs_dim))
-                    if rollout_mask is not None:
-                        pre_logits = pre_logits + rollout_mask
                     pre_dist = Categorical(logits=pre_logits)
                     pre_update_lp = pre_dist.log_prob(actions_i_t.reshape(-1))
 
@@ -519,8 +492,6 @@ def main() -> None:
                         factor_mb = factor_flat[mb_idx_t]  # (mb, 1)
 
                         logits = actors[agent_id](obs_mb)
-                        if rollout_mask is not None:
-                            logits = logits + rollout_mask
                         dist = Categorical(logits=logits)
                         new_lp = dist.log_prob(actions_mb)
                         ratio = (new_lp - old_lp_mb).exp()
@@ -542,8 +513,6 @@ def main() -> None:
                 # Post-update: compute exact factor for next agent (no clamping)
                 with torch.no_grad():
                     post_logits = actors[agent_id](obs_i_t.reshape(-1, obs_dim))
-                    if rollout_mask is not None:
-                        post_logits = post_logits + rollout_mask
                     post_dist = Categorical(logits=post_logits)
                     post_update_lp = post_dist.log_prob(actions_i_t.reshape(-1))
                     ratio_i = (post_update_lp - pre_update_lp).exp()

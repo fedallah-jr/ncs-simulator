@@ -119,8 +119,6 @@ DEFAULT_EVAL_SEED_START = 1234567890
 
 REWARD_COMPARISON_KEYS: Sequence[str] = (
     "comm_penalty_alpha",
-    "broadcast_penalty_alpha",
-    "omit_reward_alpha",
     "simple_comm_penalty_alpha",
     "simple_freshness_decay",
     "comm_recent_window",
@@ -152,7 +150,6 @@ _PER_SEED_FIELDS_CORE: Tuple[str, ...] = (
     "total_lqr_cost",
     "mean_lqr_cost",
     "send_rate",
-    "state_send_rates",
     "send_rates",
     "mean_true_goodput_kbps",
     "steps",
@@ -217,7 +214,6 @@ _SUMMARY_FIELDS_CORE: Tuple[str, ...] = (
     "std_lqr_cost",
     "mean_send_rate",
     "std_send_rate",
-    "mean_state_send_rates",
     "mean_send_rates",
     "mean_true_goodput_kbps",
     "std_true_goodput_kbps",
@@ -309,7 +305,6 @@ _LEADERBOARD_FIELDS: Tuple[str, ...] = (
     "std_lqr_cost",
     "mean_send_rate",
     "std_send_rate",
-    "mean_state_send_rates",
     "mean_steps",
     "std_steps",
     "mean_reward_per_step",
@@ -348,7 +343,6 @@ _REPLAYBOARD_FIELDS: Tuple[str, ...] = (
     "std_lqr_cost",
     "mean_send_rate",
     "std_send_rate",
-    "mean_state_send_rates",
     "mean_steps",
     "std_steps",
     "mean_reward_per_step",
@@ -377,7 +371,6 @@ class EpisodeResult:
     total_lqr_cost: float
     mean_lqr_cost: float
     send_rate: float
-    state_send_rates: List[float]
     mean_true_goodput_kbps: float
     steps: int
     n_agents: int
@@ -470,7 +463,6 @@ def _episode_result_to_seed_row(
         "total_lqr_cost": result.total_lqr_cost,
         "mean_lqr_cost": result.mean_lqr_cost,
         "send_rate": result.send_rate,
-        "state_send_rates": json.dumps([round(r, 4) for r in result.state_send_rates]),
         "send_rates": json.dumps([round(r, 4) for r in result.send_rates]),
         "mean_true_goodput_kbps": result.mean_true_goodput_kbps,
         "steps": result.steps,
@@ -841,7 +833,6 @@ def _run_multi_agent_episode(
     estimation_sample_count = 0
     total_lqr_cost = 0.0
     per_agent_send_count = [0] * n_agents
-    per_agent_state_send_count = [0] * n_agents
     steps = 0
     true_goodput_sum = 0.0
     true_goodput_steps = 0
@@ -860,10 +851,8 @@ def _run_multi_agent_episode(
         total_reward += float(sum(rewards.values()))
         for i in range(n_agents):
             a = int(action_dict[f"agent_{i}"])
-            if a in (1, 3):
+            if a == 1:
                 per_agent_send_count[i] += 1
-            if a in (2, 3):
-                per_agent_state_send_count[i] += 1
         # Per-agent LQR cost (env populates this when track_lqr_cost=True, which
         # _build_env always sets). Falls back to lqr_cost_total when the
         # per-agent breakdown is not available.
@@ -934,9 +923,6 @@ def _run_multi_agent_episode(
     send_rates = [
         float(c) / float(max(1, steps)) for c in per_agent_send_count
     ]
-    state_send_rates = [
-        float(c) / float(max(1, steps)) for c in per_agent_state_send_count
-    ]
     mean_true_goodput_kbps = true_goodput_sum / float(max(1, true_goodput_steps))
     network_totals = _extract_network_totals(last_info)
     network_per_agent = _extract_network_totals_per_agent(last_info, n_agents)
@@ -966,7 +952,6 @@ def _run_multi_agent_episode(
         total_lqr_cost=total_lqr_cost,
         mean_lqr_cost=mean_lqr_cost,
         send_rate=send_rate,
-        state_send_rates=state_send_rates,
         send_rates=send_rates,
         mean_true_goodput_kbps=mean_true_goodput_kbps,
         steps=steps,
@@ -1086,11 +1071,7 @@ def _summarize_results(results: List[EpisodeResult]) -> Dict[str, float]:
             return []
         return np.mean(matrix, axis=0).tolist()
 
-    # Per-agent state broadcast rates averaged across seeds
-    out["mean_state_send_rates"] = json.dumps(
-        [round(r, 4) for r in _mean_per_agent(lambda r: r.state_send_rates)]
-    )
-    # Per-agent admit rate (action in {1, 3}) averaged across seeds
+    # Per-agent admit rate (action == 1) averaged across seeds
     out["mean_send_rates"] = json.dumps(
         [round(r, 4) for r in _mean_per_agent(lambda r: r.send_rates)]
     )
@@ -1179,30 +1160,26 @@ def _strip_non_dynamics_config_fields(value: Any) -> Any:
 def _extract_env_signature(config: Dict[str, Any]) -> Dict[str, Any]:
     # Batch evaluation runs each checkpoint with its own config path, so
     # observation-shape settings usually do not need to match across model
-    # folders. Keep the compatibility check focused on environment dynamics,
-    # reward-affecting settings, and observation flags that also change action
-    # semantics (for example state_comm_enabled).
+    # folders. Keep the compatibility check focused on environment dynamics
+    # and reward-affecting settings.
     signature: Dict[str, Any] = {}
     for key in ("system", "lqr", "network", "termination", "controller"):
         if key in config:
             signature[key] = _strip_non_dynamics_config_fields(config.get(key))
     reward_cfg = config.get("reward", {})
-    _REWARD_DEFAULTS = {"broadcast_penalty_alpha": 0.0, "omit_reward_alpha": 0.0}
     signature["reward"] = _strip_non_dynamics_config_fields(
         {
-            key: reward_cfg.get(key, _REWARD_DEFAULTS.get(key))
+            key: reward_cfg[key]
             for key in REWARD_COMPARISON_KEYS
-            if key in reward_cfg or key in _REWARD_DEFAULTS
+            if key in reward_cfg
         }
     )
     observation_cfg = config.get("observation", {})
-    # Use explicit defaults so absent keys match the environment defaults
-    # rather than causing spurious signature mismatches.
-    _OBS_DEFAULTS = {"state_comm_enabled": False}
     signature["observation"] = _strip_non_dynamics_config_fields(
         {
-            key: observation_cfg.get(key, _OBS_DEFAULTS.get(key))
+            key: observation_cfg[key]
             for key in OBSERVATION_COMPARISON_KEYS
+            if key in observation_cfg
         }
     )
     return signature

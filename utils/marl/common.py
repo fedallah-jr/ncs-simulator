@@ -28,54 +28,6 @@ from utils.marl.obs_normalization import RunningObsNormalizer
 from utils.marl.vector_env import stack_vector_obs
 
 
-# Large finite negative value used for action masking.  ``exp(-1e9)`` underflows
-# to exactly 0 in float32, so softmax probabilities on masked entries are 0 and
-# argmax never picks them -- but unlike ``-inf``, ``0 * -1e9 = 0`` (not NaN), so
-# expressions like ``(action_onehot * log_probs).sum(-1)`` stay well-defined.
-CURRICULUM_MASK_NEG = -1e9
-
-
-def compute_broadcast_curriculum_mask(
-    global_step: int,
-    total_timesteps: int,
-    n_actions: int,
-    phase1_ratio: float,
-    device: torch.device,
-) -> Optional[torch.Tensor]:
-    """Return a logit mask for broadcast curriculum, or None when unneeded.
-
-    During Phase 1 (``global_step < phase1_ratio * total_timesteps``), actions
-    0 and 1 (the non-broadcast actions) are masked to ``CURRICULUM_MASK_NEG``
-    so agents are forced to broadcast.  During Phase 2 (remainder) no masking
-    is applied and the function returns ``None``.
-
-    The caller adds the returned tensor to raw logits before creating a
-    ``Categorical`` or computing ``log_softmax``.
-    """
-    if n_actions != 4:
-        return None
-    if global_step >= phase1_ratio * total_timesteps:
-        return None
-    mask = torch.zeros(n_actions, device=device)
-    mask[0] = CURRICULUM_MASK_NEG
-    mask[1] = CURRICULUM_MASK_NEG
-    return mask
-
-
-def curriculum_n_valid_actions(
-    global_step: int,
-    total_timesteps: int,
-    n_actions: int,
-    phase1_ratio: float,
-) -> int:
-    """Return the number of valid (unmasked) actions for the current phase."""
-    if n_actions != 4:
-        return n_actions
-    if global_step < phase1_ratio * total_timesteps:
-        return 2
-    return n_actions
-
-
 def select_device(device_str: str) -> torch.device:
     """Select torch device based on string specification."""
     if device_str == "cpu":
@@ -209,7 +161,7 @@ def select_actions_batched(
     if np.any(explore_mask):
         if action_mask is not None:
             # Valid actions are those whose mask entry is 0; masked entries
-            # hold a large negative value (see CURRICULUM_MASK_NEG).
+            # hold a large negative value.
             valid = (action_mask >= 0.0).cpu().numpy()
             valid_indices = np.where(valid)[0]
             random_actions = rng.choice(

@@ -1430,7 +1430,6 @@ class HASACLearner:
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=float(critic_lr))
 
         # Per-agent entropy temperature
-        self._user_supplied_target_entropy = target_entropy is not None
         if target_entropy is None:
             self.target_entropy = math.log(n_actions) * 0.98
         else:
@@ -1483,15 +1482,6 @@ class HASACLearner:
     def _build_critic_input(self, states: torch.Tensor, actions_onehot: torch.Tensor) -> torch.Tensor:
         """Concatenate global state with flattened one-hot joint actions."""
         return torch.cat([states, actions_onehot], dim=-1)
-
-    def update_target_entropy(self, n_valid_actions: int) -> None:
-        """Adjust target entropy for curriculum phase changes.
-
-        No-op when the user explicitly supplied ``--target-entropy``.
-        """
-        if self._user_supplied_target_entropy:
-            return
-        self.target_entropy = math.log(n_valid_actions) * 0.98
 
     def update(self, batch: MARLBatch, *, action_mask: Optional[torch.Tensor] = None) -> None:
         self.train_steps += 1

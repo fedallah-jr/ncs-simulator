@@ -30,8 +30,6 @@ from utils.reward_normalization import (
 class RewardDefinition:
     mode: str
     comm_penalty_alpha: float
-    broadcast_penalty_alpha: float = 0.0
-    omit_reward_alpha: float = 0.0
     normalize: bool = False  # Explicit flag; normalization is applied only when True.
     normalizer: Optional[RunningRewardNormalizer] = None
     no_normalization_scale: float = 1.0
@@ -245,17 +243,6 @@ class NCS_Env(gym.Env):
         self._prev_age_comm = np.zeros(
             (n_agents, n_agents), dtype=np.float32,
         )
-        self.state_comm_enabled = bool(
-            observation_cfg.get("state_comm_enabled", False)
-        )
-        if self.cevat_state and self.state_comm_enabled:
-            raise ValueError(
-                "observation.cevat_state and "
-                "observation.state_comm_enabled cannot be enabled together"
-            )
-        self._pending_broadcast: List[Optional[Tuple[np.ndarray, int]]] = [
-            None for _ in range(n_agents)
-        ]
 
         # Create a local RNG instance for this environment
         self.np_random, _ = gym.utils.seeding.np_random(seed)
@@ -263,7 +250,7 @@ class NCS_Env(gym.Env):
 
         self.action_space = spaces.Dict(
             {
-                f"agent_{i}": spaces.Discrete(4 if self.state_comm_enabled else 2)
+                f"agent_{i}": spaces.Discrete(2)
                 for i in range(n_agents)
             }
         )
@@ -291,16 +278,10 @@ class NCS_Env(gym.Env):
             if self.age_comm_enabled
             else 0
         )
-        self.state_comm_obs_dim = (
-            self.n_agents * self.state_dim
-            if self.state_comm_enabled
-            else 0
-        )
         self.local_obs_dim = int(
             self.local_obs_base_dim
             + self.error_comm_obs_dim
             + self.age_comm_obs_dim
-            + self.state_comm_obs_dim
         )
         self.obs_dim = (
             self.local_obs_dim * self.n_agents if self.cevat_state else self.local_obs_dim
@@ -439,7 +420,6 @@ class NCS_Env(gym.Env):
             )
         self.local_sensor_trackers: List[KalmanStateTracker] = []
         self.local_shadow_controllers: List[Controller] = []
-        self.broadcast_controllers: List[Controller] = []
         for i in range(self.n_agents):
             initial_estimate = np.zeros(self.state_dim)
             self.local_sensor_trackers.append(
@@ -452,18 +432,6 @@ class NCS_Env(gym.Env):
                     initial_covariance=self.initial_estimate_cov,
                 )
             )
-            if self.state_comm_enabled:
-                self.broadcast_controllers.append(
-                    Controller(
-                        agent_matrices[i][0],
-                        agent_matrices[i][1],
-                        self.K_list[i],
-                        initial_estimate,
-                        process_noise_cov=agent_matrices[i][2],
-                        measurement_noise_cov=self.agent_measurement_noise_covs[i],
-                        initial_covariance=self.initial_estimate_cov,
-                    )
-                )
             self.local_shadow_controllers.append(
                 Controller(
                     agent_matrices[i][0],
@@ -556,8 +524,6 @@ class NCS_Env(gym.Env):
                 "prev_error_sum": 0.0,
                 "curr_error_sum": 0.0,
                 "comm_penalty_sum": 0.0,
-                "broadcast_penalty_sum": 0.0,
-                "omit_reward_sum": 0.0,
                 "count": 0.0,
             }
             for i in range(self.n_agents)
@@ -566,8 +532,6 @@ class NCS_Env(gym.Env):
             "prev_error": 0.0,
             "curr_error": 0.0,
             "comm_penalty": 0.0,
-            "broadcast_penalty": 0.0,
-            "omit_reward": 0.0,
             "kf_info_gain": 0.0,
             "kf_info_gain_m": 0.0,
             "kf_info_gain_s": 0.0,
@@ -651,10 +615,6 @@ class NCS_Env(gym.Env):
         self._prev_age_comm = np.zeros(
             (self.n_agents, self.n_agents), dtype=np.float32,
         )
-        if self.state_comm_enabled:
-            self._pending_broadcast = [None for _ in range(self.n_agents)]
-            for controller in self.broadcast_controllers:
-                controller.reset(np.zeros(self.state_dim))
         for idx in range(self.n_agents):
             self.last_measurements[idx] = self.plants[idx].get_state().copy()
 
@@ -680,8 +640,7 @@ class NCS_Env(gym.Env):
         # We use state_index to clearly refer to which x[k] we're measuring
         state_index = self.timestep - 1
         agent_actions = [int(actions[f"agent_{i}"]) for i in range(self.n_agents)]
-        wants_send = [action in (1, 3) for action in agent_actions]
-        wants_broadcast = [action in (2, 3) for action in agent_actions]
+        wants_send = [action == 1 for action in agent_actions]
         for i in range(self.n_agents):
             self.last_kf_info_gains[i] = 0.0
             self.last_kf_info_gains_m[i] = 0.0
@@ -694,8 +653,6 @@ class NCS_Env(gym.Env):
         for i in range(self.n_agents):
             self.controllers[i].store_prior(state_index)
             self.local_shadow_controllers[i].store_prior(state_index)
-            if self.state_comm_enabled:
-                self.broadcast_controllers[i].store_prior(state_index)
 
         # Kalman filter measurement update (conditionally, based on packet delivery)
         # Note: predict() is called AFTER plant update to maintain correct timing
@@ -898,24 +855,6 @@ class NCS_Env(gym.Env):
             else:
                 self._time_since_last_send[i] += 1
 
-        if self.state_comm_enabled:
-            for j in range(self.n_agents):
-                pending = self._pending_broadcast[j]
-                if pending is None:
-                    continue
-                measurement, measurement_state_index = pending
-                self.broadcast_controllers[j].delayed_update(
-                    measurement,
-                    measurement_state_index,
-                )
-            self._pending_broadcast = [None for _ in range(self.n_agents)]
-            for i in range(self.n_agents):
-                if wants_broadcast[i]:
-                    self._pending_broadcast[i] = (
-                        np.asarray(self.last_sensor_measurements[i], dtype=float).copy(),
-                        state_index,
-                    )
-
         mode = self.reward_definition.mode
         for i in range(self.n_agents):
             covariance = self.controllers[i].P
@@ -967,9 +906,6 @@ class NCS_Env(gym.Env):
             self.controllers[i].predict()
             self.local_shadow_controllers[i].predict()
             self.local_sensor_trackers[i].predict(local_controls[i])
-            if self.state_comm_enabled:
-                self.broadcast_controllers[i].compute_control()
-                self.broadcast_controllers[i].predict()
 
         rewards = {}
         termination_triggered = False
@@ -1017,8 +953,6 @@ class NCS_Env(gym.Env):
             reward_value = components.pop("reward")
             combined_reward = reward_value
             combined_comm_penalty = components.get("comm_penalty", 0.0)
-            combined_broadcast_penalty = components.get("broadcast_penalty", 0.0)
-            combined_omit_reward = components.get("omit_reward", 0.0)
             reward_components = components
 
             reward = float(combined_reward)
@@ -1029,8 +963,6 @@ class NCS_Env(gym.Env):
             stats["prev_error_sum"] += float(prev_error)
             stats["curr_error_sum"] += float(curr_error)
             stats["comm_penalty_sum"] += float(combined_comm_penalty)
-            stats["broadcast_penalty_sum"] += float(combined_broadcast_penalty)
-            stats["omit_reward_sum"] += float(combined_omit_reward)
             stats["count"] += 1
             self.last_errors[i] = curr_error
 
@@ -1270,18 +1202,6 @@ class NCS_Env(gym.Env):
         base_mode = reward_cfg.get("state_error_reward", "absolute")
         base_normalize = bool(reward_cfg.get("normalize", False))
         base_comm_penalty_alpha = float(reward_cfg.get("comm_penalty_alpha", 0.0))
-        base_broadcast_penalty_alpha = float(
-            reward_cfg.get("broadcast_penalty_alpha", 0.0)
-        )
-        base_omit_reward_alpha = float(reward_cfg.get("omit_reward_alpha", 0.0))
-        if (
-            base_broadcast_penalty_alpha > 0.0 or base_omit_reward_alpha > 0.0
-        ) and not self.state_comm_enabled:
-            raise ValueError(
-                "reward.broadcast_penalty_alpha and reward.omit_reward_alpha "
-                "require observation.state_comm_enabled=true (broadcast actions "
-                "2/3 only exist in state_comm mode)."
-            )
         no_normalization_scale = reward_cfg.get("no_normalization_scale", 1.0)
         if no_normalization_scale is None:
             no_normalization_scale = 1.0
@@ -1295,8 +1215,6 @@ class NCS_Env(gym.Env):
         return RewardDefinition(
             mode=str(base_mode),
             comm_penalty_alpha=base_comm_penalty_alpha,
-            broadcast_penalty_alpha=base_broadcast_penalty_alpha,
-            omit_reward_alpha=base_omit_reward_alpha,
             normalize=base_normalize,
             normalizer=None,
             no_normalization_scale=no_normalization_scale,
@@ -1642,8 +1560,6 @@ class NCS_Env(gym.Env):
             "mode": definition.mode,
             "normalization_gamma": float(self.reward_normalization_gamma),
             "comm_penalty_alpha": float(definition.comm_penalty_alpha),
-            "broadcast_penalty_alpha": float(definition.broadcast_penalty_alpha),
-            "omit_reward_alpha": float(definition.omit_reward_alpha),
             "state_cost_matrix": np.asarray(self.state_cost_matrix).tolist(),
             "comm_recent_window": int(self.comm_recent_window),
             "comm_throughput_window": int(self.comm_throughput_window),
@@ -1716,18 +1632,12 @@ class NCS_Env(gym.Env):
     ) -> Dict[str, float]:
         """Compute reward and components for the given reward definition."""
         comm_penalty = 0.0
-        if not self.perfect_communication and action in (1, 3):
+        if not self.perfect_communication and action == 1:
             penalty_alpha = definition.comm_penalty_alpha
             if penalty_alpha > 0:
                 recent_tx = self._recent_transmission_count(agent_idx)
                 throughput_estimate = self._compute_agent_throughput(agent_idx)
                 comm_penalty = penalty_alpha * (recent_tx / throughput_estimate)
-        broadcast_penalty = 0.0
-        if action in (2, 3) and definition.broadcast_penalty_alpha > 0:
-            broadcast_penalty = definition.broadcast_penalty_alpha
-        omit_reward = 0.0
-        if action in (0, 1) and definition.omit_reward_alpha > 0:
-            omit_reward = definition.omit_reward_alpha
 
         if definition.mode == "absolute":
             error_reward = -curr_error
@@ -1748,7 +1658,7 @@ class NCS_Env(gym.Env):
         else:
             raise ValueError(f"Unsupported reward mode: {definition.mode}")
 
-        reward_value = float(error_reward - comm_penalty - broadcast_penalty + omit_reward)
+        reward_value = float(error_reward - comm_penalty)
 
         if apply_normalization:
             reward_value = self._normalize_reward_value(agent_idx, reward_value)
@@ -1756,8 +1666,6 @@ class NCS_Env(gym.Env):
             "prev_error": float(prev_error),
             "curr_error": float(curr_error),
             "comm_penalty": float(comm_penalty),
-            "broadcast_penalty": float(broadcast_penalty),
-            "omit_reward": float(omit_reward),
             "kf_info_gain": float(info_gain),
             "reward": reward_value,
         }
@@ -1835,9 +1743,6 @@ class NCS_Env(gym.Env):
             if self.age_comm_enabled:
                 obs_values[cursor : cursor + self.age_comm_obs_dim] = 0.0
                 cursor += self.age_comm_obs_dim
-            if self.state_comm_enabled:
-                obs_values[cursor : cursor + self.state_comm_obs_dim] = 0.0
-                cursor += self.state_comm_obs_dim
 
             observations[f"agent_{i}"] = obs_values
             current_throughputs.append(float(throughputs[0]) if throughputs else 0.0)
@@ -1862,20 +1767,6 @@ class NCS_Env(gym.Env):
                     error_comm_end : age_comm_end
                 ] = self._prev_age_comm[i]
             self._prev_age_comm = routed_age
-
-        if self.state_comm_enabled:
-            for i in range(self.n_agents):
-                state_comm_block = np.zeros(self.state_comm_obs_dim, dtype=np.float32)
-                for j in range(self.n_agents):
-                    if j == i:
-                        continue
-                    start = j * self.state_dim
-                    state_comm_block[start : start + self.state_dim] = (
-                        self.broadcast_controllers[j].x_hat.astype(np.float32)
-                    )
-                observations[f"agent_{i}"][
-                    age_comm_end : age_comm_end + self.state_comm_obs_dim
-                ] = state_comm_block
 
         if self.cevat_state:
             joint_obs = np.concatenate(
